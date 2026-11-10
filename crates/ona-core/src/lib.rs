@@ -5,6 +5,7 @@
 pub mod e2ee;
 pub mod gate;
 pub mod journal;
+pub mod quote;
 pub mod reader;
 pub mod remote;
 pub mod vault;

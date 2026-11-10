@@ -115,6 +115,17 @@ if the signature comes from the attested model key (`provider_tee`) and covers t
 `max_tokens`, and a per-client budget stops calls before they spend. The relay sees the usage counters, so pricing must be flat per
 request. TDX and NVIDIA quotes are not verified yet.
 
+`crates/ona-core/src/quote.rs` checks a model attestation, not yet called by the client. **It is worth nothing until the Intel signature
+check is implemented:** that check (meant for `dcap-qvl`) and NVIDIA's service are traits with no implementation, so nothing passes outside
+tests, and without the signature anyone can write a quote holding any value. With it, a quote passes only if MRTD and RTMR0 to RTMR2 are
+on the caller's list, the event log replays to RTMR3, its `os-image-hash` and `compose-hash` events name a listed image and the hash of the
+reported `app_compose`, `report_data = signing_address || nonce` (32 + 32 bytes), `mr_config_id = 0x01 || compose hash || 15 zero bytes`,
+the enclave is not in debug mode, and the deployment hash is listed. `mr_config_id` alone proves nothing: the host chooses it. **The GPU
+evidence is not bound to the TDX quote:** its nonce shows it is fresh, but a relay can copy a genuine payload from another machine.
+Formats were checked on one real report (2026-11-10) that NEAR AI's official verifier accepted, not against the verifier's source. RTMR3
+events carry no digest in the log: each is `sha384(event_type as u32 little-endian || ":" || event || ":" || payload)`. The listed values
+in `observed_2026_11_10` were seen in that report, not published by NEAR AI, and change with each image update.
+
 ## Wallet (`crates/ona-wallet`)
 Append-only encrypted file, synced before the action it protects: token secrets before the deposit, spending mark before a spend.
 Removing lines from the end is not detected. Key storage in the operating system's keychain is not implemented.
