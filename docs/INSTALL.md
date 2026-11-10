@@ -56,6 +56,28 @@ NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox cargo run -p ona-sandbox
 on a local node, calls every method, prints the gas burnt, then runs the real signer loop and a real relay exchange against the node.
 The node crashes when started inside a macOS Seatbelt sandbox, so run it from a normal terminal.
 
+## Deploy the contracts
+
+Testnet or a local node only: the tool refuses mainnet. Build both contracts as in `verify.sh`, and create the signer keys as below. Each
+contract becomes `mint.<parent>` or `registry.<parent>`, created and initialized in one transaction, with no access key.
+
+| Variable | Value |
+|---|---|
+| `ONA_RPC_URL`, `ONA_NETWORK` | NEAR RPC endpoint and network name |
+| `ONA_PARENT_ACCOUNT`, `ONA_PARENT_KEY_FILE` | funded parent account, and its key in a file readable by its owner only |
+| `ONA_SIGNER_KEYS_FILE` | mint only: the file from `ona-signer init-keys` |
+| `ONA_SIGNER_ACCOUNT`, `ONA_RELAY_ACCOUNT`, `ONA_GUARDIAN_ACCOUNT` | mint only: the three roles |
+| `ONA_REGISTRY_OWNER_1`, `ONA_REGISTRY_OWNER_2`, `ONA_AGGREGATOR_ACCOUNT` | registry only |
+| `ONA_FUNDING_NEAR` | optional, NEAR sent to the new account, default 5 |
+| `ONA_BASE_VALUE_MILLI_NEAR` | optional, mint only, value of the lowest tier, default 100 |
+| `ONA_CIRCULATION_CAP`, `ONA_HOURLY_REDEEM_CAP` | optional, mint only, per tier, default 1000 and 100 |
+| `ONA_MINT_WASM`, `ONA_REGISTRY_WASM` | optional, paths to the built contracts |
+
+```
+cargo run -p ona-deploy -- mint
+cargo run -p ona-deploy -- registry
+```
+
 ## Run the signer
 
 ```

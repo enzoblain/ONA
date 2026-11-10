@@ -44,6 +44,7 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-token` blind BLS tokens | done | native tests |
 | `ona-mint` contract | done, gas measured ([SPEC](SPEC.md#measured-gas)) | mocked NEAR VM with real BLS and ed25519 host functions, and a local NEAR node |
 | `ona-registry` contract | done | mocked NEAR VM only |
+| `ona-deploy` deployment tool | done, refuses mainnet, testnet not tried yet | unit tests |
 | `ona-near` RPC client | done | unit tests, and a local NEAR node through `ona-sandbox` |
 | `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
 | `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done; the `ona-relay` program has not run yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
