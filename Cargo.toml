@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ona-token",
+    "crates/ona-near",
     "crates/ona-mint",
     "crates/ona-registry",
     "crates/ona-signer",

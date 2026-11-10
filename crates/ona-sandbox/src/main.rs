@@ -1,219 +1,34 @@
 //! Deploys `ona-mint` on a local `near-sandbox` node, runs every method with real transactions,
-//! prints the gas burnt and checks the reserve after each step.
-//!
-//! The RPC client is written by hand (borsh by hand, HTTP over a local socket) because the usual
-//! client crates cannot be unpacked in this build sandbox.
-
-use std::io::{Read, Write};
-use std::net::TcpStream;
+//! prints the gas burnt and checks the reserve after each step. It then runs the real signer loop
+//! and the real relay exchange against the same node.
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
+use ona_near::{Action, Client, Outcome, TGAS};
+use ona_server::mock::MockModel;
+use ona_server::near::NearRelayChain;
+use ona_server::{Config, MemoryStore, Relay};
+use ona_signer::near::NearChain;
+use ona_signer::{KeyStore, MemoryDurable, Signer};
 use ona_token::{
-    claim_digest, keygen, redeem_digest, sign_blinded, sign_digest, spend_digest, token_dst,
-    ChangeOut, PendingToken, SecretKey, Token, G2_LEN,
+    blind, claim_digest, keygen, redeem_digest, sign_blinded, sign_digest, spend_digest, token_dst, unblind,
+    ChangeOut, PendingToken, SecretKey, Token, G1_LEN, G2_LEN,
 };
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 const NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 const MILLI: u128 = NEAR / 1000;
 const UNIT: u128 = 100 * MILLI;
-const TGAS: u64 = 1_000_000_000_000;
 const STORAGE_PER_TOKEN: u128 = MILLI;
 const ISSUE_FEE_PER_TOKEN: u128 = 2 * MILLI;
 const WASM: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/wasm32-unknown-unknown/contract/ona_mint.wasm"
 );
-
-struct Rpc {
-    host_port: String,
-}
-
-impl Rpc {
-    fn post(&self, method: &str, params: Value) -> Result<Value> {
-        let body = json!({"jsonrpc":"2.0","id":"1","method":method,"params":params}).to_string();
-        let mut stream = TcpStream::connect(&self.host_port).context("connect to sandbox")?;
-        write!(
-            stream,
-            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )?;
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw)?;
-        let text = String::from_utf8_lossy(&raw).to_string();
-        let (head, payload) = text.split_once("\r\n\r\n").ok_or_else(|| anyhow!("bad HTTP response"))?;
-        let payload = if head.to_lowercase().contains("transfer-encoding: chunked") {
-            dechunk(payload)?
-        } else {
-            payload.to_string()
-        };
-        let v: Value = serde_json::from_str(&payload).with_context(|| format!("JSON: {payload}"))?;
-        if let Some(err) = v.get("error") {
-            bail!("rpc error: {err}");
-        }
-        Ok(v["result"].clone())
-    }
-
-    fn query(&self, params: Value) -> Result<Value> {
-        self.post("query", params)
-    }
-
-    fn view(&self, account: &str, method: &str, args: Value) -> Result<Value> {
-        let r = self.query(json!({
-            "request_type":"call_function","finality":"optimistic","account_id":account,
-            "method_name":method,"args_base64":B64.encode(args.to_string()),
-        }))?;
-        let bytes: Vec<u8> = r["result"]
-            .as_array()
-            .ok_or_else(|| anyhow!("view failed: {r}"))?
-            .iter()
-            .map(|b| b.as_u64().unwrap_or(0) as u8)
-            .collect();
-        Ok(serde_json::from_slice(&bytes)?)
-    }
-
-    fn balance(&self, account: &str) -> Result<Option<u128>> {
-        match self.query(json!({"request_type":"view_account","finality":"optimistic","account_id":account})) {
-            Ok(r) => Ok(Some(r["amount"].as_str().unwrap_or("0").parse()?)),
-            Err(e) if e.to_string().contains("UNKNOWN_ACCOUNT") => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-}
-
-fn dechunk(mut s: &str) -> Result<String> {
-    let mut out = String::new();
-    loop {
-        let (len, rest) = s.split_once("\r\n").ok_or_else(|| anyhow!("bad chunk"))?;
-        let n = usize::from_str_radix(len.trim(), 16)?;
-        if n == 0 {
-            return Ok(out);
-        }
-        out.push_str(&rest[..n]);
-        s = &rest[n + 2..];
-    }
-}
-
-enum Action {
-    Create,
-    Deploy(Vec<u8>),
-    Call { method: String, args: Vec<u8>, gas: u64, deposit: u128 },
-    Transfer(u128),
-    AddFullKey([u8; 32]),
-}
-
-fn put_str(out: &mut Vec<u8>, s: &[u8]) {
-    out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-    out.extend_from_slice(s);
-}
-
-fn encode_action(out: &mut Vec<u8>, a: &Action) {
-    match a {
-        Action::Create => out.push(0),
-        Action::Deploy(code) => {
-            out.push(1);
-            put_str(out, code);
-        }
-        Action::Call { method, args, gas, deposit } => {
-            out.push(2);
-            put_str(out, method.as_bytes());
-            put_str(out, args);
-            out.extend_from_slice(&gas.to_le_bytes());
-            out.extend_from_slice(&deposit.to_le_bytes());
-        }
-        Action::Transfer(amount) => {
-            out.push(3);
-            out.extend_from_slice(&amount.to_le_bytes());
-        }
-        Action::AddFullKey(pk) => {
-            out.push(5);
-            out.push(0);
-            out.extend_from_slice(pk);
-            out.extend_from_slice(&0u64.to_le_bytes());
-            out.push(1);
-        }
-    }
-}
-
-struct Chain {
-    rpc: Rpc,
-    key: SigningKey,
-}
-
-struct Outcome {
-    tgas: f64,
-    failure: Option<String>,
-    value: Value,
-}
-
-impl Chain {
-    fn pk(&self) -> [u8; 32] {
-        self.key.verifying_key().to_bytes()
-    }
-
-    fn send(&self, signer: &str, receiver: &str, actions: Vec<Action>) -> Result<Outcome> {
-        let pk = format!("ed25519:{}", bs58::encode(self.pk()).into_string());
-        let info = self.rpc.query(json!({
-            "request_type":"view_access_key","finality":"optimistic",
-            "account_id":signer,"public_key":pk,
-        }))?;
-        if info.get("error").is_some() {
-            bail!("no key for {signer}: {info}");
-        }
-        let nonce = info["nonce"].as_u64().ok_or_else(|| anyhow!("nonce: {info}"))? + 1;
-        let hash = bs58::decode(info["block_hash"].as_str().unwrap_or_default()).into_vec()?;
-
-        let mut tx = Vec::new();
-        put_str(&mut tx, signer.as_bytes());
-        tx.push(0);
-        tx.extend_from_slice(&self.pk());
-        tx.extend_from_slice(&nonce.to_le_bytes());
-        put_str(&mut tx, receiver.as_bytes());
-        tx.extend_from_slice(&hash);
-        tx.extend_from_slice(&(actions.len() as u32).to_le_bytes());
-        for a in &actions {
-            encode_action(&mut tx, a);
-        }
-        let digest: [u8; 32] = Sha256::digest(&tx).into();
-        let sig = self.key.sign(&digest).to_bytes();
-        let mut signed = tx;
-        signed.push(0);
-        signed.extend_from_slice(&sig);
-
-        let r = self.rpc.post("broadcast_tx_commit", json!([B64.encode(&signed)]))?;
-        let mut burnt = r["transaction_outcome"]["outcome"]["gas_burnt"].as_u64().unwrap_or(0);
-        for receipt in r["receipts_outcome"].as_array().into_iter().flatten() {
-            burnt += receipt["outcome"]["gas_burnt"].as_u64().unwrap_or(0);
-        }
-        let failure = r["status"].get("Failure").map(|f| f.to_string());
-        let value = r["status"]
-            .get("SuccessValue")
-            .and_then(|v| v.as_str())
-            .and_then(|v| B64.decode(v).ok())
-            .and_then(|v| serde_json::from_slice(&v).ok())
-            .unwrap_or(Value::Null);
-        Ok(Outcome { tgas: burnt as f64 / TGAS as f64, failure, value })
-    }
-
-    fn call(&self, signer: &str, contract: &str, method: &str, args: Value, deposit: u128) -> Result<Outcome> {
-        self.send(
-            signer,
-            contract,
-            vec![Action::Call {
-                method: method.into(),
-                args: args.to_string().into_bytes(),
-                gas: 1000 * TGAS,
-                deposit,
-            }],
-        )
-    }
-}
 
 fn b64(bytes: &[u8]) -> String {
     B64.encode(bytes)
@@ -228,7 +43,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 struct Env {
-    chain: Chain,
+    chain: Client,
     mint: String,
     signer: String,
     relay: String,
@@ -253,7 +68,7 @@ impl Env {
 
     /// Invariant I1 on the real runtime, including real storage accounting.
     fn check_reserve(&mut self, label: &str) -> Result<()> {
-        let s = self.chain.rpc.view(&self.mint, "reserve_status", json!({}))?;
+        let s = self.chain.view(&self.mint, "reserve_status", json!({}))?;
         let n = |k: &str| -> Result<i128> { Ok(s[k].as_str().unwrap_or("0").parse()?) };
         let margin = n("balance")? - n("storage_cost")? - n("liabilities")?;
         if s["solvent"] != json!(true) {
@@ -331,19 +146,18 @@ async fn main() -> Result<()> {
     let sandbox = near_sandbox::Sandbox::start_sandbox_with_config(config)
         .await
         .map_err(|e| anyhow!("{e:?}"))?;
-    let host_port = sandbox.rpc_addr.trim_start_matches("http://").trim_end_matches('/').to_string();
-    let rpc = Rpc { host_port };
+    let rpc_url = sandbox.rpc_addr.trim_end_matches('/').to_string();
 
     let genesis = near_sandbox::GenesisAccount::default();
     let root = genesis.account_id.to_string();
     let secret = genesis.private_key.to_string();
     let raw = bs58::decode(secret.trim_start_matches("ed25519:")).into_vec()?;
     let seed: [u8; 32] = raw[..32].try_into()?;
-    let chain = Chain { rpc, key: SigningKey::from_bytes(&seed) };
+    let chain = Client::new(&rpc_url, SigningKey::from_bytes(&seed));
 
     let sub = |name: &str| format!("{name}.{root}");
     for name in ["signer", "relay", "guardian", "alice", "bob"] {
-        let actions = vec![Action::Create, Action::Transfer(500 * NEAR), Action::AddFullKey(chain.pk())];
+        let actions = vec![Action::Create, Action::Transfer(500 * NEAR), Action::AddFullKey(chain.public_key())];
         let o = chain.send(&root, &sub(name), actions)?;
         if let Some(f) = o.failure {
             bail!("create {name}: {f}");
@@ -381,7 +195,7 @@ async fn main() -> Result<()> {
         bail!("deploy: {f}");
     }
 
-    let keys = chain.rpc.query(json!({"request_type":"view_access_key_list","finality":"optimistic","account_id":mint}))?;
+    let keys = chain.query(json!({"request_type":"view_access_key_list","finality":"optimistic","account_id":mint}))?;
     let key_count = keys["keys"].as_array().map_or(usize::MAX, Vec::len);
     println!("access keys on the mint account: {key_count}");
 
@@ -399,12 +213,12 @@ async fn main() -> Result<()> {
     let mut batch = e.issue(1, 8)?;
     let (t, owner) = batch.pop().unwrap();
     let implicit = hex(&t.pk);
-    if e.chain.rpc.balance(&implicit)?.is_some() {
+    if e.chain.balance(&implicit)?.is_some() {
         bail!("implicit account unexpectedly exists");
     }
     let o = e.redeem(&t, &owner)?;
     e.record("redeem", &o)?;
-    let got = e.chain.rpc.balance(&implicit)?.ok_or_else(|| anyhow!("implicit account not created"))?;
+    let got = e.chain.balance(&implicit)?.ok_or_else(|| anyhow!("implicit account not created"))?;
     println!("redeem paid the implicit account: {got} yocto (expected {})", (UNIT << 1) - 10 * MILLI);
 
     let o = e.redeem(&t, &owner)?;
@@ -425,10 +239,10 @@ async fn main() -> Result<()> {
     // spend without change
     let (t, owner) = batch.pop().unwrap();
     let fee = 20 * MILLI;
-    let before = e.chain.rpc.balance(&bob)?.unwrap_or(0);
+    let before = e.chain.balance(&bob)?.unwrap_or(0);
     let o = e.spend_call(&t, &owner, &bob, (UNIT << 1) - fee, fee, &[])?;
     e.record("spend, no change", &o)?;
-    println!("spend paid the recipient: {} yocto", e.chain.rpc.balance(&bob)?.unwrap_or(0) - before);
+    println!("spend paid the recipient: {} yocto", e.chain.balance(&bob)?.unwrap_or(0) - before);
 
     // spend with change, then the change is issued and redeemed
     let (t, owner) = batch.pop().unwrap();
@@ -437,7 +251,7 @@ async fn main() -> Result<()> {
     let fee = 50 * MILLI;
     let o = e.spend_call(&t, &owner, &bob, UNIT - fee, fee, &change)?;
     e.record("spend, 1 change", &o)?;
-    let list = e.chain.rpc.view(&mint, "pending_deposits", json!({"from":"0","limit":64}))?;
+    let list = e.chain.view(&mint, "pending_deposits", json!({"from":"0","limit":64}))?;
     let id = list.as_array().and_then(|l| l.last()).map(|r| r["id"].clone()).ok_or_else(|| anyhow!("no pending record"))?;
     let sig = sign_blinded(&e.sks[0], &pending.blinded).map_err(|x| anyhow!("{x}"))?;
     let signer = e.signer.clone();
@@ -453,12 +267,12 @@ async fn main() -> Result<()> {
     // spend to an account that does not exist
     let (t, owner) = batch.pop().unwrap();
     let ghost = format!("ghost-does-not-exist.{root}");
-    let before = e.chain.rpc.balance(&mint)?.unwrap_or(0);
+    let before = e.chain.balance(&mint)?.unwrap_or(0);
     let fee = 20 * MILLI;
     let amount = (UNIT << 1) - fee;
     let o = e.spend_call(&t, &owner, &ghost, amount, fee, &[])?;
-    let after = e.chain.rpc.balance(&mint)?.unwrap_or(0);
-    let returned = e.chain.rpc.balance(&hex(&t.pk))?.unwrap_or(0);
+    let after = e.chain.balance(&mint)?.unwrap_or(0);
+    let returned = e.chain.balance(&hex(&t.pk))?.unwrap_or(0);
     println!(
         "spend to a missing account: top-level failure={:?}, mint balance change {} yocto, returned to the owner {returned} of {amount}",
         o.failure.is_some(),
@@ -482,6 +296,94 @@ async fn main() -> Result<()> {
         println!("relay_claim x{n}: {ok} accepted");
     }
 
+    // The real signer loop: it finds a deposit, locks it, reads the lock back, then issues.
+    let issued_before = e.chain.view(&mint, "get_denom", json!({"denom_id":0}))?["counters"]["issued"].as_u64().unwrap_or(0);
+    e.deposit(0, 2)?;
+    let keys: Vec<SecretKey> = e
+        .sks
+        .iter()
+        .map(|k| SecretKey::from_bytes(&k.to_bytes()))
+        .collect::<Result<_, _>>()
+        .map_err(|x| anyhow!("{x}"))?;
+    let mut near_chain = NearChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), e.signer.clone(), mint.clone());
+    let mut signer_loop = Signer::new(KeyStore::from_keys(keys), MemoryDurable::default());
+    signer_loop.check_keys(&mut near_chain).map_err(|x| anyhow!(x))?;
+    let mut issued = false;
+    for _ in 0..60 {
+        let report = signer_loop.tick(&mut near_chain).map_err(|x| anyhow!(x))?;
+        if !report.skipped.is_empty() {
+            println!("signer skipped: {:?}", report.skipped);
+        }
+        if !report.issued.is_empty() {
+            issued = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    let issued_after = e.chain.view(&mint, "get_denom", json!({"denom_id":0}))?["counters"]["issued"].as_u64().unwrap_or(0);
+    println!("real signer loop issued: {issued}, tokens {issued_before} -> {issued_after}");
+    if !issued || issued_after != issued_before + 2 {
+        bail!("the signer loop did not issue the deposit");
+    }
+    e.check_reserve("signer loop")?;
+
+    // The real relay: credit claimed on chain, request tokens signed, then one model call.
+    let (credit, credit_owner) = e.issue(0, 1)?.pop().ok_or_else(|| anyhow!("no credit"))?;
+    let relay_chain = NearRelayChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), relay.clone(), mint.clone());
+    let config = Config {
+        mint: mint.clone(),
+        relay: relay.clone(),
+        mint_dst: e.dst.clone(),
+        credit_key: e.pks[0],
+        tokens_per_credit: 2,
+        max_tokens_per_request: 100,
+    };
+    let mut relay_node = Relay::new(MemoryStore::default(), relay_chain, MockModel, config, keygen(&mut OsRng));
+    let request_dst = relay_node.request_dst().to_vec();
+    let mut wallet = Vec::new();
+    for _ in 0..2 {
+        let mut x = [0u8; 32];
+        OsRng.fill_bytes(&mut x);
+        let (r, point) = blind(&x, &request_dst, &mut OsRng);
+        wallet.push((x, r, hex(&point)));
+    }
+    let digest = claim_digest(&mint, &relay, &credit.nullifier());
+    let body = json!({
+        "token": hex(&credit.to_bytes()),
+        "owner_sig": hex(&sign_digest(&credit_owner, &digest)),
+        "blinded": wallet.iter().map(|w| w.2.clone()).collect::<Vec<_>>(),
+    });
+    let (status, reply) = relay_node.exchange(&body);
+    if status != 202 {
+        bail!("exchange not accepted: {status} {reply}");
+    }
+    let claimed = relay_node.flush().map_err(|x| anyhow!(x))?;
+    let (status, reply) = relay_node.exchange(&body);
+    println!("real relay exchange: {claimed} claim accepted on chain, status {status}");
+    if status != 200 {
+        bail!("exchange did not complete: {status} {reply}");
+    }
+    e.check_reserve("relay exchange")?;
+    let spent_by_relay = e.chain.view(&mint, "spent_by_relay", json!({"nf":b64(&credit.nullifier())}))?;
+    println!("nullifier recorded as claimed by the relay: {spent_by_relay}");
+
+    let sig_hex = reply["signatures"][0].as_str().ok_or_else(|| anyhow!("no signature"))?;
+    let sig_bytes: Vec<u8> = (0..sig_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&sig_hex[i..i + 2], 16))
+        .collect::<Result<_, _>>()?;
+    let blind_sig: [u8; G1_LEN] = sig_bytes.try_into().map_err(|_| anyhow!("bad signature length"))?;
+    let unblinded = unblind(&blind_sig, &wallet[0].1).map_err(|x| anyhow!("{x}"))?;
+    let mut request_token = wallet[0].0.to_vec();
+    request_token.extend_from_slice(&unblinded);
+    let (status, reply) = relay_node.chat(&json!({"token":hex(&request_token),"prompt":"bonjour"}));
+    println!("chat with a request token: status {status}, {reply}");
+    if status != 200 {
+        bail!("chat failed: {status} {reply}");
+    }
+    let (status, _) = relay_node.chat(&json!({"token":hex(&request_token),"prompt":"encore"}));
+    println!("same request token used twice: status {status}");
+
     let guardian = e.guardian.clone();
     let o = e.chain.call(&guardian, &mint, "halt", json!({}), 0)?;
     e.record("halt", &o)?;
@@ -495,7 +397,7 @@ async fn main() -> Result<()> {
     for (label, tgas) in &e.rows {
         println!("  {label:<34} {tgas:>9.3}");
     }
-    let s = e.chain.rpc.view(&mint, "reserve_status", json!({}))?;
+    let s = e.chain.view(&mint, "reserve_status", json!({}))?;
     println!("\nfinal reserve: {s}");
     Ok(())
 }

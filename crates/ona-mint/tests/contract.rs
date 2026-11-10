@@ -386,6 +386,16 @@ fn relay_claim_collects_and_skips_bad_items() {
     let result = h.call(&relay(), 0, |m| m.relay_claim(items));
     assert_eq!(result, vec![true, false, false, false, true]);
     assert_eq!(h.paid_to(&relay()), 2 * UNIT);
+
+    context(&alice(), 0, h.balance, h.storage, h.now);
+    assert!(h.mint.spent_by_relay(b64(&t1.nullifier())), "the relay can recognize its own claim");
+    assert!(h.mint.is_spent(b64(&t1.nullifier())));
+    assert!(!h.mint.spent_by_relay(b64(&t3.nullifier())), "an unspent token");
+
+    h.call(&bob(), 0, |m| rd(m, &t3));
+    context(&alice(), 0, h.balance, h.storage, h.now);
+    assert!(h.mint.is_spent(b64(&t3.nullifier())));
+    assert!(!h.mint.spent_by_relay(b64(&t3.nullifier())), "redeemed by its owner, not the relay");
 }
 
 #[test]

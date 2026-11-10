@@ -1,0 +1,15 @@
+[package]
+name = "ona-near"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+bs58 = "0.5"
+ed25519-dalek = "2"
+serde_json = "1"
+sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["rustls"] }

@@ -3,8 +3,8 @@
 Built at NEAR HACKATHON · Tracks: to be confirmed · Network: NEAR testnet (planned) · Not audited
 
 > **Status: early prototype, not audited.** The token crypto, the two contracts, the signer and relay logic, the wallet and the
-> local mission core exist and pass their tests. They run against a simulated chain, a fake model and a fake web. The contracts have
-> not yet run on a real NEAR node. **Do not use real funds.** See [what works today](#what-works-today).
+> local mission core exist and pass their tests. The mint contract has run on a local NEAR node, with measured gas. The model and the
+> web are still fake, and nothing is deployed on testnet. **Do not use real funds.** See [what works today](#what-works-today).
 
 ## What it is
 
@@ -42,9 +42,11 @@ content, but the requests, the payment and the agent's actions still identify yo
 | Part | State | Tested on |
 |---|---|---|
 | `ona-token` blind BLS tokens | done | native tests |
-| `ona-mint`, `ona-registry` contracts | done, gas not measured | mocked NEAR VM with real BLS and ed25519 host functions |
-| `ona-signer` issuing loop | logic done, no RPC client | fake chain |
-| `ona-server` relay | logic and HTTP done, no RPC client | fake chain and model |
+| `ona-mint` contract | done, gas measured ([SPEC](SPEC.md#measured-gas)) | mocked NEAR VM with real BLS and ed25519 host functions, and a local NEAR node |
+| `ona-registry` contract | done | mocked NEAR VM only |
+| `ona-near` RPC client | done | unit tests, and a local NEAR node through `ona-sandbox` |
+| `ona-signer` issuing loop | done, not yet run against a node | fake chain |
+| `ona-server` relay | logic, HTTP and chain client done, not yet run against a node | fake chain and model |
 | `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | Desktop app, iOS app | not in this repository yet | none |
@@ -63,7 +65,7 @@ cargo run -p ona-server --bin ona-mock-relay -- 8787     # a fake relay on local
 ```
 
 To measure gas on a local node, build the contract as in `verify.sh`, set `NEAR_SANDBOX_BIN_PATH` to a `near-sandbox` binary, and run
-`cargo run -p ona-sandbox`. This harness has not completed a run yet.
+`cargo run -p ona-sandbox`.
 
 ## Known limitations
 

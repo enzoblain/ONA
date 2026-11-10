@@ -9,7 +9,26 @@ gas harness.
 
 ## Curve choice
 Message and signature in **G1**, public key in **G2**. 48-byte tokens. All points reach `pairing_check`, which rejects
-non-subgroup points on NEAR. Gas figures are not measured yet (see `crates/ona-sandbox`).
+non-subgroup points on NEAR.
+
+## Measured gas
+`crates/ona-sandbox` on near-sandbox 2.13.4, 2026-11-10. Tgas burnt by the whole transaction, including its receipts.
+
+| Operation | Tgas |
+|---|---|
+| deploy + `new` (4 tiers, 229 KB wasm) | 62.8 |
+| `deposit` x1 / x64 | 3.0 / 4.4 |
+| `lock` | 1.9 to 2.4 |
+| `issue` x1 / x8 / x32 / x64 | 9.5 / 57.6 / 222.5 / 442.5 |
+| `redeem` | 19.0 |
+| `spend`, no change / one change | 13.4 / 14.1 |
+| `relay_claim` x1 / x8 / x32 | 10.6 / 68.0 / 264.6 |
+| `halt` | 1.7 |
+
+`issue` costs about 6.9 Tgas per token, and `relay_claim` about 8.3. These runs attached 1000 Tgas; the limit on testnet is not verified.
+
+The same run confirmed: the deployed account has no access key, a transfer to a missing account comes back to the token's own implicit
+account, an outsider cannot call the payout callback, and the reserve stayed solvent after every step.
 
 ## Token
 | Field | Size | Role |
@@ -91,6 +110,6 @@ Removing lines from the end is not detected. Key storage in the operating system
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit
-route that exists only in that binary). No RPC client, padded batches, Tor or enclave yet. Credit exchange writes state durably before each
+route that exists only in that binary). `NearRelayChain` connects it to the contract. No padded batches, real model, Tor or enclave yet. Credit exchange writes state durably before each
 irreversible step and signs only after the chain confirms. Request tokens are recorded as used before the model call. A reply
 over the per-request budget is withheld.

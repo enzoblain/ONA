@@ -7,6 +7,7 @@
 
 pub mod http;
 pub mod mock;
+pub mod near;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};

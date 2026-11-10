@@ -1,7 +1,9 @@
 //! `ona-signer`: the issuing loop. Has no network input: it reads the chain, signs, writes back.
 //!
-//! The chain is behind the `Chain` trait. The RPC implementation is not written yet.
+//! The chain is behind the `Chain` trait; `near::NearChain` is the RPC implementation.
 //! Keys live in a local file for now. Sealing them in an enclave is a later step.
+
+pub mod near;
 
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -131,6 +133,10 @@ pub struct KeyStore {
 }
 
 impl KeyStore {
+    pub fn from_keys(keys: Vec<SecretKey>) -> Self {
+        Self { keys }
+    }
+
     pub fn generate(count: usize) -> Self {
         Self { keys: (0..count).map(|_| keygen(&mut OsRng)).collect() }
     }

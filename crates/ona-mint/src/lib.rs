@@ -4,7 +4,7 @@
 //! promise. Every token is verified on its own: aggregate verification is never used, because a
 //! valid sum of signatures can be split into two invalid parts that still sum correctly.
 
-use near_sdk::collections::{LookupMap, LookupSet};
+use near_sdk::collections::LookupMap;
 use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise};
 
@@ -195,7 +195,9 @@ pub struct Mint {
     denoms: LookupMap<u8, Denom>,
     counters: LookupMap<u8, Counters>,
     pending: LookupMap<u64, Pending>,
-    nullifiers: LookupSet<[u8; 32]>,
+    /// Spent tokens. The value says whether the relay collected it, which lets a relay that lost
+    /// a transaction reply tell its own claim from a redemption by the owner.
+    nullifiers: LookupMap<[u8; 32], bool>,
 }
 
 struct ParsedToken {
@@ -433,7 +435,7 @@ impl Mint {
             denoms: LookupMap::new(b"d".to_vec()),
             counters: LookupMap::new(b"c".to_vec()),
             pending: LookupMap::new(b"p".to_vec()),
-            nullifiers: LookupSet::new(b"n".to_vec()),
+            nullifiers: LookupMap::new(b"n".to_vec()),
         };
 
         let mut seen: Vec<Vec<u8>> = Vec::new();
@@ -581,13 +583,13 @@ impl Mint {
         let t = parse_token(&token).unwrap_or_else(|| env::panic_str("bad token encoding"));
         let denom = self.denom(t.denom_id);
         let nf = nullifier(t.denom_id, &t.pk, &t.nonce);
-        require!(!self.nullifiers.contains(&nf), "token already spent");
+        require!(!self.nullifiers.contains_key(&nf), "token already spent");
         let sig: [u8; 64] =
             fixed(&owner_sig.0).unwrap_or_else(|| env::panic_str("bad owner signature length"));
         let digest = redeem_digest(&env::current_account_id(), &env::predecessor_account_id(), &nf);
         require!(env::ed25519_verify(&sig, digest, &t.pk), "bad owner signature");
         require!(self.token_valid(&t, &denom), "invalid token");
-        if let Err(reason) = self.mark_spent(&nf, t.denom_id, &denom) {
+        if let Err(reason) = self.mark_spent(&nf, t.denom_id, &denom, false) {
             env::panic_str(reason);
         }
         pay(implicit_account(&t.pk), denom.value - REDEEM_FEE);
@@ -610,7 +612,7 @@ impl Mint {
         let t = parse_token(&token).unwrap_or_else(|| env::panic_str("bad token encoding"));
         let denom = self.denom(t.denom_id);
         let nf = nullifier(t.denom_id, &t.pk, &t.nonce);
-        require!(!self.nullifiers.contains(&nf), "token already spent");
+        require!(!self.nullifiers.contains_key(&nf), "token already spent");
         require!(change.len() <= MAX_CHANGE, "too many change tokens");
         // Change requested after a halt could never be issued, only refunded in the clear.
         require!(!self.halted || change.is_empty(), "no change while halted");
@@ -641,7 +643,7 @@ impl Mint {
             "amount, fee and change must equal the token value"
         );
 
-        if let Err(reason) = self.mark_spent(&nf, t.denom_id, &denom) {
+        if let Err(reason) = self.mark_spent(&nf, t.denom_id, &denom, false) {
             env::panic_str(reason);
         }
 
@@ -740,7 +742,11 @@ impl Mint {
     }
 
     pub fn is_spent(&self, nf: Base64VecU8) -> bool {
-        fixed::<32>(&nf.0).is_some_and(|nf| self.nullifiers.contains(&nf))
+        fixed::<32>(&nf.0).is_some_and(|nf| self.nullifiers.contains_key(&nf))
+    }
+
+    pub fn spent_by_relay(&self, nf: Base64VecU8) -> bool {
+        fixed::<32>(&nf.0).is_some_and(|nf| self.nullifiers.get(&nf).unwrap_or(false))
     }
 
     pub fn pending_deposits(&self, from: U64, limit: u16) -> Vec<PendingView> {
@@ -845,7 +851,13 @@ impl Mint {
     }
 
     /// Applies the redemption limits and records the nullifier. Writes nothing on refusal.
-    fn mark_spent(&mut self, nf: &[u8; 32], denom_id: u8, denom: &Denom) -> Result<(), &'static str> {
+    fn mark_spent(
+        &mut self,
+        nf: &[u8; 32],
+        denom_id: u8,
+        denom: &Denom,
+        by_relay: bool,
+    ) -> Result<(), &'static str> {
         let mut c = self.counter(denom_id);
         if c.redeemed + 1 > c.issued {
             return Err("more redemptions than issued tokens");
@@ -861,7 +873,7 @@ impl Mint {
         c.window_used += 1;
         c.redeemed += 1;
         self.counters.insert(&denom_id, &c);
-        self.nullifiers.insert(nf);
+        self.nullifiers.insert(nf, &by_relay);
         Ok(())
     }
 
@@ -871,7 +883,7 @@ impl Mint {
         let denom = self.denoms.get(&t.denom_id)?;
         let sig: [u8; 64] = fixed(&item.owner_sig.0)?;
         let nf = nullifier(t.denom_id, &t.pk, &t.nonce);
-        if self.nullifiers.contains(&nf) {
+        if self.nullifiers.contains_key(&nf) {
             return None;
         }
         // The cheap check first: a wrong owner signature should not cost a pairing.
@@ -879,7 +891,7 @@ impl Mint {
         if !env::ed25519_verify(&sig, digest, &t.pk) || !self.token_valid(&t, &denom) {
             return None;
         }
-        self.mark_spent(&nf, t.denom_id, &denom).ok()?;
+        self.mark_spent(&nf, t.denom_id, &denom, true).ok()?;
         Some(denom.value)
     }
 }

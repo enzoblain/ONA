@@ -52,9 +52,9 @@ cargo build --profile contract --target wasm32-unknown-unknown -p ona-mint --con
 NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox cargo run -p ona-sandbox
 ```
 
-`NEAR_SANDBOX_BIN_PATH` is the only environment variable the code reads, through the `near-sandbox` crate. **This harness has not
-completed a run yet**, so expect to fix things. The node crashes when started inside a macOS Seatbelt sandbox, so run it from a
-normal terminal.
+`NEAR_SANDBOX_BIN_PATH` is the only environment variable the code reads, through the `near-sandbox` crate. This deploys the contract
+on a local node, calls every method, prints the gas burnt, then runs the real signer loop and a real relay exchange against the node.
+The node crashes when started inside a macOS Seatbelt sandbox, so run it from a normal terminal.
 
 ## Not available yet
 

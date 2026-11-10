@@ -307,6 +307,27 @@ pub fn g2_to_raw(point: &[u8; G2_LEN]) -> Result<[u8; G2_RAW_LEN], TokenError> {
     Ok(out)
 }
 
+/// Compresses a key read from a contract, after checking that it is a valid subgroup point.
+pub fn g2_from_raw(raw: &[u8; G2_RAW_LEN]) -> Result<[u8; G2_LEN], TokenError> {
+    let mut a = blst_p2_affine::default();
+    // SAFETY: `raw` holds the 192 bytes read; `a` is a valid output.
+    if unsafe { blst_p2_deserialize(&mut a, raw.as_ptr()) } != BLST_ERROR::BLST_SUCCESS {
+        return Err(TokenError::BadPoint);
+    }
+    // SAFETY: `a` was initialized above.
+    if unsafe { blst_p2_affine_is_inf(&a) } {
+        return Err(TokenError::Infinity);
+    }
+    // SAFETY: `a` was initialized above.
+    if !unsafe { blst_p2_affine_in_g2(&a) } {
+        return Err(TokenError::NotInSubgroup);
+    }
+    let mut out = [0u8; G2_LEN];
+    // SAFETY: `out` holds the 96 bytes written.
+    unsafe { blst_p2_affine_compress(out.as_mut_ptr(), &a) };
+    Ok(out)
+}
+
 fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     let mut h = Sha256::new();
     for part in parts {
