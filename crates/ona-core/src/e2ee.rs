@@ -3,8 +3,19 @@
 //! Follows encryption version 2, as checked with a real model call on 2026-11-10. The relay sees
 //! ciphertext, the model name, the token limit and the usage counters.
 //!
+//! Limits of encryption version 2:
+//! - A dishonest relay can replace `X-Client-Pub-Key` and read the reply: the signed text covers
+//!   the request and response bytes, not that header. The prompt stays confidential. The swap
+//!   can show up afterwards, as a validly signed reply this client cannot decrypt, reported with
+//!   `DISHONEST_RELAY_ALERT`. By then the relay has already read that reply, and a relay that
+//!   returns an error instead is not detected at all.
+//! - The relay sees the length of each prompt and reply. Nothing is padded here: nothing verified
+//!   shows that the enclave removes padding, so it would reach the model as part of the prompt.
+//!
 //! Not done here: verifying the Intel TDX and NVIDIA quotes. Until that check is added, the key
 //! returned by `attested_model_key` is only as trustworthy as the party that returned the report.
+
+use std::time::Duration;
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -20,6 +31,24 @@ const INFO: &[u8] = b"ed25519_encryption";
 const HEADER_LEN: usize = 32 + 24;
 /// Most tokens one reply may use, thinking included. Every real call costs credits.
 pub const DEFAULT_MAX_TOKENS: u32 = 512;
+/// Starts the error returned when the model signed a reply that this client cannot decrypt.
+pub const DISHONEST_RELAY_ALERT: &str = "ALERT: dishonest relay suspected";
+/// Limit on one whole HTTP exchange, so a silent relay cannot hang the client.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// A paid reply is lost without its signature, so a failed fetch is worth repeating.
+const SIGNATURE_ATTEMPTS: u32 = 8;
+/// First wait between attempts. It doubles up to `MAX_SIGNATURE_RETRY_DELAY`: about 30 s in all.
+const SIGNATURE_RETRY_DELAY: Duration = Duration::from_millis(500);
+const MAX_SIGNATURE_RETRY_DELAY: Duration = Duration::from_secs(8);
+/// Smallest ciphertext this protocol can produce: peer key, nonce, tag and at least one byte.
+const MIN_CIPHERTEXT_LEN: usize = HEADER_LEN + 16 + 1;
+/// Added to the prompt estimate for the role markers the model's template wraps around it.
+const PROMPT_OVERHEAD_TOKENS: u64 = 16;
+
+/// Deliberately high estimate of the tokens in a prompt: one per byte.
+fn estimate_prompt_tokens(prompt: &str) -> u64 {
+    (prompt.len() as u64).saturating_add(PROMPT_OVERHEAD_TOKENS)
+}
 
 fn to_hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -177,7 +206,11 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     pub fn new(base: &str) -> Self {
-        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(REQUEST_TIMEOUT))
+            .build()
+            .into();
         Self { base: base.trim_end_matches('/').to_string(), agent }
     }
 }
@@ -218,6 +251,7 @@ pub struct E2eeClient<T> {
     max_tokens: u32,
     token_budget: u64,
     spent: u64,
+    signature_retry_delay: Duration,
 }
 
 fn base_headers() -> Vec<(String, String)> {
@@ -230,7 +264,14 @@ fn base_headers() -> Vec<(String, String)> {
 impl<T: Transport> E2eeClient<T> {
     /// `token_budget` is a hard stop on the tokens this client may spend, across all its calls.
     pub fn new(transport: T, model: &str, max_tokens: u32, token_budget: u64) -> Self {
-        Self { transport, model: model.to_string(), max_tokens, token_budget, spent: 0 }
+        Self {
+            transport,
+            model: model.to_string(),
+            max_tokens,
+            token_budget,
+            spent: 0,
+            signature_retry_delay: SIGNATURE_RETRY_DELAY,
+        }
     }
 
     pub fn tokens_spent(&self) -> u64 {
@@ -262,9 +303,37 @@ impl<T: Transport> E2eeClient<T> {
         self.send_chat(prompt, None)
     }
 
-    /// The budget is checked first, so an exhausted client spends nothing.
+    /// Retries anything but a usable signature. It may not be ready at once, and a paid reply is
+    /// lost without it.
+    fn fetch_signature(&mut self, id: &str) -> Result<Value, String> {
+        let path = format!("/v1/signature/{id}?signing_algo=ed25519");
+        let mut last_error = String::new();
+        let mut delay = self.signature_retry_delay;
+        for attempt in 0..SIGNATURE_ATTEMPTS {
+            if attempt > 0 {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(MAX_SIGNATURE_RETRY_DELAY);
+            }
+            match self.transport.get(&path, &base_headers()) {
+                Ok((200, body)) => match serde_json::from_slice::<Value>(&body) {
+                    Ok(value) if value["signature"].is_string() => return Ok(value),
+                    Ok(_) => last_error = "signature is not ready".to_string(),
+                    Err(_) => last_error = "signature is not JSON".to_string(),
+                },
+                Ok((status, _)) => last_error = format!("signature request failed with status {status}"),
+                Err(e) => last_error = format!("signature request failed: {e}"),
+            }
+        }
+        Err(format!("{last_error}, after {SIGNATURE_ATTEMPTS} attempts"))
+    }
+
+    /// A deliberately high estimate of the cost is reserved before the request leaves and stays
+    /// reserved if anything fails afterwards, since the call may have been paid. Only the usage in
+    /// a validly signed reply replaces it. Until enclave quotes are verified, that signature only
+    /// proves as much as the key the relay reported.
     fn send_chat(&mut self, prompt: &str, token: Option<&str>) -> Result<ChatReply, String> {
-        if self.spent + u64::from(self.max_tokens) > self.token_budget {
+        let reserved = u64::from(self.max_tokens).saturating_add(estimate_prompt_tokens(prompt));
+        if self.spent.saturating_add(reserved) > self.token_budget {
             return Err("token budget exhausted".into());
         }
         let model_key = self.fetch_model_key()?;
@@ -290,28 +359,274 @@ impl<T: Transport> E2eeClient<T> {
         if let Some(token) = token {
             headers.push(("X-Ona-Token".to_string(), token.to_string()));
         }
+        self.spent = self.spent.saturating_add(reserved);
         let (status, raw) = self.transport.post("/v1/chat/completions", &headers, &body)?;
         if status != 200 {
             return Err(format!("chat failed with status {status}"));
         }
         let response: Value = serde_json::from_slice(&raw).map_err(|_| "reply is not JSON".to_string())?;
-        let tokens_used = response["usage"]["total_tokens"].as_u64().unwrap_or(u64::from(self.max_tokens));
-        self.spent += tokens_used;
-
         let id = response["id"].as_str().ok_or("reply has no id")?;
-        let path = format!("/v1/signature/{id}?signing_algo=ed25519");
-        let (status, signature) = self.transport.get(&path, &base_headers())?;
-        if status != 200 {
-            return Err(format!("signature request failed with status {status}"));
-        }
-        let signature: Value = serde_json::from_slice(&signature).map_err(|_| "signature is not JSON".to_string())?;
+        let signature = self.fetch_signature(id)?;
         verify_reply_signature(&signature, &self.model, &body, &raw, &model_key)?;
+
+        // A missing or zero count says nothing about the cost, so the reservation stands.
+        let tokens_used = match response["usage"]["total_tokens"].as_u64() {
+            Some(used) if used > 0 => {
+                self.spent = self.spent.saturating_sub(reserved).saturating_add(used);
+                used
+            }
+            _ => reserved,
+        };
 
         let encrypted = response["choices"][0]["message"]["content"]
             .as_str()
             .and_then(from_hex)
             .ok_or("reply has no encrypted content")?;
-        let content = String::from_utf8(client.decrypt(&encrypted)?).map_err(|_| "reply is not text".to_string())?;
+        // Too short to be ciphertext, for example when thinking used up every token. Not an attack.
+        if encrypted.len() < MIN_CIPHERTEXT_LEN {
+            return Err("reply has no content; the token limit may be too low".into());
+        }
+        let plaintext = client.decrypt(&encrypted).map_err(|e| {
+            format!("{DISHONEST_RELAY_ALERT}: the model signed this reply but it cannot be decrypted ({e}); the relay may have replaced the client key and read it")
+        })?;
+        let content = String::from_utf8(plaintext).map_err(|_| "reply is not text".to_string())?;
         Ok(ChatReply { content, tokens_used: u32::try_from(tokens_used).unwrap_or(u32::MAX) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::Signer;
+
+    const MODEL: &str = "test/model";
+
+    /// Replies with whatever `usage` is configured. No test here touches the network.
+    struct Fake {
+        model_key: SigningKey,
+        usage: Value,
+        post_status: u16,
+        post_fails: bool,
+        attestation_fails: bool,
+        signature_failures: u32,
+        signature_calls: u32,
+        encrypt_to_other_key: bool,
+        empty_content: bool,
+        signature_not_ready: u32,
+        chats: u32,
+        request: Vec<u8>,
+        raw: Vec<u8>,
+    }
+
+    fn fake(usage: Value) -> Fake {
+        Fake {
+            model_key: SigningKey::generate(&mut OsRng),
+            usage,
+            post_status: 200,
+            post_fails: false,
+            attestation_fails: false,
+            signature_failures: 0,
+            signature_calls: 0,
+            encrypt_to_other_key: false,
+            empty_content: false,
+            signature_not_ready: 0,
+            chats: 0,
+            request: vec![],
+            raw: vec![],
+        }
+    }
+
+    impl Transport for Fake {
+        fn get(&mut self, path: &str, _headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
+            if path.starts_with("/v1/attestation/report") {
+                if self.attestation_fails {
+                    return Ok((500, vec![]));
+                }
+                let nonce = path.rsplit("nonce=").next().unwrap_or_default();
+                let report = json!({"model_attestations": [{
+                    "signing_public_key": to_hex(self.model_key.verifying_key().as_bytes()),
+                    "request_nonce": nonce,
+                }]});
+                return Ok((200, report.to_string().into_bytes()));
+            }
+            self.signature_calls += 1;
+            if self.signature_calls <= self.signature_failures {
+                return if self.signature_calls % 2 == 0 { Err("connection reset".into()) } else { Ok((404, vec![])) };
+            }
+            if self.signature_calls <= self.signature_failures + self.signature_not_ready {
+                return Ok((200, b"{}".to_vec()));
+            }
+            let text = format!("{MODEL}:{}:{}", sha256_hex(&self.request), sha256_hex(&self.raw));
+            let signature = json!({
+                "text": text,
+                "signature": to_hex(&self.model_key.sign(text.as_bytes()).to_bytes()),
+                "signing_address": to_hex(self.model_key.verifying_key().as_bytes()),
+                "signature_kind": "provider_tee",
+            });
+            Ok((200, signature.to_string().into_bytes()))
+        }
+
+        fn post(&mut self, _path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String> {
+            self.chats += 1;
+            if self.post_fails {
+                return Err("connection lost".into());
+            }
+            self.request = body.to_vec();
+            let named = headers.iter().find(|(k, _)| k == "X-Client-Pub-Key").map(|(_, v)| v.as_str()).unwrap_or("");
+            let client_key: [u8; 32] = from_hex(named).unwrap().try_into().unwrap();
+            let recipient = if self.encrypt_to_other_key { ClientKey::generate().public_bytes() } else { client_key };
+            let reply = encrypt_to(&recipient, b"secret reply").unwrap();
+            let content = if self.empty_content { String::new() } else { to_hex(&reply) };
+            let mut response = json!({"id": "reply-1", "choices": [{"message": {"content": content}}]});
+            if !self.usage.is_null() {
+                response["usage"] = self.usage.clone();
+            }
+            self.raw = response.to_string().into_bytes();
+            Ok((self.post_status, self.raw.clone()))
+        }
+    }
+
+    fn client(transport: &mut Fake, max_tokens: u32, budget: u64) -> E2eeClient<&mut Fake> {
+        let mut c = E2eeClient::new(transport, MODEL, max_tokens, budget);
+        c.signature_retry_delay = Duration::ZERO;
+        c
+    }
+
+    /// What one call with prompt "x" and `max_tokens` 100 reserves.
+    const RESERVED: u64 = 100 + 1 + PROMPT_OVERHEAD_TOKENS;
+
+    #[test]
+    fn the_prompt_counts_against_the_budget_before_anything_is_sent() {
+        let mut t = fake(json!({"total_tokens": 1}));
+        let mut c = client(&mut t, 100, 150);
+        assert_eq!(c.chat(&"a".repeat(200)).unwrap_err(), "token budget exhausted");
+        assert_eq!(c.tokens_spent(), 0);
+        assert_eq!(t.chats, 0);
+    }
+
+    #[test]
+    fn the_reservation_is_kept_when_the_request_fails() {
+        let mut t = fake(json!({"total_tokens": 1}));
+        t.post_fails = true;
+        let mut c = client(&mut t, 100, 1000);
+        assert!(c.chat("x").is_err());
+        assert_eq!(c.tokens_spent(), RESERVED, "it may have reached the model and been paid");
+    }
+
+    #[test]
+    fn the_reservation_is_kept_on_an_error_status() {
+        let mut t = fake(json!({"total_tokens": 1}));
+        t.post_status = 500;
+        let mut c = client(&mut t, 100, 1000);
+        assert!(c.chat("x").is_err());
+        assert_eq!(c.tokens_spent(), RESERVED);
+    }
+
+    #[test]
+    fn nothing_is_charged_when_no_request_left() {
+        let mut t = fake(json!({"total_tokens": 1}));
+        t.attestation_fails = true;
+        let mut c = client(&mut t, 100, 1000);
+        assert!(c.chat("x").unwrap_err().contains("attestation"));
+        assert_eq!(c.tokens_spent(), 0);
+        assert_eq!(t.chats, 0);
+    }
+
+    #[test]
+    fn usage_only_counts_once_the_signature_is_valid() {
+        let mut t = fake(json!({"total_tokens": 1}));
+        t.signature_failures = u32::MAX;
+        let mut c = client(&mut t, 100, 1000);
+        assert!(c.chat("x").is_err());
+        assert_eq!(c.tokens_spent(), RESERVED, "unsigned usage must not free the budget");
+    }
+
+    #[test]
+    fn signed_usage_replaces_the_reservation() {
+        let mut t = fake(json!({"total_tokens": 40}));
+        let mut c = client(&mut t, 100, 1000);
+        assert_eq!(c.chat("x").unwrap().tokens_used, 40);
+        assert_eq!(c.tokens_spent(), 40);
+    }
+
+    #[test]
+    fn missing_or_zero_usage_does_not_free_the_budget() {
+        for usage in [Value::Null, json!({}), json!({"total_tokens": 0}), json!({"total_tokens": "12"})] {
+            let mut t = fake(usage.clone());
+            let mut c = client(&mut t, 100, 1000);
+            assert_eq!(c.chat("x").unwrap().tokens_used as u64, RESERVED, "{usage}");
+            assert_eq!(c.tokens_spent(), RESERVED, "{usage}");
+        }
+    }
+
+    #[test]
+    fn huge_usage_saturates_instead_of_overflowing() {
+        let mut t = fake(json!({"total_tokens": u64::MAX}));
+        let mut c = client(&mut t, 100, u64::MAX - 1);
+        c.chat("x").unwrap();
+        assert_eq!(c.tokens_spent(), u64::MAX);
+        assert_eq!(c.chat("y").unwrap_err(), "token budget exhausted");
+    }
+
+    #[test]
+    fn a_signature_that_arrives_late_still_saves_the_reply() {
+        let mut t = fake(json!({"total_tokens": 40}));
+        t.signature_failures = SIGNATURE_ATTEMPTS - 1;
+        let mut c = client(&mut t, 100, 1000);
+        assert_eq!(c.chat("x").unwrap().content, "secret reply");
+        assert_eq!(t.signature_calls, SIGNATURE_ATTEMPTS);
+        assert_eq!(t.chats, 1, "the paid chat is not sent again");
+    }
+
+    #[test]
+    fn signature_retries_are_bounded() {
+        let mut t = fake(json!({"total_tokens": 40}));
+        t.signature_failures = u32::MAX;
+        let mut c = client(&mut t, 100, 1000);
+        assert!(c.chat("x").unwrap_err().contains(&format!("after {SIGNATURE_ATTEMPTS} attempts")));
+        assert_eq!(t.signature_calls, SIGNATURE_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_signed_reply_that_cannot_be_decrypted_raises_the_relay_alert() {
+        let mut t = fake(json!({"total_tokens": 40}));
+        t.encrypt_to_other_key = true;
+        let mut c = client(&mut t, 100, 1000);
+        assert!(c.chat("x").unwrap_err().starts_with(DISHONEST_RELAY_ALERT));
+    }
+
+    #[test]
+    fn an_unsigned_undecryptable_reply_is_not_called_a_relay_alert() {
+        let mut t = fake(json!({"total_tokens": 40}));
+        t.encrypt_to_other_key = true;
+        t.signature_failures = u32::MAX;
+        let mut c = client(&mut t, 100, 1000);
+        assert!(!c.chat("x").unwrap_err().starts_with(DISHONEST_RELAY_ALERT));
+    }
+
+    #[test]
+    fn an_empty_signed_reply_is_not_called_a_relay_alert() {
+        let mut t = fake(json!({"total_tokens": 40}));
+        t.empty_content = true;
+        let mut c = client(&mut t, 100, 1000);
+        let error = c.chat("x").unwrap_err();
+        assert!(!error.starts_with(DISHONEST_RELAY_ALERT), "{error}");
+        assert!(error.contains("token limit"), "{error}");
+    }
+
+    #[test]
+    fn a_signature_answer_that_is_not_ready_is_retried() {
+        let mut t = fake(json!({"total_tokens": 40}));
+        t.signature_not_ready = SIGNATURE_ATTEMPTS - 1;
+        let mut c = client(&mut t, 100, 1000);
+        assert_eq!(c.chat("x").unwrap().content, "secret reply");
+        assert_eq!(t.signature_calls, SIGNATURE_ATTEMPTS);
+        assert_eq!(t.chats, 1);
+    }
+
+    #[test]
+    fn the_http_transport_has_a_global_timeout() {
+        let transport = HttpTransport::new("http://127.0.0.1:1");
+        assert_eq!(transport.agent.config().timeouts().global, Some(REQUEST_TIMEOUT));
     }
 }

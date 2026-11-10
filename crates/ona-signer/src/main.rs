@@ -52,6 +52,10 @@ fn run() -> Result<(), String> {
             }
             Err(e) => eprintln!("tick failed: {e}"),
         }
+        // Restarting reopens the state file, which repairs a partial last line.
+        if let Some(reason) = signer.halted() {
+            return Err(format!("stopping, durable state is unsafe: {reason}"));
+        }
         std::thread::sleep(TICK);
     }
 }

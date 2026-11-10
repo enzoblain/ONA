@@ -113,6 +113,70 @@ impl Chain for NearChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// A local stand-in for a NEAR node: answers key lookups, and any transaction with `tx_result`.
+    fn fake_rpc(tx_result: Value) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                    if read == 0 {
+                        break;
+                    }
+                }
+                let result = if String::from_utf8_lossy(&request).contains("view_access_key") {
+                    json!({"nonce": 1, "block_hash": "11111111111111111111111111111111"})
+                } else {
+                    tx_result.clone()
+                };
+                let body = json!({"jsonrpc": "2.0", "id": "1", "result": result}).to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        url
+    }
+
+    fn chain_against(tx_result: Value) -> NearChain {
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let mut bytes = key.to_bytes().to_vec();
+        bytes.extend_from_slice(key.verifying_key().as_bytes());
+        let text = format!("ed25519:{}", bs58::encode(bytes).into_string());
+        let client = Client::new(&fake_rpc(tx_result), ona_near::parse_account_key(&text).unwrap());
+        NearChain::new(client, "signer.test".into(), "mint.test".into())
+    }
+
+    #[test]
+    fn issue_only_succeeds_on_an_explicit_success() {
+        assert!(chain_against(json!({"status": {"SuccessValue": ""}})).issue(1, vec![]).is_ok());
+        assert!(chain_against(json!({"status": {"Failure": {}}})).issue(1, vec![]).is_err());
+        // The signer marks a record done when `issue` returns Ok, so this must be an error.
+        assert!(chain_against(json!({"status": "Started"})).issue(1, vec![]).is_err());
+        assert!(chain_against(json!({})).issue(1, vec![]).is_err());
+    }
 
     #[test]
     fn pending_records_are_parsed() {

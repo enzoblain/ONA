@@ -111,20 +111,26 @@ pub struct Outcome {
     pub value: Value,
 }
 
-/// Reads a `broadcast_tx_commit` result.
-pub fn parse_outcome(result: &Value) -> Outcome {
+/// Reads a `send_tx` result. A transaction only counts as successful when the node
+/// says so with `SuccessValue`: any other status is an error, never an assumed success.
+pub fn parse_outcome(result: &Value) -> Result<Outcome> {
     let mut burnt = result["transaction_outcome"]["outcome"]["gas_burnt"].as_u64().unwrap_or(0);
     for receipt in result["receipts_outcome"].as_array().into_iter().flatten() {
         burnt += receipt["outcome"]["gas_burnt"].as_u64().unwrap_or(0);
     }
-    let failure = result["status"].get("Failure").map(|f| f.to_string());
-    let value = result["status"]
+    let tgas = burnt as f64 / TGAS as f64;
+    let status = &result["status"];
+    if let Some(failure) = status.get("Failure") {
+        return Ok(Outcome { tgas, failure: Some(failure.to_string()), value: Value::Null });
+    }
+    let encoded = status
         .get("SuccessValue")
         .and_then(|v| v.as_str())
-        .and_then(|v| B64.decode(v).ok())
-        .and_then(|v| serde_json::from_slice(&v).ok())
-        .unwrap_or(Value::Null);
-    Outcome { tgas: burnt as f64 / TGAS as f64, failure, value }
+        .ok_or_else(|| anyhow!("transaction has no final status: {status}"))?;
+    let decoded = B64.decode(encoded).context("SuccessValue is not base64")?;
+    // An empty or non-JSON value is still a success: methods returning nothing produce "".
+    let value = serde_json::from_slice(&decoded).unwrap_or(Value::Null);
+    Ok(Outcome { tgas, failure: None, value })
 }
 
 pub struct Client {
@@ -227,8 +233,10 @@ impl Client {
         signed.push(0);
         signed.extend_from_slice(&signature);
 
-        let result = self.post("broadcast_tx_commit", json!([B64.encode(&signed)]))?;
-        Ok(parse_outcome(&result))
+        // `broadcast_tx_commit` only waits for optimistic execution. A signature or a payment must
+        // rest on a final result (docs.near.org/api/rpc/transactions, read 2026-11-10).
+        let result = self.post("send_tx", json!({"signed_tx_base64": B64.encode(&signed), "wait_until": "FINAL"}))?;
+        parse_outcome(&result)
     }
 
     /// A call with the most gas a transaction can carry. Only the gas used is paid.
@@ -291,7 +299,7 @@ mod tests {
             "transaction_outcome": {"outcome": {"gas_burnt": TGAS}},
             "receipts_outcome": [{"outcome": {"gas_burnt": 2 * TGAS}}],
         });
-        let outcome = parse_outcome(&result);
+        let outcome = parse_outcome(&result).unwrap();
         assert_eq!(outcome.tgas, 3.0);
         assert!(outcome.failure.is_none());
         assert_eq!(outcome.value, json!([true, false]));
@@ -333,6 +341,28 @@ mod tests {
     #[test]
     fn a_failure_is_reported() {
         let result = json!({"status": {"Failure": {"ActionError": {}}}});
-        assert!(parse_outcome(&result).failure.is_some());
+        assert!(parse_outcome(&result).unwrap().failure.is_some());
+    }
+
+    #[test]
+    fn a_status_without_an_explicit_success_is_an_error() {
+        for result in [
+            json!({}),
+            json!({"status": {}}),
+            json!({"status": "NotStarted"}),
+            json!({"status": "Started"}),
+            json!({"status": {"SuccessReceiptId": "abc"}}),
+            json!({"status": {"SuccessValue": 7}}),
+            json!({"status": {"SuccessValue": "not base64!"}}),
+        ] {
+            assert!(parse_outcome(&result).is_err(), "{result} must not read as a success");
+        }
+    }
+
+    #[test]
+    fn an_empty_success_value_is_a_success() {
+        let outcome = parse_outcome(&json!({"status": {"SuccessValue": ""}})).unwrap();
+        assert!(outcome.failure.is_none());
+        assert_eq!(outcome.value, Value::Null);
     }
 }

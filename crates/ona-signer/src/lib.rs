@@ -65,13 +65,19 @@ impl Durable for MemoryDurable {
 pub struct FileDurable {
     file: fs::File,
     memory: MemoryDurable,
+    /// Set by a failed write: the file may end in a partial line, so nothing more may be appended.
+    failed: bool,
 }
 
 impl FileDurable {
+    /// A last line without its newline was being written during a crash: its write never
+    /// returned, so nothing relied on it and it is dropped. Any other malformed line is corruption.
     pub fn open(path: &Path) -> Result<Self, String> {
         let mut memory = MemoryDurable::default();
         if path.exists() {
-            let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let bytes = fs::read(path).map_err(|e| e.to_string())?;
+            let complete = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+            let text = std::str::from_utf8(&bytes[..complete]).map_err(|_| "corrupt state file")?;
             for line in text.lines() {
                 let (kind, value) = line.split_once(' ').ok_or("corrupt state file")?;
                 let value: u64 = value.parse().map_err(|_| "corrupt state file")?;
@@ -83,6 +89,11 @@ impl FileDurable {
                     _ => return Err("corrupt state file".into()),
                 }
             }
+            if complete < bytes.len() {
+                let file = OpenOptions::new().write(true).open(path).map_err(|e| e.to_string())?;
+                file.set_len(complete as u64).map_err(|e| e.to_string())?;
+                file.sync_all().map_err(|e| e.to_string())?;
+            }
         }
         let file = OpenOptions::new()
             .create(true)
@@ -90,12 +101,20 @@ impl FileDurable {
             .mode(0o600)
             .open(path)
             .map_err(|e| e.to_string())?;
-        Ok(Self { file, memory })
+        Ok(Self { file, memory, failed: false })
     }
 
     fn write_line(&mut self, line: String) -> Result<(), String> {
-        writeln!(self.file, "{line}").map_err(|e| e.to_string())?;
-        self.file.sync_all().map_err(|e| e.to_string())
+        if self.failed {
+            return Err("state file failed earlier, restart required".into());
+        }
+        let result = self
+            .file
+            .write_all(format!("{line}\n").as_bytes())
+            .and_then(|()| self.file.sync_all())
+            .map_err(|e| e.to_string());
+        self.failed = result.is_err();
+        result
     }
 }
 
@@ -193,11 +212,23 @@ pub struct Signer<D> {
     /// Records already answered in this run, so a slow chain does not get them twice.
     done: HashSet<u64>,
     state: D,
+    /// Why the durable state can no longer be trusted. Once set, no pass runs again.
+    halted: Option<String>,
 }
 
 impl<D: Durable> Signer<D> {
     pub fn new(keys: KeyStore, state: D) -> Self {
-        Self { keys, done: HashSet::new(), state }
+        Self { keys, done: HashSet::new(), state, halted: None }
+    }
+
+    /// Set after a failed write of the durable state: the process must stop and be restarted.
+    pub fn halted(&self) -> Option<&str> {
+        self.halted.as_deref()
+    }
+
+    fn halt(&mut self, reason: String) -> String {
+        self.halted = Some(reason.clone());
+        reason
     }
 
     /// Refuses to start if the keys held here are not the ones the contract verifies against.
@@ -230,8 +261,12 @@ impl<D: Durable> Signer<D> {
         Ok(sigs)
     }
 
-    /// One pass over the pending deposits. A failed record never blocks the following ones.
+    /// One pass over the pending deposits. A failed record does not block the following ones,
+    /// but a failed write to the durable state stops the whole pass.
     pub fn tick<C: Chain>(&mut self, chain: &mut C) -> Result<TickReport, String> {
+        if let Some(reason) = &self.halted {
+            return Err(reason.clone());
+        }
         let now = chain.now()?;
         let records = chain.pending(self.state.cursor(), 64)?;
         let mut report = TickReport::default();
@@ -274,8 +309,7 @@ impl<D: Durable> Signer<D> {
                     continue;
                 }
                 if let Err(e) = self.state.mark_broadcast(record.id) {
-                    report.skipped.push((record.id, format!("cannot record broadcast: {e}")));
-                    continue;
+                    return Err(self.halt(format!("cannot record broadcast: {e}")));
                 }
             }
             match chain.issue(record.id, sigs) {
@@ -291,7 +325,9 @@ impl<D: Durable> Signer<D> {
         // page of them cannot hide newer deposits. Stops at the first one still to retry.
         if let Some(last) = last_seen {
             let next = ids.into_iter().find(|id| !self.done.contains(id)).unwrap_or(last + 1);
-            self.state.set_cursor(next)?;
+            if let Err(e) = self.state.set_cursor(next) {
+                return Err(self.halt(format!("cannot record cursor: {e}")));
+            }
         }
         Ok(report)
     }
@@ -391,6 +427,94 @@ mod tests {
         let mut s = Signer::new(KeyStore::load(&key_path).unwrap(), state);
         assert_eq!(s.tick(&mut c).unwrap().issued, vec![5], "still retried after a restart");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn state_file(name: &str, content: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ona-signer-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.log");
+        fs::write(&path, content).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn only_a_last_line_without_newline_is_dropped() {
+        let (dir, path) = state_file("partial", b"b 1\nc 2\nb 3");
+        let mut state = FileDurable::open(&path).unwrap();
+        assert!(state.is_broadcast(1));
+        assert_eq!(state.cursor(), 2);
+        assert!(!state.is_broadcast(3), "a line that was never finished does not count");
+        assert_eq!(fs::read(&path).unwrap(), b"b 1\nc 2\n");
+
+        state.mark_broadcast(4).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"b 1\nc 2\nb 4\n", "the next write starts on a clean line");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_partial_last_line_may_be_invalid_text() {
+        let (dir, path) = state_file("binary", b"b 1\n\xff\xfe");
+        assert!(FileDurable::open(&path).unwrap().is_broadcast(1));
+        assert_eq!(fs::read(&path).unwrap(), b"b 1\n");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_malformed_complete_line_is_corruption_and_nothing_is_truncated() {
+        for content in [&b"b 1\nxx\nb 2\n"[..], &b"b 1\nb x\n"[..], &b"zz 1\nb 2"[..]] {
+            let (dir, path) = state_file("corrupt", content);
+            assert!(FileDurable::open(&path).err().unwrap().contains("corrupt"));
+            assert_eq!(fs::read(&path).unwrap(), content, "the evidence is left in place");
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn nothing_is_appended_after_a_failed_write() {
+        let (dir, path) = state_file("failed", b"");
+        let read_only = fs::File::open(&path).unwrap();
+        let mut state = FileDurable { file: read_only, memory: MemoryDurable::default(), failed: false };
+        assert!(state.mark_broadcast(1).is_err());
+        assert!(!state.is_broadcast(1));
+
+        state.file = OpenOptions::new().append(true).open(&path).unwrap();
+        assert!(state.mark_broadcast(2).is_err(), "even if the file looks writable again");
+        assert_eq!(fs::read(&path).unwrap(), b"");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    struct BrokenDurable;
+
+    impl Durable for BrokenDurable {
+        fn is_broadcast(&self, _id: u64) -> bool {
+            false
+        }
+        fn mark_broadcast(&mut self, _id: u64) -> Result<(), String> {
+            Err("disk full".into())
+        }
+        fn cursor(&self) -> u64 {
+            0
+        }
+        fn set_cursor(&mut self, _cursor: u64) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failed_state_write_stops_the_signer_before_any_signature_leaves() {
+        let keys = KeyStore::generate(1);
+        let mut c = FakeChain { keys: keys.public_keys(), now: 10, ..Default::default() };
+        let mut locked = record(1, vec![(0, point(1))]);
+        locked.locked_until = LOCK;
+        c.records.push(locked);
+        let mut s = Signer::new(keys, BrokenDurable);
+
+        assert!(s.tick(&mut c).unwrap_err().contains("disk full"));
+        assert!(c.issued.is_empty());
+        assert!(s.halted().unwrap().contains("disk full"));
+
+        c.now = u64::MAX; // would otherwise be read as a new pass over the chain
+        assert!(s.tick(&mut c).unwrap_err().contains("disk full"), "no further pass runs");
     }
 
     fn record(id: u64, items: Vec<(u8, [u8; G1_LEN])>) -> PendingRecord {
