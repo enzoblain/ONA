@@ -101,6 +101,29 @@ en octets bruts, champ absent = longueur 0). Signature ECDSA P-256 avec SHA-256,
   `id` n'est plus celle attendue est refusée (`"stale confirmation"`) : une signature ne peut pas être rejouée sur
   une autre confirmation.
 
+## Conversations (branche `ios-chat`)
+
+Le téléphone peut aussi **demander** quelque chose à l'agent, sous forme de conversation. Les conversations vivent
+sur l'ordinateur ; le téléphone les affiche et n'en garde rien sur son disque.
+
+- `GET /v0/chats` → `{"mode", "chats": [{"id", "title", "updated_at", "preview", "status": "idle | working | waiting"}]}`,
+  la plus récente d'abord.
+- `GET /v0/chats/{id}` → `{"mode", "chat": {"id", "title", "status", "working": {"tool", "text"} | null, "items": [...]}}`.
+  Chaque élément a `id`, `at`, `kind` :
+  `user` / `agent` (`text`), `activity` (`tool` : `think`, `search`, `read`, `compare`, `contact`, `prepare_payment`,
+  `pay` ; `text`), `confirmation` (`pending` comme plus haut, `state` : `pending | accepted | rejected | expired`),
+  `exposure` (`exposure` comme plus haut). Un `kind` inconnu est ignoré par l'app.
+- `POST /v0/chats` `{"text", "pairing_id", "signature"}` → `{"ok", "chat_id"}` : nouvelle conversation.
+- `POST /v0/chats/{id}/messages` `{"text", "pairing_id", "signature"}` : message dans une conversation.
+- `POST /v0/chats/{id}/delete` `{"pairing_id", "signature"}` : suppression (POST plutôt que DELETE, pour le pont Tor).
+- Signatures : `champs("ona/message/v0", pairing_id, chat_id, text)` (`chat_id` vide pour une nouvelle conversation) et
+  `champs("ona/delete/v0", pairing_id, chat_id)`. Texte : 1 à 2 000 caractères, sans fichier ni image.
+- Les confirmations d'une conversation passent par `POST /v0/confirm` comme avant ; leurs `id` sont uniques sur
+  toutes les conversations.
+
+Le faux ordinateur rejoue la mission de démonstration (avocat) pour **toute** demande : c'est une simulation de
+l'affichage, pas un agent.
+
 ## Routes du faux ordinateur seulement
 
 - `POST /v0/mock/start` : démarre une mission de démonstration.

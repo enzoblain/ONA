@@ -13,6 +13,8 @@ import p256
 
 PAIR_DOMAIN = "ona/pair/v0"
 CONFIRM_DOMAIN = "ona/confirm/v0"
+MESSAGE_DOMAIN = "ona/message/v0"
+DELETE_DOMAIN = "ona/delete/v0"
 SAS_DOMAIN = "ona/sas/v0"
 PAYLOAD_PREFIX = "ona-pair:"
 
@@ -40,6 +42,15 @@ def sas(computer_key: bytes, phone_key: bytes, code: str) -> str:
 def confirm_message(pairing_id: str, body: dict) -> bytes:
     return fields(CONFIRM_DOMAIN, pairing_id, body.get("id"), body.get("decision"), body.get("firm"),
                   body.get("digest"))
+
+
+def message_message(pairing_id: str, chat_id: str | None, text: str | None) -> bytes:
+    """A message sent to the agent: new chat when chat_id is empty."""
+    return fields(MESSAGE_DOMAIN, pairing_id, chat_id, text)
+
+
+def delete_message(pairing_id: str, chat_id: str) -> bytes:
+    return fields(DELETE_DOMAIN, pairing_id, chat_id)
 
 
 def b64url(data: bytes) -> str:
@@ -96,6 +107,16 @@ class Pairing:
 
     def check_confirmation(self, body: dict) -> str | None:
         """Error message, or None if the confirmation is signed by the paired phone."""
+        return self.check_signed(body, lambda pairing_id: confirm_message(pairing_id, body))
+
+    def check_message(self, body: dict, chat_id: str | None) -> str | None:
+        return self.check_signed(body, lambda pairing_id: message_message(pairing_id, chat_id, body.get("text")))
+
+    def check_delete(self, body: dict, chat_id: str) -> str | None:
+        return self.check_signed(body, lambda pairing_id: delete_message(pairing_id, chat_id))
+
+    def check_signed(self, body: dict, signed_bytes) -> str | None:
+        """Error message, or None if `signed_bytes(pairing_id)` is signed by the paired phone."""
         with self.lock:
             if self.phone_key is None or self.pairing_id is None:
                 return "not paired"
@@ -105,7 +126,7 @@ class Pairing:
                 signature = b64decode(body.get("signature"))
             except ValueError:
                 return "missing or malformed signature"
-            if not p256.verify(self.phone_key, confirm_message(self.pairing_id, body), signature):
+            if not p256.verify(self.phone_key, signed_bytes(self.pairing_id), signature):
                 return "signature does not verify"
             return None
 

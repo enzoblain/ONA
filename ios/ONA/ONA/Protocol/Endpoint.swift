@@ -31,6 +31,13 @@ struct UnavailableLink: ComputerLink {
     func pair(_ request: PairRequest) async throws -> Ack { throw LinkError.unreachable(reason) }
     func confirm(_ confirmation: ConfirmationAnswer) async throws -> Ack { throw LinkError.unreachable(reason) }
     func mock(_ action: MockAction) async throws -> Ack { throw LinkError.unreachable(reason) }
+    func chats() async throws -> ChatList { throw LinkError.unreachable(reason) }
+    func chat(_ id: String) async throws -> ChatReply { throw LinkError.unreachable(reason) }
+    func newChat(_ request: ChatMessageRequest) async throws -> NewChatAck { throw LinkError.unreachable(reason) }
+    func send(_ request: ChatMessageRequest, to chatID: String) async throws -> Ack { throw LinkError.unreachable(reason) }
+    func deleteChat(_ chatID: String, _ request: ChatDeleteRequest) async throws -> Ack {
+        throw LinkError.unreachable(reason)
+    }
 }
 
 extension ProtocolCoding {

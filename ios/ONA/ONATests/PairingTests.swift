@@ -124,6 +124,40 @@ final class FakeLink: ComputerLink, @unchecked Sendable {
     func mock(_ action: MockAction) async throws -> Ack {
         Ack(ok: true, error: nil, mode: .mock)
     }
+
+    // Conversations: one chat ("chat-1") waiting for the demo payment.
+    var newChats: [ChatMessageRequest] = []
+    var messages: [(String, ChatMessageRequest)] = []
+    var deletions: [(String, ChatDeleteRequest)] = []
+    var deleted = false
+
+    func chats() async throws -> ChatList {
+        let json = lock.withLock { deleted } ? ChatFixtures.emptyList : ChatFixtures.list
+        return try ProtocolCoding.decoder.decode(ChatList.self, from: json)
+    }
+
+    func chat(_ id: String) async throws -> ChatReply {
+        guard id == "chat-1", !lock.withLock({ deleted }) else { throw LinkError.badStatus(404, "unknown chat") }
+        return try ProtocolCoding.decoder.decode(ChatReply.self, from: ChatFixtures.waitingForPayment)
+    }
+
+    func newChat(_ request: ChatMessageRequest) async throws -> NewChatAck {
+        lock.withLock { newChats.append(request) }
+        return NewChatAck(ok: true, error: nil, mode: .mock, chatId: "chat-1")
+    }
+
+    func send(_ request: ChatMessageRequest, to chatID: String) async throws -> Ack {
+        lock.withLock { messages.append((chatID, request)) }
+        return Ack(ok: true, error: nil, mode: .mock)
+    }
+
+    func deleteChat(_ chatID: String, _ request: ChatDeleteRequest) async throws -> Ack {
+        lock.withLock {
+            deletions.append((chatID, request))
+            deleted = true
+        }
+        return Ack(ok: true, error: nil, mode: .mock)
+    }
 }
 
 /// Signs, but remembers that it was asked to.
@@ -200,7 +234,8 @@ struct RemoteModelTests {
     @Test func confirmsAPaymentWithASignatureOverThePhonesDigest() async throws {
         let (model, link, key, _) = try await pairedModel()
         #expect(model.isSimulation)
-        let pending = try #require(model.pending)
+        await model.open(chat: "chat-1")
+        let pending = try #require(model.openChat?.pending)
         guard case .payment(let request) = pending.request else {
             Issue.record("expected a payment")
             return
@@ -214,7 +249,8 @@ struct RemoteModelTests {
 
     @Test func rejectIsSignedToo() async throws {
         let (model, link, key, _) = try await pairedModel()
-        await model.reject(try #require(model.pending))
+        await model.open(chat: "chat-1")
+        await model.reject(try #require(model.openChat?.pending))
         let sent = try #require(link.sent.first)
         #expect(sent.decision == .reject)
         #expect(try verify(sent, with: key))
@@ -248,8 +284,8 @@ struct RemoteModelTests {
         let reopened = RemoteModel(store: store, makeLink: { _ in link }, makeKey: { SoftwareDeviceKey() })
         #expect(reopened.isPaired)
         #expect(reopened.connection == .idle)
-        await reopened.refresh()
-        await reopened.reject(try #require(reopened.pending))
+        await reopened.open(chat: "chat-1")
+        await reopened.reject(try #require(reopened.openChat?.pending))
         // Signed with the key loaded back from the store, not a new one.
         #expect(try verify(try #require(link.sent.first), with: key))
     }
@@ -259,7 +295,8 @@ struct RemoteModelTests {
         model.unpair()
         #expect(!model.isPaired)
         #expect(model.connection == .notPaired)
-        #expect(model.state == nil)
+        #expect(model.chats.isEmpty)
+        #expect(model.openChat == nil)
         #expect(try store.load() == nil)
     }
 }

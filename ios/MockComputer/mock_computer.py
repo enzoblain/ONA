@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fake ONA computer for the iOS app (steps 2 and 3). Everything it returns is labelled "mode": "mock".
+"""Fake ONA computer for the iOS app. Everything it returns is labelled "mode": "mock".
 
 Follows docs/ios/protocol-draft.md (draft v0) and replays the demo mission of ona-core
 (crates/ona-core on main): same plan, same two offers, same payment bytes and digest.
@@ -26,6 +26,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from chats import MAX_TEXT, Chat
 from pairing import Pairing
 
 MODE = "mock"
@@ -77,12 +78,14 @@ class Mission:
         self.log("Mission ouverte, plan proposé")
 
     # -- helpers ---------------------------------------------------------------------------------
-    def log(self, text: str) -> None:
-        self.events.append({"at": int(time.time()), "text": text})
+    def log(self, text: str, tool: str | None = None) -> None:
+        """`tool` names the step that produced the event (search, read, …); None for status lines."""
+        self.events.append({"at": int(time.time()), "text": text, "tool": tool})
 
     def _new_pending(self, kind: str, **data) -> dict:
         self.confirm_count += 1
-        return {"id": f"c-{self.confirm_count}", "kind": kind, **data}
+        # Unique across missions: several chats can each wait for a confirmation.
+        return {"id": f"{self.id}-c-{self.confirm_count}", "kind": kind, **data}
 
     def _count(self, tool: str) -> None:
         self.outputs[tool] = self.outputs.get(tool, 0) + 1
@@ -110,23 +113,23 @@ class Mission:
             return
         if step == "search":
             self._count("search")
-            self.log("Recherche « avocat droit du travail paris » : 2 résultats")
+            self.log("Recherche « avocat droit du travail paris » : 2 résultats", "search")
         elif step == "read":
             n = DEMO_PLAN[: self.cursor + 1].count("read")
             self.model_calls += 1
             self._count("fetch")
-            self.log(f"Lecture de la page {n} sur 2 (offre extraite)")
+            self.log(f"Lecture de la page {n} sur 2 (offre extraite)", "read")
         elif step == "compare":
-            self.log("Comparaison : 2 offres classées")
+            self.log("Comparaison : 2 offres classées", "compare")
         elif step == "contact":
             self._count("contact")
-            self.log(f"Message générique envoyé à {self.chosen}")
+            self.log(f"Message générique envoyé à {self.chosen}", "contact")
         elif step == "prepare_payment":
-            self.log("Paiement préparé à partir de l'annuaire")
+            self.log("Paiement préparé à partir de l'annuaire", "prepare_payment")
         elif step == "pay":
             p = self.payment()  # ona-core lists payments apart, not in "outputs"
             self.payments.append({"to": p["to"], "amount": p["amount"]})
-            self.log(f"Paiement envoyé : mock-tx-{p['digest'][:16]}")
+            self.log(f"Paiement envoyé : mock-tx-{p['digest'][:16]}", "pay")
         self.cursor += 1
         if self.cursor == len(DEMO_PLAN):
             self.phase = "closed"
@@ -164,6 +167,9 @@ class Mission:
         return None
 
     # -- view ------------------------------------------------------------------------------------
+    def plan_steps(self) -> list[str]:
+        return list(DEMO_PLAN)
+
     def steps(self) -> list[dict]:
         out = []
         for i, step in enumerate(DEMO_PLAN):
@@ -176,10 +182,10 @@ class Mission:
             out.append({"step": step, "status": status})
         return out
 
-    def view(self) -> dict:
-        exposure = None
-        if self.phase in ("closed", "cancelled"):
-            exposure = {
+    def exposure(self) -> dict | None:
+        if self.phase not in ("closed", "cancelled"):
+            return None
+        return {
                 "outputs": self.outputs,
                 "refused_by_gate": {},
                 "firms_contacted": [self.chosen] if self.outputs.get("contact") else [],
@@ -187,8 +193,10 @@ class Mission:
                 "model_calls": self.model_calls,
                 "mode": MODE,
             }
+
+    def view(self) -> dict:
         return {"id": self.id, "title": DEMO_TITLE, "phase": self.phase, "steps": self.steps(),
-                "events": self.events[-50:], "pending": self.pending, "exposure": exposure}
+                "events": self.events[-50:], "pending": self.pending, "exposure": self.exposure()}
 
 
 class Computer:
@@ -197,6 +205,8 @@ class Computer:
         self.lock = threading.Lock()
         self.mission: Mission | None = None
         self.missions_started = 0
+        self.chats: dict[str, Chat] = {}
+        self.chats_started = 0
         self.step_seconds = step_seconds
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -206,11 +216,16 @@ class Computer:
             with self.lock:
                 if self.mission:
                     self.mission.tick()
+                for chat in self.chats.values():
+                    chat.tick()
+
+    def _new_mission(self) -> Mission:
+        self.missions_started += 1
+        return Mission(self.missions_started)
 
     def start(self) -> None:
         with self.lock:
-            self.missions_started += 1
-            self.mission = Mission(self.missions_started)
+            self.mission = self._new_mission()
 
     def reset(self) -> None:
         with self.lock:
@@ -227,9 +242,65 @@ class Computer:
             print(f"   confirmation refused: {signature_error}", flush=True)
             return signature_error
         with self.lock:
+            for chat in self.chats.values():
+                if chat.waits_for(body.get("id")):
+                    return chat.confirm(body)
             if not self.mission:
-                return "no mission"
+                return "stale confirmation"
             return self.mission.confirm(body)
+
+    # -- conversations ---------------------------------------------------------------------------
+    def chat_list(self) -> dict:
+        with self.lock:
+            chats = sorted(self.chats.values(), key=lambda c: c.updated_at, reverse=True)
+            return {"mode": MODE, "chats": [c.summary() for c in chats]}
+
+    def chat_view(self, chat_id: str) -> dict | None:
+        with self.lock:
+            chat = self.chats.get(chat_id)
+            return {"mode": MODE, "chat": chat.view()} if chat else None
+
+    def create_chat(self, body: dict) -> tuple[str | None, str | None]:
+        """Returns (error, chat_id)."""
+        text = _clean_text(body.get("text"))
+        if text is None:
+            return "empty or too long message", None
+        error = self.pairing.check_message(body, None)
+        if error:
+            return error, None
+        with self.lock:
+            self.chats_started += 1
+            chat = Chat(self.chats_started, text, self._new_mission)
+            self.chats[chat.id] = chat
+            return None, chat.id
+
+    def post_message(self, chat_id: str, body: dict) -> str | None:
+        text = _clean_text(body.get("text"))
+        if text is None:
+            return "empty or too long message"
+        error = self.pairing.check_message(body, chat_id)
+        if error:
+            return error
+        with self.lock:
+            chat = self.chats.get(chat_id)
+            if chat is None:
+                return "unknown chat"
+            chat.message(text)
+            return None
+
+    def delete_chat(self, chat_id: str, body: dict) -> str | None:
+        error = self.pairing.check_delete(body, chat_id)
+        if error:
+            return error
+        with self.lock:
+            return None if self.chats.pop(chat_id, None) else "unknown chat"
+
+
+def _clean_text(text) -> str | None:
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    return text if 0 < len(text) <= MAX_TEXT else None
 
 
 def make_handler(computer: Computer):
@@ -253,6 +324,11 @@ def make_handler(computer: Computer):
                 self._send(200, computer.state())
             elif self.path == "/v0/mock/pairing":
                 self._send(200, {"payload": computer.pairing.payload(), "mode": MODE})
+            elif self.path == "/v0/chats":
+                self._send(200, computer.chat_list())
+            elif self.path.startswith("/v0/chats/") and self.path.count("/") == 3:
+                view = computer.chat_view(self.path.rsplit("/", 1)[1])
+                self._send(200, view) if view else self._error(404, "unknown chat")
             else:
                 self._error(404, "not found")
 
@@ -275,6 +351,18 @@ def make_handler(computer: Computer):
                 return self._send(200, {"ok": True, "pairing_id": pairing_id, "mode": MODE})
             if self.path == "/v0/confirm":
                 error = computer.confirm(body)
+                return self._error(409, error) if error else self._send(200, {"ok": True, "mode": MODE})
+            if self.path == "/v0/chats":
+                error, chat_id = computer.create_chat(body)
+                return self._error(409, error) if error else self._send(200, {"ok": True, "chat_id": chat_id,
+                                                                              "mode": MODE})
+            parts = self.path.split("/")  # ["", "v0", "chats", "<id>", "messages" | "delete"]
+            if len(parts) == 5 and parts[1:3] == ["v0", "chats"] and parts[4] in ("messages", "delete"):
+                chat_id = parts[3]
+                if parts[4] == "messages":
+                    error = computer.post_message(chat_id, body)
+                else:
+                    error = computer.delete_chat(chat_id, body)
                 return self._error(409, error) if error else self._send(200, {"ok": True, "mode": MODE})
             if self.path == "/v0/mock/start":
                 computer.start()
