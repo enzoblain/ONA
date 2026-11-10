@@ -1,0 +1,10 @@
+target/
+.tools/
+.DS_Store
+
+# Secrets and keys
+.env*
+*.key
+*.pem
+*keystore*
+keys.bin

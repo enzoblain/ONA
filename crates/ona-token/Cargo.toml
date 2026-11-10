@@ -1,0 +1,12 @@
+[package]
+name = "ona-token"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+blst = "0.3"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"

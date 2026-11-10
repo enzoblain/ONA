@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ona-token",
+    "crates/ona-mint",
+    "crates/ona-registry",
+    "crates/ona-signer",
+    "crates/ona-server",
+    "crates/ona-wallet",
+    "crates/ona-core",
+    "crates/ona-sandbox",
+]
+
+# Used only to build the NEAR contracts to wasm.
+[profile.contract]
+inherits = "release"
+codegen-units = 1
+opt-level = "z"
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = true
