@@ -23,7 +23,7 @@ content, but the requests, the payment and the agent's actions still identify yo
 
 | Component | Role | Language |
 |---|---|---|
-| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report, Tor client (Arti) | Rust |
+| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Reaches the network through a local `tor` over SOCKS5 (`ona-tor`) | Rust |
 | Desktop app | Connects a NEAR wallet for deposits, starts missions, asks for confirmations, shows the exposure report | Tauri + JavaScript |
 | iOS app | Remote control of the computer over Tor: mission progress and confirmations. Holds no tokens and no pseudonym table | Swift |
 | `ona-server` | Thin relay in a TEE (Phala dstack): holds the NEAR AI Cloud key, enforces a flat request size, submits transactions | Rust |
@@ -52,7 +52,8 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
 | Desktop app, iOS app | not in this repository yet | none |
-| Tor, Phala enclave | not built | none |
+| `ona-tor` client through Tor | library done, no program uses it yet ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
+| Phala enclave | not built | none |
 
 ## Run it
 

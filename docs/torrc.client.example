@@ -1,0 +1,8 @@
+# Local tor for an ONA user. See docs/TOR.md.
+
+# One port for the relay and one for NEAR, so the two flows use separate circuits.
+SocksPort 127.0.0.1:9050
+SocksPort 127.0.0.1:9052
+
+# Refuses any SOCKS request that carries an IP address instead of a host name.
+SafeSocks 1

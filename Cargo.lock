@@ -2074,6 +2074,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ona-tor"
+version = "0.0.1"
+dependencies = [
+ "ed25519-dalek",
+ "ona-core",
+ "ona-near",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "ona-wallet"
 version = "0.0.1"
 dependencies = [

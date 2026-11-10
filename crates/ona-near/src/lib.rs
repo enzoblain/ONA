@@ -143,6 +143,11 @@ impl Client {
     pub fn new(url: &str, key: SigningKey) -> Self {
         let agent: ureq::Agent =
             ureq::Agent::config_builder().timeout_global(Some(RPC_TIMEOUT)).build().into();
+        Self::with_agent(url, key, agent)
+    }
+
+    /// Uses a caller-built agent, for example one that sends everything through Tor.
+    pub fn with_agent(url: &str, key: SigningKey, agent: ureq::Agent) -> Self {
         Self { url: url.to_string(), agent, key }
     }
 
