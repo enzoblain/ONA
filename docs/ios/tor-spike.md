@@ -2,6 +2,11 @@
 
 Document interne. Créé le 2026-11-10.
 
+> **Mise à jour :** l'app de test `ios/TorSpike` et son script `test-onion/run.sh` ont été retirés (branche
+> `ios-unified-app`). Arti est maintenant dans l'app ONA (onglet Tor). Ils restent dans l'historique git (commit
+> `2ef5dfe`). Pour un `.onion` de test : `ios/MockComputer/run_onion.sh`. Les mesures ci-dessous ont été faites avec
+> l'ancienne app de test.
+
 ## Ce qui existe
 
 | Chemin | Rôle |

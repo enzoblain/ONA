@@ -25,7 +25,12 @@ struct TorComputerLink: ComputerLink {
 
     private func send<T: Decodable>(_ method: String, _ path: String, body: Data?,
                                     acceptErrorBody: Bool = false) async throws -> T {
-        let response = try await tor.request(host: onion, method: method, path: path, body: body)
+        let response: ArtiTor.Response
+        do {
+            response = try await tor.request(host: onion, method: method, path: path, body: body)
+        } catch let error as TorError {
+            throw LinkError.unreachable(error.localizedDescription)
+        }
         return try ProtocolCoding.decodeReply(T.self, status: response.status, body: response.body,
                                               acceptErrorBody: acceptErrorBody)
     }

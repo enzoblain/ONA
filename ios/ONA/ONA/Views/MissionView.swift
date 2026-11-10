@@ -56,8 +56,8 @@ struct MissionView: View {
             }
 
             if model.isSimulation, mission.phase == .closed || mission.phase == .cancelled {
-                Section("Simulation") {
-                    Button("Nouvelle mission simulée") { Task { await model.mock(.start) } }
+                Section {
+                    Button("Nouvelle simulation") { Task { await model.mock(.start) } }
                 }
             }
         }

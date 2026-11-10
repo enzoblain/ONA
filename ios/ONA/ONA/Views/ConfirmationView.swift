@@ -189,23 +189,24 @@ private struct PaymentConfirmation: View {
                     LabeledContent("Destinataire") {
                         Text(verified.to).font(.body.monospaced())
                     }
+                    Label("Vérifié par ce téléphone", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
                 } header: {
                     Text("Paiement préparé par l'ordinateur")
+                } footer: {
+                    Text("Ce téléphone a contrôlé que le montant et le destinataire affichés sont bien ceux que l'ordinateur paiera.")
                 }
                 Section {
-                    Text(request.screen).font(.callout.monospaced())
-                    LabeledContent("Empreinte", value: String(verified.digest.prefix(16)) + "…")
-                        .font(.caption.monospaced())
-                } header: {
-                    Text("Vérifié sur ce téléphone")
-                } footer: {
-                    Text("Le téléphone a recalculé l'empreinte à partir du montant et du destinataire : elle correspond à celle de l'ordinateur. C'est cette empreinte qui est confirmée.")
+                    DisclosureGroup("Détails techniques") {
+                        Text(request.screen).font(.caption.monospaced())
+                        LabeledContent("Empreinte", value: String(verified.digest.prefix(16)) + "…")
+                            .font(.caption.monospaced())
+                    }
                 }
             case .failure(let failure):
                 Section {
                     Label(message(for: failure), systemImage: "xmark.octagon.fill")
                         .foregroundStyle(.red)
-                    Text(request.screen).font(.callout.monospaced())
                 } header: {
                     Text("Paiement incohérent")
                 } footer: {

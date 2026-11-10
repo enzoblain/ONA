@@ -37,10 +37,16 @@ Voir `app.md` et `protocol-draft.md`. Proposition pour la question 2 ci-dessous 
 l'appairage (`POST /v0/pair`), avec un code à 6 chiffres comparé sur les deux écrans. Reste : essai sur iPhone réel
 (Secure Enclave, Face ID), et le côté ordinateur dans `ona-core`.
 
-## Étape 4 (pilotage via Tor) : code fait, bout en bout pas encore réussi
+## Étape 4 (pilotage via Tor) : bout en bout réussi une fois dans le simulateur
 
-Voir `app.md`. Le réseau de l'école filtre Tor ; à refaire sur le partage de connexion. Côté ordinateur réel : servir
+Voir `app.md`. Le réseau de l'école filtre Tor par moments ; à refaire sur l'iPhone réel. Côté ordinateur réel : servir
 le protocole sur un `.onion` (Hugo).
+
+## App unique (branche `ios-unified-app`)
+
+L'app de test TorSpike est fusionnée dans l'app ONA : onglets Accueil / Tor / Réglages (voir `app.md`). Le cache
+d'Arti peut être effacé depuis l'onglet Tor (question ouverte n° 1 ci-dessous, toujours à trancher pour la valeur par
+défaut).
 
 ## Questions ouvertes à régler avec l'équipe
 
