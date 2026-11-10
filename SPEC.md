@@ -28,7 +28,8 @@ non-subgroup points on NEAR.
 `issue` costs about 6.9 Tgas per token, and `relay_claim` about 8.3. These runs attached 1000 Tgas; the limit on testnet is not verified.
 
 The same run confirmed: the deployed account has no access key, a transfer to a missing account comes back to the token's own implicit
-account, an outsider cannot call the payout callback, and the reserve stayed solvent after every step.
+account, an outsider cannot call the payout callback, and the reserve stayed solvent after every step. On the same node, the real signer
+loop locked and issued a deposit, and the real relay claimed a credit, returned request tokens and refused one used twice.
 
 ## Token
 | Field | Size | Role |

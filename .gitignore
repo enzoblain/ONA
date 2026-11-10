@@ -7,4 +7,5 @@ target/
 *.key
 *.pem
 *keystore*
-keys.bin
+*keys.bin
+*.state

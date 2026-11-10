@@ -52,9 +52,33 @@ cargo build --profile contract --target wasm32-unknown-unknown -p ona-mint --con
 NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox cargo run -p ona-sandbox
 ```
 
-`NEAR_SANDBOX_BIN_PATH` is the only environment variable the code reads, through the `near-sandbox` crate. This deploys the contract
+`NEAR_SANDBOX_BIN_PATH` is read by the `near-sandbox` crate. This deploys the contract
 on a local node, calls every method, prints the gas burnt, then runs the real signer loop and a real relay exchange against the node.
 The node crashes when started inside a macOS Seatbelt sandbox, so run it from a normal terminal.
+
+## Run the signer
+
+```
+cargo run -p ona-signer -- init-keys signer-keys.bin 8
+```
+
+This creates the mint keys in a new private file, and prints the public keys to give to the contract at deployment. Each deployment
+needs its own keys. To issue tokens:
+
+| Variable | Value |
+|---|---|
+| `ONA_RPC_URL` | NEAR RPC endpoint |
+| `ONA_MINT` | account of the deployed contract |
+| `ONA_SIGNER_ACCOUNT` | account named as signer in the contract |
+| `ONA_SIGNER_ACCOUNT_KEY_FILE` | file holding `ed25519:<base58>`, readable by its owner only |
+| `ONA_SIGNER_KEYS_FILE` | the file from `init-keys` |
+| `ONA_SIGNER_STATE_FILE` | where the signer records its progress; must survive restarts |
+
+```
+cargo run -p ona-signer -- run
+```
+
+It refuses to start if its keys are not the ones the contract verifies against.
 
 ## Not available yet
 

@@ -45,8 +45,8 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-mint` contract | done, gas measured ([SPEC](SPEC.md#measured-gas)) | mocked NEAR VM with real BLS and ed25519 host functions, and a local NEAR node |
 | `ona-registry` contract | done | mocked NEAR VM only |
 | `ona-near` RPC client | done | unit tests, and a local NEAR node through `ona-sandbox` |
-| `ona-signer` issuing loop | done, not yet run against a node | fake chain |
-| `ona-server` relay | logic, HTTP and chain client done, not yet run against a node | fake chain and model |
+| `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
+| `ona-server` relay | logic, HTTP and chain client done, model still fake | fake chain, and a local NEAR node |
 | `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | Desktop app, iOS app | not in this repository yet | none |
