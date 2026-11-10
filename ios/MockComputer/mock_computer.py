@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Fake ONA computer for the iOS app (step 2). Everything it returns is labelled "mode": "mock".
+"""Fake ONA computer for the iOS app (steps 2 and 3). Everything it returns is labelled "mode": "mock".
 
 Follows docs/ios/protocol-draft.md (draft v0) and replays the demo mission of ona-core
 (crates/ona-core on main): same plan, same two offers, same payment bytes and digest.
 
+Step 3: the phone pairs with a QR code (printed in the terminal as text; `--qr` also opens it as an image) and every
+confirmation must be signed by the paired phone's key.
+
 Standard library only. Usage:
-    python3 mock_computer.py [--port 8790] [--host 127.0.0.1] [--step-seconds 3]
-Use --host 0.0.0.0 to reach it from an iPhone on the same Wi-Fi.
+    python3 mock_computer.py [--port 8790] [--host 127.0.0.1] [--step-seconds 3] [--qr]
+Use --host 0.0.0.0 to reach it from an iPhone on the same network.
 """
 
 from __future__ import annotations
@@ -14,10 +17,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from pairing import Pairing
 
 MODE = "mock"
 
@@ -183,7 +192,8 @@ class Mission:
 
 
 class Computer:
-    def __init__(self, step_seconds: float):
+    def __init__(self, step_seconds: float, pairing: Pairing):
+        self.pairing = pairing
         self.lock = threading.Lock()
         self.mission: Mission | None = None
         self.missions_started = 0
@@ -212,6 +222,10 @@ class Computer:
                     "mission": self.mission.view() if self.mission else None}
 
     def confirm(self, body: dict) -> str | None:
+        signature_error = self.pairing.check_confirmation(body)
+        if signature_error:
+            print(f"   confirmation refused: {signature_error}", flush=True)
+            return signature_error
         with self.lock:
             if not self.mission:
                 return "no mission"
@@ -237,6 +251,8 @@ def make_handler(computer: Computer):
         def do_GET(self):  # noqa: N802 (http.server naming)
             if self.path == "/v0/state":
                 self._send(200, computer.state())
+            elif self.path == "/v0/mock/pairing":
+                self._send(200, {"payload": computer.pairing.payload(), "mode": MODE})
             else:
                 self._error(404, "not found")
 
@@ -250,6 +266,13 @@ def make_handler(computer: Computer):
                 return self._error(400, "body is not JSON")
             if not isinstance(body, dict):
                 return self._error(400, "body must be an object")
+            if self.path == "/v0/pair":
+                error, pairing_id, code = computer.pairing.pair(body)
+                if error:
+                    print(f"   pairing refused: {error}", flush=True)
+                    return self._error(403, error)
+                print(f"==> Phone paired ({pairing_id}). Verification code: {code[:3]} {code[3:]}", flush=True)
+                return self._send(200, {"ok": True, "pairing_id": pairing_id, "mode": MODE})
             if self.path == "/v0/confirm":
                 error = computer.confirm(body)
                 return self._error(409, error) if error else self._send(200, {"ok": True, "mode": MODE})
@@ -259,6 +282,10 @@ def make_handler(computer: Computer):
             if self.path == "/v0/mock/reset":
                 computer.reset()
                 return self._send(200, {"ok": True, "mode": MODE})
+            if self.path == "/v0/mock/unpair":
+                computer.pairing.new_code()
+                print_pairing(computer.pairing, qr=False)
+                return self._send(200, {"ok": True, "mode": MODE})
             self._error(404, "not found")
 
         def log_message(self, fmt, *args):  # one short line per request
@@ -267,19 +294,49 @@ def make_handler(computer: Computer):
     return Handler
 
 
+def public_host(host: str) -> str:
+    """The address a phone can use: the host itself, or this Mac's LAN address when listening on all interfaces."""
+    if host not in ("0.0.0.0", "::"):
+        return host
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("192.0.2.1", 9))  # no packet is sent: only picks the outgoing interface
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+
+def print_pairing(pairing: Pairing, qr: bool) -> None:
+    payload = pairing.payload()
+    print(f"==> Pairing QR text (single use, address {pairing.address}):\n{payload}", flush=True)
+    if qr:
+        script = Path(__file__).with_name("pairing_qr.swift")
+        out = Path("/tmp") / "ona-mock-pairing.png"
+        try:
+            subprocess.run(["swift", str(script), payload, str(out)], check=True, timeout=120)
+            subprocess.run(["open", str(out)], check=False)
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"   could not show the QR image: {e}", file=sys.stderr, flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8790)
     parser.add_argument("--step-seconds", type=float, default=3.0)
     parser.add_argument("--no-start", action="store_true", help="do not open a demo mission at launch")
+    parser.add_argument("--address", help="address put in the pairing QR (default: guessed from --host)")
+    parser.add_argument("--qr", action="store_true", help="also open the pairing QR as an image (macOS)")
     args = parser.parse_args()
 
-    computer = Computer(args.step_seconds)
+    address = args.address or f"http://{public_host(args.host)}:{args.port}"
+    pairing = Pairing("Ordinateur simulé", address)
+    computer = Computer(args.step_seconds, pairing)
     if not args.no_start:
         computer.start()
     server = ThreadingHTTPServer((args.host, args.port), make_handler(computer))
     print(f"ONA mock computer (mode: mock) on http://{args.host}:{args.port}/v0/state", flush=True)
+    print_pairing(pairing, qr=args.qr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

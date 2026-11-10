@@ -1,9 +1,10 @@
 import Foundation
 
-/// How the phone reaches the computer. Step 2: plain HTTP on the local network (mock computer).
+/// How the phone reaches the computer. Steps 2–3: plain HTTP on the local network (mock computer).
 /// Step 4 adds a Tor implementation behind the same protocol.
 protocol ComputerLink: Sendable {
     func state() async throws -> ComputerState
+    func pair(_ request: PairRequest) async throws -> Ack
     func confirm(_ confirmation: ConfirmationAnswer) async throws -> Ack
     /// Routes that exist only on the mock computer.
     func mock(_ action: MockAction) async throws -> Ack
@@ -47,6 +48,10 @@ struct HTTPComputerLink: ComputerLink {
         try await send(URLRequest(url: baseURL.appending(path: "v0/state")))
     }
 
+    func pair(_ request: PairRequest) async throws -> Ack {
+        try await post("v0/pair", body: request)
+    }
+
     func confirm(_ confirmation: ConfirmationAnswer) async throws -> Ack {
         try await post("v0/confirm", body: confirmation)
     }
@@ -59,7 +64,7 @@ struct HTTPComputerLink: ComputerLink {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(body)
+        request.httpBody = try ProtocolCoding.encoder.encode(body)
         return try await send(request, acceptErrorBody: true)
     }
 
@@ -73,8 +78,7 @@ struct HTTPComputerLink: ComputerLink {
             throw LinkError.unreachable(error.localizedDescription)
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let decoder = ProtocolCoding.decoder
         guard (200..<300).contains(status) || acceptErrorBody else {
             let ack = try? decoder.decode(Ack.self, from: data)
             throw LinkError.badStatus(status, ack?.error)

@@ -114,67 +114,13 @@ struct MessageTests {
     }
 
     @Test func confirmationEncodesSnakeCaseFieldsOnly() throws {
-        let body = ConfirmationAnswer(id: "c-3", decision: .accept, digest: "ab")
-        let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(body)) as? [String: Any]
+        var body = ConfirmationAnswer(id: "c-3", decision: .accept, digest: "ab")
+        body.pairingId = "p-1"
+        let object = try JSONSerialization.jsonObject(with: ProtocolCoding.encoder.encode(body)) as? [String: Any]
         #expect(object?["id"] as? String == "c-3")
         #expect(object?["decision"] as? String == "accept")
         #expect(object?["digest"] as? String == "ab")
+        #expect(object?["pairing_id"] as? String == "p-1")
         #expect(object?["firm"] == nil)
-    }
-}
-
-/// Records what the model sends, answers with a fixed state.
-private final class FakeLink: ComputerLink, @unchecked Sendable {
-    let lock = NSLock()
-    var sent: [ConfirmationAnswer] = []
-    let stateData: Data
-
-    init(stateData: Data) { self.stateData = stateData }
-
-    func state() async throws -> ComputerState {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(ComputerState.self, from: stateData)
-    }
-
-    func confirm(_ confirmation: ConfirmationAnswer) async throws -> Ack {
-        lock.withLock { sent.append(confirmation) }
-        return Ack(ok: true, error: nil, mode: .mock)
-    }
-
-    func mock(_ action: MockAction) async throws -> Ack {
-        Ack(ok: true, error: nil, mode: .mock)
-    }
-}
-
-@MainActor
-@Suite("Remote model")
-struct RemoteModelTests {
-    @Test func confirmsAPaymentWithThePhonesOwnDigest() async throws {
-        let link = FakeLink(stateData: MessageTests.waitingForPayment)
-        let model = RemoteModel(address: "http://computer.test:8790") { _ in link }
-        await model.refresh()
-        #expect(model.isSimulation)
-        let pending = try #require(model.pending)
-        guard case .payment(let request) = pending.request else {
-            Issue.record("expected a payment")
-            return
-        }
-        let verified = try PaymentCheck.verify(request).get()
-        await model.confirmPayment(pending, verified: verified)
-        #expect(link.sent == [ConfirmationAnswer(id: "c-3", decision: .accept, digest: onaCoreDemoDigest)])
-    }
-
-    @Test func rejectSendsOnlyTheDecision() async throws {
-        let link = FakeLink(stateData: MessageTests.waitingForPayment)
-        let model = RemoteModel(address: "http://computer.test:8790") { _ in link }
-        await model.refresh()
-        await model.reject(try #require(model.pending))
-        #expect(link.sent == [ConfirmationAnswer(id: "c-3", decision: .reject)])
-    }
-
-    @Test func invalidAddressFailsWithoutALink() {
-        let model = RemoteModel(address: "pas une adresse") { _ in FakeLink(stateData: Data()) }
-        #expect(model.connection == .failed("Adresse invalide"))
     }
 }

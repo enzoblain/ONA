@@ -1,55 +1,142 @@
 import Foundation
 import Observation
 
-/// What the remote control knows about the computer. Kept in memory only, rebuilt by polling.
+/// What the remote control knows about the computer. Only the pairing is kept (Keychain); the rest lives in memory and
+/// is rebuilt by polling.
 @MainActor
 @Observable
 final class RemoteModel {
     enum Connection: Equatable {
+        case notPaired
         case idle
         case connecting
         case connected(Date)
         case failed(String)
     }
 
-    /// Address of the computer. Comes from Info.plist (`ONAComputerURL`) and can be changed in the app;
-    /// it is not saved (pairing comes at step 3).
-    var address: String {
-        didSet { if address != oldValue { rebuildLink() } }
+    /// Shown right after pairing, until the person says the codes match.
+    struct PendingVerification: Equatable {
+        let code: String
+        let computerName: String
     }
 
-    private(set) var connection: Connection = .idle
+    private(set) var pairing: StoredPairing?
+    private(set) var connection: Connection = .notPaired
     private(set) var state: ComputerState?
     private(set) var actionError: String?
     private(set) var sending = false
+    private(set) var verification: PendingVerification?
     /// Set once any reply said `mode: mock`, so the simulation label never disappears in a session.
     private(set) var sawSimulation = false
 
     static let pollInterval: Duration = .seconds(3)
 
     private var link: (any ComputerLink)?
+    private var key: (any DeviceKey)?
     private var pollTask: Task<Void, Never>?
+    private let store: any PairingStore
     private let makeLink: @Sendable (URL) -> any ComputerLink
+    private let makeKey: @Sendable () throws -> any DeviceKey
 
     init(
-        address: String? = nil,
-        makeLink: @escaping @Sendable (URL) -> any ComputerLink = { HTTPComputerLink(baseURL: $0) }
+        store: any PairingStore = KeychainPairingStore(),
+        makeLink: @escaping @Sendable (URL) -> any ComputerLink = { HTTPComputerLink(baseURL: $0) },
+        makeKey: @escaping @Sendable () throws -> any DeviceKey = DeviceKeys.create
     ) {
-        self.address = address
-            ?? (Bundle.main.object(forInfoDictionaryKey: "ONAComputerURL") as? String)
-            ?? "http://127.0.0.1:8790"
+        self.store = store
         self.makeLink = makeLink
-        rebuildLink()
+        self.makeKey = makeKey
+        do {
+            if let stored = try store.load() { try use(stored) }
+        } catch {
+            actionError = error.localizedDescription
+        }
     }
 
     var mission: Mission? { state?.mission }
     var pending: Pending? { state?.mission?.pending }
     var isSimulation: Bool { sawSimulation || (state?.isSimulation ?? false) }
+    var isPaired: Bool { pairing != nil }
+
+    // MARK: - Pairing
+
+    /// Pairs with the computer named in a scanned (or pasted) pairing code.
+    func pair(with text: String) async {
+        let payload: PairingPayload
+        switch PairingPayload.parse(text) {
+        case .success(let parsed): payload = parsed
+        case .failure(let failure):
+            actionError = Self.describe(failure)
+            return
+        }
+        guard let address = payload.address else {
+            actionError = "Ce code demande Tor (adresse .onion), pas encore pris en charge par cette version."
+            return
+        }
+        sending = true
+        defer { sending = false }
+        do {
+            let makeKey = self.makeKey
+            // Creating and using a Secure Enclave key can show the Face ID sheet: off the main thread.
+            let (key, request) = try await Task.detached {
+                let key = try makeKey()
+                let message = SignedFields.pairMessage(code: payload.code, phoneKey: key.publicKey,
+                                                       computerKey: payload.computerKey)
+                let request = PairRequest(code: payload.code, phoneKey: key.publicKey.base64EncodedString(),
+                                          signature: try key.sign(message).base64EncodedString())
+                return (key, request)
+            }.value
+            let link = makeLink(address)
+            let ack = try await link.pair(request)
+            if ack.mode?.isSimulation == true { sawSimulation = true }
+            guard ack.ok, let pairingID = ack.pairingId else {
+                actionError = ack.error ?? "Appairage refusé par l'ordinateur"
+                return
+            }
+            let stored = StoredPairing(
+                pairingID: pairingID, name: payload.name, address: address, onion: payload.onion,
+                computerKey: payload.computerKey, keyKind: key.kind, keyRepresentation: key.storedRepresentation,
+                pairedAt: .now
+            )
+            try store.save(stored)
+            try use(stored, key: key, link: link)
+            verification = PendingVerification(
+                code: SignedFields.verificationCode(computerKey: payload.computerKey, phoneKey: key.publicKey,
+                                                    code: payload.code),
+                computerName: payload.name
+            )
+            actionError = nil
+            await refresh()
+        } catch {
+            actionError = error.localizedDescription
+        }
+    }
+
+    /// The person saw the same code on both screens.
+    func verificationMatches() {
+        verification = nil
+    }
+
+    /// Forgets the computer: deletes the Keychain item. The Secure Enclave key goes with its handle.
+    func unpair() {
+        stopPolling()
+        do {
+            try store.delete()
+        } catch {
+            actionError = error.localizedDescription
+        }
+        pairing = nil
+        key = nil
+        link = nil
+        state = nil
+        verification = nil
+        connection = .notPaired
+    }
 
     // MARK: - Polling (foreground only: no push, no background refresh)
 
     func startPolling() {
-        guard pollTask == nil else { return }
+        guard pollTask == nil, link != nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
@@ -76,7 +163,7 @@ final class RemoteModel {
         }
     }
 
-    // MARK: - Confirmations
+    // MARK: - Confirmations (each one signed, each signature asks for Face ID on an iPhone)
 
     func acceptPlan(_ pending: Pending) async {
         await send(ConfirmationAnswer(id: pending.id, decision: .accept))
@@ -104,9 +191,29 @@ final class RemoteModel {
         actionError = nil
     }
 
-    private func send(_ confirmation: ConfirmationAnswer) async {
-        guard let link else { return }
-        await perform { try await link.confirm(confirmation) }
+    private func send(_ answer: ConfirmationAnswer) async {
+        guard let link, let key, let pairing else {
+            actionError = "Ce téléphone n'est appairé à aucun ordinateur."
+            return
+        }
+        let pairingID = pairing.pairingID
+        sending = true
+        let signed: ConfirmationAnswer
+        do {
+            signed = try await Task.detached {
+                var signed = answer.unsigned
+                signed.pairingId = pairingID
+                signed.signature = try key.sign(SignedFields.confirmMessage(answer.unsigned, pairingID: pairingID))
+                    .base64EncodedString()
+                return signed
+            }.value
+        } catch {
+            sending = false
+            actionError = "Confirmation non signée : \(error.localizedDescription)"
+            return
+        }
+        sending = false
+        await perform { try await link.confirm(signed) }
     }
 
     private func perform(_ action: @Sendable () async throws -> Ack) async {
@@ -122,14 +229,24 @@ final class RemoteModel {
         await refresh()
     }
 
-    private func rebuildLink() {
+    private func use(_ stored: StoredPairing, key: (any DeviceKey)? = nil, link: (any ComputerLink)? = nil) throws {
+        guard let address = stored.address else {
+            throw LinkError.unreachable("appairage Tor pas encore pris en charge")
+        }
+        self.key = try key ?? DeviceKeys.load(kind: stored.keyKind, representation: stored.keyRepresentation)
+        self.link = link ?? makeLink(address)
+        pairing = stored
         state = nil
         connection = .idle
-        if let url = URL(string: address.trimmingCharacters(in: .whitespaces)), url.scheme != nil, url.host() != nil {
-            link = makeLink(url)
-        } else {
-            link = nil
-            connection = .failed("Adresse invalide")
+    }
+
+    private static func describe(_ failure: PairingPayload.Failure) -> String {
+        switch failure {
+        case .notAPairingCode: "Ce n'est pas un code d'appairage ONA."
+        case .unreadable: "Code d'appairage illisible."
+        case .unsupportedVersion(let v): "Version d'appairage \(v) non prise en charge : mettez l'app à jour."
+        case .badComputerKey: "La clé de l'ordinateur dans ce code est invalide."
+        case .noAddress: "Ce code ne contient pas l'adresse de l'ordinateur."
         }
     }
 }

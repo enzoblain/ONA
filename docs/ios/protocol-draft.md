@@ -12,7 +12,7 @@ humaines d'`ona-core` (branche `main`, `crates/ona-core/src/lib.rs`) : `accept_p
 - Chaque réponse porte `"mode"` : `"mock"` pour le faux ordinateur (et pour `ona-core` tant que le modèle est faux),
   `"real"` sinon. L'app affiche « Simulation » dès qu'une réponse dit `"mock"`.
 - Transport : HTTP/1.1 + JSON. Sur le réseau local pour l'étape 2 ; via Tor (`.onion` de l'ordinateur) à l'étape 4.
-- Étape 3 : chaque confirmation sera signée par la clé P-256 du Secure Enclave (champ `signature` réservé).
+- Étape 3 : chaque confirmation est signée par la clé P-256 du Secure Enclave du téléphone appairé.
 
 ## `GET /v0/state`
 
@@ -51,23 +51,60 @@ humaines d'`ona-core` (branche `main`, `crates/ona-core/src/lib.rs`) : `accept_p
 `exposure` (mission terminée) : même forme que `exposure_report` d'`ona-core` (`outputs`, `refused_by_gate`,
 `firms_contacted`, `payments`, `model_calls`, `mode`).
 
+## Appairage (étape 3)
+
+1. L'ordinateur affiche un QR qui contient le texte `ona-pair:` suivi de base64url (sans `=`) d'un JSON :
+
+   ```json
+   { "v": 0, "name": "Ordinateur simulé", "address": "http://192.168.1.20:8790", "onion": null,
+     "computer_key": "<base64, clé publique P-256, X9.63 non compressée, 65 octets>",
+     "code": "<base64url, 16 octets aléatoires, usage unique>" }
+   ```
+
+   `address` sert à l'étape 2 (réseau local) ; à l'étape 4, `onion` la remplace.
+2. Le téléphone crée une clé P-256 dans le Secure Enclave (utilisation protégée par Face ID ou le code) et envoie :
+
+   ```json
+   POST /v0/pair
+   { "code": "<code du QR>", "phone_key": "<base64, X9.63, 65 octets>", "signature": "<base64, ECDSA DER>" }
+   ```
+
+   `signature` porte sur `champs("ona/pair/v0", code, phone_key, computer_key)` (voir plus bas) : elle prouve que le
+   téléphone détient la clé. Réponse : `{"ok": true, "pairing_id": "p-…", "mode": "mock"}`. Le code ne sert qu'une
+   fois.
+3. Les deux côtés affichent un **code de vérification** à 6 chiffres, à comparer à l'œil :
+   `SHA-256(champs("ona/sas/v0", computer_key, phone_key, code))`, 4 premiers octets en entier gros-boutiste,
+   modulo 1 000 000, sur 6 chiffres. Sur un vrai ordinateur, l'appairage n'est accepté qu'après cette comparaison ;
+   le faux ordinateur l'écrit dans son terminal et accepte tout seul.
+4. Le téléphone garde dans le Trousseau (cet appareil seulement, pas de synchronisation iCloud) : `pairing_id`,
+   `address` / `onion`, `computer_key`, `name`, et la référence chiffrée de sa clé Secure Enclave. Rien d'autre.
+
+**Encodage `champs(…)`** : pour chaque champ, sa longueur en u32 petit-boutiste puis ses octets (texte en UTF-8, clés
+en octets bruts, champ absent = longueur 0). Signature ECDSA P-256 avec SHA-256, encodage DER, en base64.
+
 ## `POST /v0/confirm`
 
 ```json
-{ "id": "c-3", "decision": "accept | reject", "firm": "cabinet-b", "digest": "<sha256 hex>", "signature": null }
+{ "id": "c-3", "decision": "accept | reject", "firm": "cabinet-b", "digest": "<sha256 hex>",
+  "pairing_id": "p-…", "signature": "<base64, ECDSA DER>" }
 ```
 
 - `firm` : obligatoire pour `recipient` accepté.
 - `digest` : obligatoire pour `payment` accepté. **Le téléphone recalcule le condensé** à partir de `to` et `amount`
   (même octets qu'`ona-core` : longueur de `to` en u32 petit-boutiste, `to` en UTF-8, `amount` en u128
   petit-boutiste, puis SHA-256) et refuse d'afficher un paiement dont le condensé ne correspond pas.
+- `signature` (étape 3) : sur `champs("ona/confirm/v0", pairing_id, id, decision, firm, digest)`, avec la clé du
+  téléphone appairé. L'ordinateur refuse une confirmation non signée, mal signée, ou d'un appairage inconnu.
+  Chaque signature demande Face ID (ou le code) sur le téléphone.
 - Réponse : `{"ok": true, "mode": "mock"}` ou `{"ok": false, "error": "…", "mode": "mock"}`. Une confirmation dont
-  `id` n'est plus celle attendue est refusée (`"stale confirmation"`).
+  `id` n'est plus celle attendue est refusée (`"stale confirmation"`) : une signature ne peut pas être rejouée sur
+  une autre confirmation.
 
 ## Routes du faux ordinateur seulement
 
 - `POST /v0/mock/start` : démarre une mission de démonstration.
 - `POST /v0/mock/reset` : efface la mission.
+- `GET /v0/mock/pairing` : le texte du QR d'appairage (pour le coller dans le simulateur, qui n'a pas de caméra).
 
 ## Questions pour Hugo
 
@@ -75,4 +112,7 @@ humaines d'`ona-core` (branche `main`, `crates/ona-core/src/lib.rs`) : `accept_p
    celle-ci ? Ici, l'ordinateur garde la main sur l'ordre des étapes et le téléphone ne fait que confirmer.
 2. Qui avance la mission entre deux confirmations : `ona-core` seul, ou faut-il un « continuer » du téléphone ?
 3. Montant en yoctoNEAR (chaîne décimale) : l'app affiche aussi la valeur en NEAR. D'accord ?
-4. Signature (étape 3) : sur quels octets ? Proposition : `id`, `decision`, puis `firm` ou `digest`.
+4. Signature et appairage (étape 3) : d'accord avec les octets signés et le code de vérification ci-dessus ?
+   Côté ordinateur, il faut afficher le QR, montrer le code à 6 chiffres et garder la clé du téléphone.
+5. `GET /v0/state` n'est pas encore authentifié : à l'étape 4, l'autorisation client Tor (restricted discovery)
+   limiterait l'accès au `.onion` au téléphone appairé. À confirmer.

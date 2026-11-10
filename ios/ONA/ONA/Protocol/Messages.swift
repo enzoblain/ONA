@@ -166,8 +166,23 @@ struct ConfirmationAnswer: Encodable, Sendable, Equatable {
     let decision: Decision
     var firm: String?
     var digest: String?
-    /// Reserved for step 3 (Secure Enclave P-256 signature).
+    /// Set when signing (step 3): which pairing signed, and the DER signature in base64.
+    var pairingId: String?
     var signature: String?
+
+    /// The answer without its signature fields: what the phone decided.
+    var unsigned: ConfirmationAnswer {
+        ConfirmationAnswer(id: id, decision: decision, firm: firm, digest: digest)
+    }
+}
+
+/// Body of `POST /v0/pair` (step 3).
+struct PairRequest: Encodable, Sendable, Equatable {
+    let code: String
+    /// base64 of the phone's P-256 public key (X9.63).
+    let phoneKey: String
+    /// base64 of the DER signature over `SignedFields.pairMessage`.
+    let signature: String
 }
 
 /// Reply of the POST routes.
@@ -175,4 +190,21 @@ struct Ack: Decodable, Sendable {
     let ok: Bool
     let error: String?
     let mode: Mode?
+    /// Only in the reply to `POST /v0/pair`.
+    var pairingId: String?
+}
+
+/// JSON coding shared by the app and its tests: snake_case on the wire.
+enum ProtocolCoding {
+    static var encoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        return encoder
+    }
+
+    static var decoder: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }
 }

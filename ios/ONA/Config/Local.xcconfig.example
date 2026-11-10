@@ -5,6 +5,3 @@ DEVELOPMENT_TEAM =
 
 // A free Apple account needs a bundle identifier nobody else has registered.
 // PRODUCT_BUNDLE_IDENTIFIER = org.example.ona
-
-// On an iPhone, the Mac's address on the Wi-Fi (the mock computer started with --host 0.0.0.0).
-// ONA_COMPUTER_URL = http:/$()/192.168.1.20:8790

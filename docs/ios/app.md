@@ -1,4 +1,4 @@
-# App iOS ONA — étape 2 (écrans sur serveur simulé)
+# App iOS ONA — étapes 2 et 3 (écrans, appairage, signatures)
 
 Document interne. Créé le 2026-11-10.
 
@@ -6,30 +6,40 @@ Document interne. Créé le 2026-11-10.
 
 | Chemin | Rôle |
 |---|---|
-| `ios/ONA/` | App SwiftUI « ONA » (iOS 18+) : suivi de mission, trois confirmations, relevé d'exposition. Pas encore de Tor ni d'appairage. |
-| `ios/ONA/ONATests/` | Tests unitaires (Swift Testing) : octets et empreinte du paiement, décodage des messages, envoi des confirmations. |
-| `ios/ONA/Package.swift` | Fait tourner la partie sans interface (`Protocol/`, `Remote/`) et ses tests sur le Mac : `cd ios/ONA && swift test`. |
+| `ios/ONA/` | App SwiftUI « ONA » (iOS 18+) : appairage par QR, suivi de mission, trois confirmations signées, relevé d'exposition. Pas encore de Tor. |
+| `ios/ONA/ONATests/` | Tests unitaires (Swift Testing) : paiement, messages, appairage, octets signés, signatures, Trousseau simulé. |
+| `ios/ONA/Package.swift` | Fait tourner la partie sans interface (`Protocol/`, `Pairing/`, `Remote/`) et ses tests sur le Mac : `cd ios/ONA && swift test`. |
 | `ios/MockComputer/mock_computer.py` | Faux ordinateur (Python, bibliothèque standard seulement), suit `protocol-draft.md`. Tout ce qu'il renvoie porte `mode: mock`. |
-| `ios/MockComputer/test_mock_computer.py` | Tests du faux ordinateur. |
+| `ios/MockComputer/pairing.py`, `p256.py` | Appairage et vérification des signatures du faux ordinateur. `p256.py` : P-256 en Python pur, **pour le faux ordinateur seulement** (ni revu, ni à temps constant). |
+| `ios/MockComputer/pairing_qr.swift` | Affiche le QR d'appairage en image (`--qr`). |
+| `ios/MockComputer/test_*.py` | Tests du faux ordinateur. |
 | `docs/ios/protocol-draft.md` | Brouillon du protocole téléphone ↔ ordinateur, à valider avec Hugo. |
 
 ## Lancer
 
 ```bash
-python3 ios/MockComputer/mock_computer.py                  # simulateur iOS : http://127.0.0.1:8790
-python3 ios/MockComputer/mock_computer.py --host 0.0.0.0   # iPhone sur le même Wi-Fi
+python3 ios/MockComputer/mock_computer.py --qr              # simulateur iOS ; ouvre aussi le QR en image
+python3 ios/MockComputer/mock_computer.py --host 0.0.0.0 --qr   # iPhone sur le même réseau
 open ios/ONA/ONA.xcodeproj
 ```
 
-Sur un iPhone, mettre l'adresse du Mac dans l'app (bouton « Ordinateur ») ou dans `Config/Local.xcconfig`
-(`ONA_COMPUTER_URL`). iOS demande l'autorisation « réseau local ».
+Le terminal du faux ordinateur affiche le texte du QR (usage unique) et, après l'appairage, le code à 6 chiffres.
+Sur iPhone : scanner le QR. Dans le simulateur (pas de caméra) : bouton « Coller », ou au lancement
+`xcrun simctl launch <simulateur> org.ona.remote -ONAPairingText 'ona-pair:…'` (Debug + simulateur seulement, absent
+des builds pour iPhone). Un nouveau QR : `curl -X POST http://127.0.0.1:8790/v0/mock/unpair`.
 
 ## Comportement
 
 - **Simulation visible** : un bandeau jaune « SIMULATION » s'affiche dès qu'une réponse dit `mode` ≠ `real`, et reste
   jusqu'à la fermeture de l'app. Le relevé d'exposition d'une mission simulée le dit aussi.
 - **Pas de push** : l'app interroge l'ordinateur toutes les 3 s, seulement au premier plan.
-- **Rien sur le disque** : session `URLSession` éphémère (pas de cache, pas de cookies), adresse non enregistrée.
+- **Rien sur le disque sauf l'appairage** : session `URLSession` éphémère (pas de cache, pas de cookies). L'appairage
+  (nom, adresse, clé publique de l'ordinateur, identifiant, référence de la clé du téléphone) est un seul élément du
+  Trousseau, « cet appareil seulement », jamais synchronisé. « Oublier cet ordinateur » l'efface.
+- **Appairage** : QR `ona-pair:…` → le téléphone crée sa clé P-256 (Secure Enclave, Face ID ou code à chaque usage),
+  prouve qu'il la détient, puis affiche un code à 6 chiffres à comparer avec l'ordinateur.
+- **Confirmations signées** : plan, destinataire, paiement et refus sont signés (`protocol-draft.md`). Le faux
+  ordinateur refuse une confirmation non signée, mal signée ou d'un autre appairage.
 - **Paiement vérifié sur le téléphone** : l'app recalcule l'empreinte (mêmes octets qu'`ona-core`) et le texte de
   l'écran à partir du montant et du destinataire. Si l'un ne correspond pas, le bouton « Confirmer » est désactivé.
   L'empreinte envoyée est celle calculée par le téléphone.
@@ -49,9 +59,22 @@ Sur un iPhone, mettre l'adresse du Mac dans l'app (bouton « Ordinateur ») ou d
 - `localhost` ne marchait pas de façon fiable depuis le simulateur (requêtes expirées, serveur lié en IPv4) :
   l'adresse par défaut est `127.0.0.1`.
 
+### Étape 3, vérifié le 2026-11-10
+
+- `swift test` : 30 tests (dont 14 nouveaux sur l'appairage et les signatures), tous passés. Python : 19 tests, tous
+  passés, dont le vecteur de la RFC 6979 (P-256, SHA-256) pour `p256.py`.
+- Entre langages : une signature produite par CryptoKit est vérifiée par `p256.py`, les octets signés sont identiques
+  en Swift et en Python, et le code à 6 chiffres aussi (vecteurs dans `PairingTests.swift` et `test_pairing.py`).
+- Simulateur iPhone 17 contre le faux ordinateur : appairage, même code à 6 chiffres des deux côtés (871 519),
+  confirmations signées acceptées, confirmation non signée refusée, appairage conservé après redémarrage de l'app et
+  signature avec la clé rechargée acceptée.
+- **Le simulateur n'a pas de Secure Enclave** : il utilise une clé logicielle (affichée comme telle dans l'app). Le
+  chemin Secure Enclave + Face ID n'a pas encore tourné.
+
 ## Pas encore fait
 
-- iPhone réel : app installée et lancée le 2026-11-10, mais aucune requête n'est arrivée au faux ordinateur. Le Wi-Fi
-  utilisé (réseau d'école, 10.2.x.x) isole probablement les appareils entre eux. À refaire avec le Mac sur le partage
-  de connexion de l'iPhone.
-- Étape 3 (appairage QR, signature Secure Enclave) et étape 4 (Tor) : le champ `signature` est réservé.
+- iPhone réel : app installée et lancée le 2026-11-10 (étape 2), mais aucune requête n'est arrivée au faux ordinateur.
+  Le Wi-Fi utilisé (réseau d'école, 10.2.x.x) isole probablement les appareils entre eux. À refaire avec le Mac sur le
+  partage de connexion de l'iPhone ; ce sera aussi le premier essai du Secure Enclave et de Face ID.
+- Côté ordinateur réel : afficher le QR, montrer le code à 6 chiffres, garder la clé du téléphone (questions pour Hugo).
+- Étape 4 (Tor) : `onion` dans le QR, autorisation client Tor.

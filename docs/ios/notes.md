@@ -31,6 +31,12 @@ Hugo.
 App `ios/ONA` et faux ordinateur `ios/MockComputer`, sur un brouillon de protocole (`protocol-draft.md`) calqué sur
 `ona-core`. Détails et vérifications : `app.md`. À faire : faire valider le protocole par Hugo, essayer sur l'iPhone.
 
+## Étape 3 (appairage QR, signatures Secure Enclave) : faite côté téléphone
+
+Voir `app.md` et `protocol-draft.md`. Proposition pour la question 2 ci-dessous : la clé du téléphone part à
+l'appairage (`POST /v0/pair`), avec un code à 6 chiffres comparé sur les deux écrans. Reste : essai sur iPhone réel
+(Secure Enclave, Face ID), et le côté ordinateur dans `ona-core`.
+
 ## Questions ouvertes à régler avec l'équipe
 
 1. **Démarrage de Tor à chaque ouverture.** Sans push et avec la suspension en arrière-plan, Tor redémarre presque à
