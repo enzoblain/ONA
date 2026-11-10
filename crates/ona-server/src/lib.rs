@@ -7,6 +7,7 @@
 
 pub mod gateway;
 pub mod http;
+pub mod keyfile;
 pub mod mock;
 pub mod near;
 

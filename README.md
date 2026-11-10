@@ -46,7 +46,7 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-registry` contract | done | mocked NEAR VM only |
 | `ona-near` RPC client | done | unit tests, and a local NEAR node through `ona-sandbox` |
 | `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
-| `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done, no production binary yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
+| `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done; the `ona-relay` program has not run yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
 | `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |

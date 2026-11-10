@@ -80,6 +80,34 @@ cargo run -p ona-signer -- run
 
 It refuses to start if its keys are not the ones the contract verifies against.
 
+## Run the relay
+
+```
+cargo run -p ona-server --bin ona-relay -- init-key relay-request-keys.bin
+```
+
+To serve, on `127.0.0.1` only:
+
+| Variable | Value |
+|---|---|
+| `ONA_RPC_URL` | NEAR RPC endpoint |
+| `ONA_MINT` | account of the deployed contract |
+| `ONA_NETWORK` | network name used when the contract was created |
+| `ONA_RELAY_ACCOUNT` | account named as relay in the contract |
+| `ONA_RELAY_ACCOUNT_KEY_FILE` | file holding `ed25519:<base58>`, readable by its owner only |
+| `ONA_RELAY_REQUEST_KEY_FILE` | the file from `init-key` |
+| `ONA_RELAY_STORE_FILE` | where the relay records exchanges; must survive restarts |
+| `ONA_MODELS` | allowed models, separated by commas |
+| `NEAR_AI_CLOUD_API_KEY` | NEAR AI key. Set it with `read -s`, never in a file |
+| `ONA_RELAY_PORT` | optional, default 8787 |
+| `ONA_FLUSH_SECS` | optional, seconds between batches of claims, default 60 |
+| `ONA_TOKENS_PER_CREDIT` | optional, default 100 |
+| `ONA_MAX_TOKENS` | optional, most tokens per reply, default 512 |
+
+```
+cargo run -p ona-server --bin ona-relay -- run
+```
+
 ## Not available yet
 
 No NEAR testnet deployment, real model connection, Tor, enclave, desktop app or iOS app. See the status table in the [README](../README.md).

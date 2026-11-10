@@ -1,12 +1,7 @@
 //! The `Chain` used in production: reads and writes `ona-mint` over NEAR RPC.
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use ed25519_dalek::SigningKey;
 use ona_near::Client;
 use ona_token::{g2_from_raw, G1_LEN, G2_LEN, G2_RAW_LEN};
 use serde_json::{json, Value};
@@ -39,31 +34,6 @@ impl NearChain {
             None => Ok(()),
         }
     }
-}
-
-/// Reads a NEAR account key (`ed25519:<base58>`) from a file only its owner can read.
-pub fn load_account_key(path: &Path) -> Result<SigningKey, String> {
-    let meta = fs::metadata(path).map_err(|e| format!("cannot read account key: {e}"))?;
-    if meta.permissions().mode() & 0o077 != 0 {
-        return Err("account key file is accessible to other users".into());
-    }
-    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    parse_account_key(text.trim())
-}
-
-/// Accepts the 64-byte form NEAR tools write, and refuses one whose public half does not match.
-pub fn parse_account_key(text: &str) -> Result<SigningKey, String> {
-    let encoded = text.strip_prefix("ed25519:").ok_or("account key must start with ed25519:")?;
-    let bytes = bs58::decode(encoded).into_vec().map_err(|_| "account key is not base58".to_string())?;
-    if bytes.len() != 64 {
-        return Err("account key must be 64 bytes".into());
-    }
-    let seed: [u8; 32] = bytes[..32].try_into().map_err(|_| "account key length".to_string())?;
-    let key = SigningKey::from_bytes(&seed);
-    if key.verifying_key().as_bytes()[..] != bytes[32..] {
-        return Err("account key is inconsistent".into());
-    }
-    Ok(key)
 }
 
 fn parse_u64(value: &Value) -> Option<u64> {
@@ -164,39 +134,6 @@ mod tests {
         assert!(parse_pending(&json!({"not": "a list"})).is_err());
         assert!(parse_pending(&json!([{"id":"x","deadline":"1","locked_until":"0","items":[]}])).is_err());
         assert!(parse_pending(&json!([{"id":"1","deadline":"1","items":[]}])).is_err(), "a missing lock field must not read as unlocked");
-    }
-
-    fn encoded_key(key: &SigningKey) -> Vec<u8> {
-        let mut bytes = key.to_bytes().to_vec();
-        bytes.extend_from_slice(key.verifying_key().as_bytes());
-        bytes
-    }
-
-    #[test]
-    fn account_keys_are_validated() {
-        let key = SigningKey::from_bytes(&[5u8; 32]);
-        let text = format!("ed25519:{}", bs58::encode(encoded_key(&key)).into_string());
-        assert_eq!(parse_account_key(&text).unwrap().to_bytes(), key.to_bytes());
-
-        assert!(parse_account_key("secp256k1:abc").is_err());
-        assert!(parse_account_key("ed25519:not-base-58!").is_err());
-        assert!(parse_account_key(&format!("ed25519:{}", bs58::encode([1u8; 32]).into_string())).is_err());
-
-        let mut wrong = encoded_key(&key);
-        wrong[40] ^= 1;
-        assert!(parse_account_key(&format!("ed25519:{}", bs58::encode(wrong).into_string())).is_err());
-    }
-
-    #[test]
-    fn an_account_key_readable_by_others_is_refused() {
-        let path = std::env::temp_dir().join(format!("ona-account-key-{}", std::process::id()));
-        let key = SigningKey::from_bytes(&[6u8; 32]);
-        fs::write(&path, format!("ed25519:{}\n", bs58::encode(encoded_key(&key)).into_string())).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(load_account_key(&path).err().unwrap().contains("other users"));
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(load_account_key(&path).is_ok());
-        fs::remove_file(&path).unwrap();
     }
 
     #[test]
