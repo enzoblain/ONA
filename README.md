@@ -1,3 +1,5 @@
+<img src="assets/logo.png" alt="ONA logo" width="120">
+
 # ONA: an AI agent that reports who saw what during each mission
 
 Built at NEAR HACKATHON · Tracks: to be confirmed · Network: NEAR testnet (planned) · Not audited
@@ -133,4 +135,4 @@ To be named.
 
 ## License
 
-To be added (MIT planned).
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026 Hugo Thomas & Enzo Blain.

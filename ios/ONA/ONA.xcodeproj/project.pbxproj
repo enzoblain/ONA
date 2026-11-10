@@ -260,6 +260,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Config/Info.plist;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				INFOPLIST_KEY_CFBundleDisplayName = ONA;
 				INFOPLIST_KEY_NSCameraUsageDescription = "ONA utilise la caméra pour lire le code d'appairage affiché par l'ordinateur.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Face ID protège la clé qui signe vos confirmations.";
@@ -297,6 +298,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Config/Info.plist;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				INFOPLIST_KEY_CFBundleDisplayName = ONA;
 				INFOPLIST_KEY_NSCameraUsageDescription = "ONA utilise la caméra pour lire le code d'appairage affiché par l'ordinateur.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Face ID protège la clé qui signe vos confirmations.";

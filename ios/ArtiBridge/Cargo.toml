@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 publish = false
+license = "MIT"
 description = "C ABI around arti-client, linked into the ONA iOS app (Tor spike)"
 
 # Not a member of the root Cargo workspace (the ONA crates): built on its own, for iOS targets.

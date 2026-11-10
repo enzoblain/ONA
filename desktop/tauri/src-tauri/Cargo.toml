@@ -3,6 +3,7 @@ name = "ona-desktop"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT"
 description = "ONA desktop app for Windows and Linux (Tauri), on ona-core, serving the phone"
 
 # Not a member of the root workspace. Cargo.lock was seeded from the root one so ona-core's dependencies resolve to

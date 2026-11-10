@@ -3,6 +3,7 @@ name = "ona-core-bridge"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT"
 description = "C ABI around ona-core, linked into the ONA macOS app"
 
 # Not a member of the root workspace: built on its own for the Mac app. Cargo.lock was seeded from the root one so

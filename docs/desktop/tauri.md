@@ -16,7 +16,7 @@ Créée le 2026-11-10 sur la branche `desktop-tauri` (partie de `desktop-app`). 
 | `src/worker.rs` | Un seul fil possède tout (`ona-core` n'est pas `Send`) ; la fenêtre et le serveur lui envoient des tâches. |
 | `src/main.rs` | Commandes Tauri appelées par la fenêtre. |
 | `desktop/tauri/ui/` | Fenêtre en HTML/CSS/JavaScript sans bibliothèque : conversations, confirmations, relevé, fenêtre « Téléphone ». Thème clair et sombre. |
-| `desktop/tauri/scripts/make_icons.py` | Dessine les icônes (Python, bibliothèque standard). |
+| `assets/make_icons.swift` | Dessine le logo et toutes les icônes (iOS, macOS, Tauri) : `swift assets/make_icons.swift`. |
 
 ## Lancer
 
