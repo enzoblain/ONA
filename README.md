@@ -50,8 +50,9 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
-| Desktop app, iOS app | not in this repository yet | none |
-| Tor, Phala enclave | not built | none |
+| Desktop app | not in this repository yet | none |
+| iOS app (`ios/`) | Tor spike only: Arti embedded in a test app, which reached a test onion service | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
+| Tor on the computer, Phala enclave | not built | none |
 
 ## Run it
 
@@ -87,6 +88,19 @@ More in [SPEC.md](SPEC.md).
 Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`.
 
 The code and tests in this repository were written with Claude (Anthropic), under human direction.
+
+iOS side, pinned exactly (`Cargo.lock` pins the transitive ones):
+
+| Library | Version | Used by | Notes |
+|---|---|---|---|
+| `arti-client` (Tor Project) | 0.48.0 | `ios/ArtiBridge` | Features: tokio, native-tls, compression, onion-service-client, static-sqlite |
+| `tor-rtcompat` (Tor Project) | 0.48.0 | `ios/ArtiBridge` | |
+| `tokio` | 1.54.1 | `ios/ArtiBridge` | |
+| `serde_json` | 1.0.154 | `ios/ArtiBridge` | |
+| `tracing-subscriber` | 0.3.23 | `ios/ArtiBridge` | |
+| `sysinfo` | 0.38.4, patched | `ios/ArtiBridge` (via `tor-memquota`) | Local copy with a one-function change so it builds for iOS: `ios/ArtiBridge/patches/sysinfo-0.38.4/ONA-PATCH.md` |
+
+Test tooling, not shipped: C Tor 0.4.9.16 (Homebrew) runs the test onion service on the developer's Mac.
 
 ## Related project
 
