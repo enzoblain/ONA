@@ -24,7 +24,7 @@ content, but the requests, the payment and the agent's actions still identify yo
 | Component | Role | Language |
 |---|---|---|
 | `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Reaches the network through a local `tor` over SOCKS5 (`ona-tor`) | Rust |
-| Desktop app | Connects a NEAR wallet for deposits, starts missions, asks for confirmations, shows the exposure report | Tauri + JavaScript |
+| Desktop app | Connects a NEAR wallet for deposits, starts missions, asks for confirmations, shows the exposure report | Swift (SwiftUI) on `ona-core`, proposed in place of Tauri + JavaScript (to be confirmed) |
 | iOS app | Remote control of the computer over Tor: mission progress and confirmations. Holds no tokens and no pseudonym table | Swift |
 | `ona-server` | Thin relay in a TEE (Phala dstack): holds the NEAR AI Cloud key, enforces a flat request size, submits transactions | Rust |
 | `ona-signer` | Blind-signs tokens after on-chain deposits; no inbound network | Rust |
@@ -51,7 +51,7 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
-| Desktop app | not in this repository yet | none |
+| Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol; no wallet yet | Mac tests with the real `ona-core`, one end-to-end run with the iOS simulator on the local network ([notes](docs/desktop/app.md)) |
 | iOS app (`ios/`) | Tor (Arti embedded): an earlier test build reached a test onion service; the Tor screen is now a tab of the app | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
 | iOS app (`ios/`) | chat-style conversations with the agent, QR pairing and signed messages and confirmations against a mock computer, labelled `mode: mock` (the mock replays one demo mission for any request). Over Tor (Arti), pairing, polling and a signed confirmation passed once end to end in the simulator. The Secure Enclave key path has not run on a device yet | iOS simulator (software key), unit tests on the Mac ([notes](docs/ios/app.md)) |
 | `ona-tor` client through Tor | library done, no program uses it yet ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
