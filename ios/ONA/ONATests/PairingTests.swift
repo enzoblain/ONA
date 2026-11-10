@@ -192,7 +192,7 @@ struct RemoteModelTests {
         let store = MemoryPairingStore()
         let model = RemoteModel(store: store, makeLink: { _ in link }, makeKey: { SoftwareDeviceKey() })
         await model.pair(with: payloadText(computerKey: computer.publicKey))
-        #expect(model.actionError == "unknown or used pairing code")
+        #expect(model.actionError == ComputerMessages.french("unknown or used pairing code"))
         #expect(!model.isPaired)
         #expect(try store.load() == nil)
     }

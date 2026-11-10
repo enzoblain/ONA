@@ -6,7 +6,7 @@ struct ExposureView: View {
 
     var body: some View {
         if exposure.mode.isSimulation {
-            Label("Relevé d'une mission simulée", systemImage: "theatermasks")
+            Label("Relevé d'une simulation", systemImage: "theatermasks")
                 .font(.caption)
                 .foregroundStyle(.orange)
         }

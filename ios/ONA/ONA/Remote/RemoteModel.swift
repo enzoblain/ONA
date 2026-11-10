@@ -64,7 +64,7 @@ final class RemoteModel {
     nonisolated static func localOnlyLink(_ endpoint: Endpoint) -> any ComputerLink {
         switch endpoint {
         case .local(let url): HTTPComputerLink(baseURL: url)
-        case .onion: UnavailableLink(reason: "Tor n'est pas disponible dans cette version")
+        case .onion: UnavailableLink(reason: "Tor n'est pas disponible dans cette version de l'app.")
         }
     }
 
@@ -100,7 +100,7 @@ final class RemoteModel {
             let ack = try await link.pair(request)
             if ack.mode?.isSimulation == true { sawSimulation = true }
             guard ack.ok, let pairingID = ack.pairingId else {
-                actionError = ack.error ?? "Appairage refusé par l'ordinateur"
+                actionError = ack.error.map(ComputerMessages.french) ?? "L'ordinateur a refusé l'appairage."
                 return
             }
             let stored = StoredPairing(
@@ -219,7 +219,7 @@ final class RemoteModel {
             }.value
         } catch {
             sending = false
-            actionError = "Confirmation non signée : \(error.localizedDescription)"
+            actionError = "Confirmation annulée : elle n'a pas été signée."
             return
         }
         sending = false
@@ -232,7 +232,7 @@ final class RemoteModel {
         do {
             let ack = try await action()
             if ack.mode?.isSimulation == true { sawSimulation = true }
-            actionError = ack.ok ? nil : (ack.error ?? "refusé par l'ordinateur")
+            actionError = ack.ok ? nil : (ack.error.map(ComputerMessages.french) ?? "L'ordinateur a refusé la demande.")
         } catch {
             actionError = error.localizedDescription
         }
@@ -241,7 +241,7 @@ final class RemoteModel {
 
     private func use(_ stored: StoredPairing, key: (any DeviceKey)? = nil, link: (any ComputerLink)? = nil) throws {
         guard let endpoint = Endpoint(onion: stored.onion, address: stored.address) else {
-            throw LinkError.unreachable("appairage sans adresse")
+            throw LinkError.unreachable("L'appairage enregistré est incomplet : refaites-le.")
         }
         self.key = try key ?? DeviceKeys.load(kind: stored.keyKind, representation: stored.keyRepresentation)
         self.link = link ?? makeLink(endpoint)

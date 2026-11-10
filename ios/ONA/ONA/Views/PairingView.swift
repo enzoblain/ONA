@@ -12,7 +12,7 @@ struct PairingView: View {
             Section {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("Appairer un ordinateur", systemImage: "qrcode.viewfinder").font(.headline)
-                    Text("Ouvrez ONA sur l'ordinateur et affichez son code d'appairage. Ce téléphone crée alors sa propre clé, gardée dans le Secure Enclave : chaque confirmation sera signée avec, après Face ID.")
+                    Text("Ouvrez ONA sur votre ordinateur et affichez son code d'appairage. Ce téléphone crée alors une clé qui ne quitte jamais sa puce sécurisée : chaque confirmation sera signée avec, après Face ID.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -28,7 +28,7 @@ struct PairingView: View {
                 .disabled(!QRScanner.isAvailable || model.sending)
             } footer: {
                 if !QRScanner.isAvailable {
-                    Text("Pas de caméra utilisable ici (simulateur ?) : collez le texte du code ci-dessous.")
+                    Text("La caméra n'est pas disponible : collez le texte du code ci-dessous.")
                 }
             }
 

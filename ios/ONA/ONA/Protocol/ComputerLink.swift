@@ -15,15 +15,32 @@ enum MockAction: String, Sendable {
 }
 
 enum LinkError: LocalizedError {
+    /// The associated text is a sentence for the person (no technical detail).
     case unreachable(String)
     case badStatus(Int, String?)
     case badReply(String)
 
     var errorDescription: String? {
         switch self {
-        case .unreachable(let detail): "Ordinateur injoignable (\(detail)). Il doit être allumé."
-        case .badStatus(let code, let message): "Réponse \(code)\(message.map { " : \($0)" } ?? "")"
-        case .badReply(let detail): "Réponse illisible : \(detail)"
+        case .unreachable(let message): message
+        case .badStatus(_, let message): message.map(ComputerMessages.french) ?? "L'ordinateur a refusé la demande."
+        case .badReply: "L'ordinateur a répondu de façon inattendue. Mettez ONA à jour des deux côtés."
+        }
+    }
+}
+
+/// French text for the error codes the computer sends back (protocol-draft.md).
+enum ComputerMessages {
+    static func french(_ error: String) -> String {
+        switch error {
+        case "stale confirmation": "Cette demande a changé entre-temps : rouvrez-la."
+        case "not paired", "unknown pairing": "L'ordinateur ne reconnaît plus ce téléphone : refaites l'appairage."
+        case "unknown or used pairing code": "Ce code d'appairage a déjà servi ou a expiré : affichez-en un nouveau sur l'ordinateur."
+        case "pairing signature does not verify", "signature does not verify", "missing or malformed signature":
+            "L'ordinateur a rejeté la signature de ce téléphone."
+        case "digest does not match the payment screen": "Le paiement a changé : vérifiez-le à nouveau."
+        case "no mission": "Aucune mission en cours sur l'ordinateur."
+        default: "L'ordinateur a refusé la demande (\(error))."
         }
     }
 }
@@ -75,7 +92,7 @@ struct HTTPComputerLink: ComputerLink {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            throw LinkError.unreachable(error.localizedDescription)
+            throw LinkError.unreachable("Impossible de joindre l'ordinateur. Vérifiez qu'il est allumé et sur le même réseau.")
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         return try ProtocolCoding.decodeReply(T.self, status: status, body: data, acceptErrorBody: acceptErrorBody)

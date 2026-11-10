@@ -64,7 +64,7 @@ enum Format {
 /// Always-visible label while anything shown comes from a fake.
 struct SimulationBanner: View {
     var body: some View {
-        Label("SIMULATION — données du serveur simulé, rien n'est réel", systemImage: "theatermasks")
+        Label("Simulation — données fictives, rien n'est réel", systemImage: "theatermasks")
             .font(.footnote.weight(.semibold))
             .foregroundStyle(.black)
             .frame(maxWidth: .infinity)

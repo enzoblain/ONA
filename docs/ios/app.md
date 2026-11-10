@@ -32,6 +32,21 @@ Sur iPhone : scanner le QR. Dans le simulateur (pas de caméra) : bouton « Coll
 `xcrun simctl launch <simulateur> org.ona.remote -ONAPairingText 'ona-pair:…'` (Debug + simulateur seulement, absent
 des builds pour iPhone). Un nouveau QR : `curl -X POST http://127.0.0.1:8790/v0/mock/unpair`.
 
+## Interface
+
+Barre d'onglets en bas (Liquid Glass à partir d'iOS 26) :
+
+- **Accueil** : appairage (scan du QR, ou coller son texte), puis mission en cours et confirmations. Un badge signale
+  une confirmation en attente.
+- **Tor** : état de Tor (arrêté, démarrage avec progression, connecté, erreur avec « Détails »), démarrer / arrêter,
+  données Tor gardées sur le téléphone et bouton pour les effacer (remplace le « démarrage à froid » de l'ancienne app
+  de test), version d'Arti.
+- **Réglages** : ordinateur appairé et « Oublier cet ordinateur », données gardées sur le téléphone, version de l'app.
+  Les boutons de simulation n'apparaissent qu'avec un ordinateur simulé.
+
+Les messages d'erreur sont en français et sans détail technique ; le détail d'une erreur Tor est dans « Détails ».
+Les journaux d'Arti ne sont activés qu'en Debug.
+
 ## Comportement
 
 - **Simulation visible** : un bandeau jaune « SIMULATION » s'affiche dès qu'une réponse dit `mode` ≠ `real`, et reste
@@ -83,7 +98,12 @@ des builds pour iPhone). Un nouveau QR : `curl -X POST http://127.0.0.1:8790/v0/
   arrière-plan.
 - Tests : 3 tests Rust (lecture de la réponse HTTP, refus d'injection d'en-têtes), 34 tests Swift (dont le choix
   `.onion` / adresse locale et un appairage `.onion`), 19 tests Python. Tous passés.
-- **Bout en bout par Tor : pas encore réussi.** Sur le Wi-Fi de l'école (10.2.x.x), C Tor a fini par démarrer après
+- **Bout en bout par Tor : réussi une fois le 2026-11-10 (soir)**, dans le simulateur iPhone 17, contre le faux
+  ordinateur joignable seulement par son `.onion` (`run_onion.sh`) : appairage (code 537 645 des deux côtés), suivi
+  « Connecté par Tor », confirmation signée du plan acceptée (`POST /v0/confirm -> 200`). Les deux premiers essais
+  d'appairage ont expiré (60 s) juste après un effacement des données Tor ; le troisième a réussi. Depuis le Mac, le
+  même `.onion` répondait en 9,3 s puis 0,7 s. Une seule série, sur un réseau qui laissait passer Tor ce soir-là.
+- Plus tôt le même jour : **pas réussi.** Sur le Wi-Fi de l'école (10.2.x.x), C Tor a fini par démarrer après
   de nombreuses coupures TLS, mais Arti n'a obtenu aucun circuit vers le `.onion` du faux ordinateur (« Failed to
   obtain hidden service circuit », 4 essais depuis le Mac). Dans le simulateur, l'app démarre Arti (cache écrit) mais
   n'aboutit pas sur ce réseau. À refaire sur un réseau qui laisse passer Tor (partage de connexion).
