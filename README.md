@@ -1,6 +1,6 @@
 <img src="assets/logo.png" alt="ONA logo" width="120">
 
-# ONA: an AI agent that reports who saw what during each mission
+# ONA: a private AI chat, built so that no one links who you are to what you ask
 
 Built at NEAR HACKATHON · Tracks: to be confirmed · Network: NEAR testnet (planned) · Not audited
 
@@ -10,16 +10,29 @@ Built at NEAR HACKATHON · Tracks: to be confirmed · Network: NEAR testnet (pla
 
 ## What it is
 
-ONA runs an AI agent on your own computer for a sensitive task, and produces a per-mission **exposure report**: every party
-that received something during the mission, and exactly what it received.
+ONA is a chat with an AI, like ChatGPT or Claude, for the questions you would rather not attach your name to. You write
+to it from your computer or your phone. It can also act for you (search the web, contact someone, pay), each time after
+you confirm.
 
-Example mission: find a labour lawyer and compare fee ranges on a generic version of your case, without telling the firms
-you did not choose who you are.
+The difference is who sees what. ONA is designed so that no single party gets both who you are and what you asked:
+
+- **the model** reads your request with names replaced by pseudonyms, inside an enclave (NEAR AI Cloud);
+- **websites and the people the agent contacts** see Tor traffic and a generic message, not you;
+- **payments** use blind tokens: the mint that holds your deposit cannot link it to what you pay for;
+- **your phone** talks to your own computer over Tor, and the agent runs on that computer, not on our servers.
+
+After each mission, ONA shows an **exposure report**: every party that received something, and exactly what it received.
+
+This is the design. Today the model, the web and the payments in the app are still fakes; see
+[what works today](#what-works-today) and the [known limitations](#known-limitations).
+
+Example: find a labour lawyer and compare fees on a generic version of your case, without the firms you did not pick
+learning who you are.
 
 ## The problem
 
-A hosted AI agent links your identity, your content and your actions at one operator. Encrypted inference helps with
-content, but the requests, the payment and the agent's actions still identify you.
+A hosted AI chat links your identity, your conversations and your actions at one operator. Encrypted inference helps
+with the content, but the account, the network address, the payment and the agent's actions still identify you.
 
 ## Planned architecture
 
