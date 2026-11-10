@@ -3,6 +3,7 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ona_near::Client;
+use ona_token::{g2_from_raw, G2_LEN, G2_RAW_LEN};
 use serde_json::{json, Value};
 
 use crate::{Chain, Claim};
@@ -20,6 +21,20 @@ pub struct NearRelayChain {
 impl NearRelayChain {
     pub fn new(client: Client, account: String, mint: String) -> Self {
         Self { client, account, mint }
+    }
+
+    /// The key that verifies credits, read from the contract so it cannot drift from it.
+    pub fn credit_key(&self) -> Result<[u8; G2_LEN], String> {
+        let value = self
+            .client
+            .view_final(&self.mint, "get_denom", json!({"denom_id": 0}))
+            .map_err(|e| e.to_string())?;
+        let raw: [u8; G2_RAW_LEN] = value["pk_raw"]
+            .as_str()
+            .and_then(|k| B64.decode(k).ok())
+            .and_then(|k| k.try_into().ok())
+            .ok_or_else(|| format!("unexpected get_denom reply: {value}"))?;
+        g2_from_raw(&raw).map_err(|e| e.to_string())
     }
 
     fn view_bool(&self, method: &str, nf: &[u8; 32]) -> Result<bool, String> {

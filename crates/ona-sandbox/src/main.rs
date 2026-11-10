@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ed25519_dalek::SigningKey;
-use ona_near::{Action, Client, Outcome, TGAS};
+use ona_near::{Action, Client, Outcome};
 use ona_server::mock::MockModel;
 use ona_server::near::NearRelayChain;
 use ona_server::{Config, MemoryStore, Relay};
@@ -169,28 +169,19 @@ async fn main() -> Result<()> {
     let sks: Vec<SecretKey> = (0..4).map(|_| keygen(&mut OsRng)).collect();
     let pks: Vec<[u8; G2_LEN]> = sks.iter().map(|k| k.public_key()).collect();
     let mint = sub("mint");
-    let denoms: Vec<Value> = pks
-        .iter()
-        .enumerate()
-        .map(|(i, pk)| {
-            json!({
-                "value":(UNIT << i).to_string(),"pk_g2":b64(pk),
-                "circulation_cap":1000,"hourly_redeem_cap":1000,
-            })
-        })
-        .collect();
-    let init = json!({
-        "denoms":denoms,"signer":sub("signer"),"relay":sub("relay"),
-        "guardian":sub("guardian"),"network":"sandbox",
-    });
-    let new_call = Action::Call {
-        method: "new".into(),
-        args: init.to_string().into_bytes(),
-        gas: 300 * TGAS,
-        deposit: 0,
+    // The same plan as the real deployment tool, so this run also covers it.
+    let plan = ona_deploy::MintPlan {
+        network: "sandbox".into(),
+        signer: sub("signer"),
+        relay: sub("relay"),
+        guardian: sub("guardian"),
+        denom_keys: pks.clone(),
+        base_value: UNIT,
+        circulation_cap: 1000,
+        hourly_redeem_cap: 1000,
+        funding: 20 * NEAR,
     };
-    let actions = vec![Action::Create, Action::Transfer(20 * NEAR), Action::Deploy(code), new_call];
-    let o = chain.send(&root, &mint, actions)?;
+    let o = chain.send(&root, &mint, plan.actions(code)?)?;
     if let Some(f) = &o.failure {
         bail!("deploy: {f}");
     }

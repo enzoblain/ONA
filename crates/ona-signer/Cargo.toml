@@ -11,5 +11,7 @@ ona-near = { path = "../ona-near" }
 rand = "0.8"
 serde_json = "1"
 base64 = "0.22"
+
+[dev-dependencies]
 bs58 = "0.5"
 ed25519-dalek = "2"

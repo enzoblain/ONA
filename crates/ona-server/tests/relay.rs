@@ -31,6 +31,10 @@ struct FakeChain {
     fail: bool,
     /// Claims land on chain, but the reply is lost, as in a crash during the call.
     lose_reply: bool,
+    /// The contract's hourly limit: claims come back false and nothing is spent.
+    hourly_cap: bool,
+    /// An earlier claim by this relay lands just before this one, which comes back false.
+    earlier_claim_lands: bool,
 }
 
 impl Chain for FakeChain {
@@ -46,6 +50,13 @@ impl Chain for FakeChain {
             .iter()
             .map(|c| {
                 let nf = c.token.nullifier();
+                if self.hourly_cap {
+                    return false;
+                }
+                if self.earlier_claim_lands {
+                    self.spent.insert(nf);
+                    self.by_relay.insert(nf);
+                }
                 let fresh = self.spent.insert(nf);
                 if fresh {
                     self.by_relay.insert(nf);
@@ -438,6 +449,306 @@ fn crash_when_someone_else_spent_it_signs_nothing() {
     let mut r = relay_with(FileStore::open(&path).unwrap(), &s, chain, SecretKey::from_bytes(&key_bytes).unwrap());
     assert_eq!(r.recover().unwrap(), 1);
     assert_eq!(r.exchange(&body).0, 409);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn a_claim_stopped_by_the_hourly_limit_stays_pending() {
+    let s = setup();
+    let mut r = relay(&s);
+    let (t, owner) = credit(&s, 0);
+    let w = wallet(r.request_dst());
+    let body = exchange_body(&t, &owner, &w.blinded);
+    assert_eq!(r.exchange(&body).0, 202);
+    r.chain.hourly_cap = true;
+    assert_eq!(r.flush().unwrap(), 0);
+    assert_eq!(r.exchange(&body).0, 202, "the credit is not lost");
+
+    r.chain.hourly_cap = false;
+    assert_eq!(r.flush().unwrap(), 1);
+    assert_eq!(r.exchange(&body).0, 200);
+}
+
+#[test]
+fn a_false_for_a_claim_already_landed_gives_the_tokens() {
+    let s = setup();
+    let mut r = relay(&s);
+    let (t, owner) = credit(&s, 0);
+    let w = wallet(r.request_dst());
+    let body = exchange_body(&t, &owner, &w.blinded);
+    r.exchange(&body);
+    r.chain.earlier_claim_lands = true;
+    assert_eq!(r.flush().unwrap(), 1, "the relay really collected this credit");
+    assert_eq!(r.exchange(&body).0, 200);
+}
+
+#[test]
+fn a_replay_with_a_bad_owner_signature_gets_nothing() {
+    let s = setup();
+    let mut r = relay(&s);
+    let (t, owner) = credit(&s, 0);
+    let w = wallet(r.request_dst());
+    let body = exchange_body(&t, &owner, &w.blinded);
+    r.exchange(&body);
+    r.flush().unwrap();
+    assert_eq!(r.exchange(&body).0, 200);
+
+    let thief = SigningKey::generate(&mut OsRng);
+    let (status, reply) = r.exchange(&exchange_body(&t, &thief, &w.blinded));
+    assert_eq!(status, 400);
+    assert!(reply.get("signatures").is_none());
+}
+
+#[test]
+fn the_owner_signature_is_checked_before_the_points() {
+    let s = setup();
+    let mut r = relay(&s);
+    let (t, _) = credit(&s, 0);
+    let thief = SigningKey::generate(&mut OsRng);
+    let invalid = vec!["00".repeat(G1_LEN); Q];
+    let (status, reply) = r.exchange(&exchange_body(&t, &thief, &invalid));
+    assert_eq!(status, 400);
+    assert_eq!(reply["error"], "invalid owner signature");
+    assert_eq!(r.exchange(&exchange_body(&t, &thief, &invalid[..1])).1["error"], "invalid owner signature");
+}
+
+type SharedRelay = std::sync::Mutex<TestRelay<MemoryStore>>;
+
+/// A chain whose calls run while the relay is expected to be free.
+struct ProbeChain<'a> {
+    relay: &'a SharedRelay,
+    free_during_calls: bool,
+    calls: usize,
+    spent: BTreeSet<[u8; 32]>,
+    during_is_spent: Option<Value>,
+}
+
+impl ProbeChain<'_> {
+    fn note_call(&mut self) {
+        self.calls += 1;
+        self.free_during_calls &= self.relay.try_lock().is_ok();
+    }
+}
+
+impl Chain for ProbeChain<'_> {
+    fn is_spent(&mut self, nf: &[u8; 32]) -> Result<bool, String> {
+        self.note_call();
+        if let Some(body) = self.during_is_spent.take() {
+            self.relay.lock().unwrap().exchange(&body);
+        }
+        Ok(self.spent.contains(nf))
+    }
+    fn relay_claim(&mut self, claims: &[Claim]) -> Result<Vec<bool>, String> {
+        self.note_call();
+        Ok(claims.iter().map(|c| self.spent.insert(c.token.nullifier())).collect())
+    }
+    fn claimed_by_relay(&mut self, _nf: &[u8; 32]) -> Result<bool, String> {
+        self.note_call();
+        Ok(false)
+    }
+}
+
+fn probe(relay: &SharedRelay) -> ProbeChain<'_> {
+    ProbeChain { relay, free_during_calls: true, calls: 0, spent: BTreeSet::new(), during_is_spent: None }
+}
+
+#[test]
+fn the_relay_is_not_locked_during_chain_calls() {
+    let s = setup();
+    let r = relay(&s);
+    let (t, owner) = credit(&s, 0);
+    let w = wallet(r.request_dst());
+    let body = exchange_body(&t, &owner, &w.blinded);
+    let shared = std::sync::Mutex::new(r);
+    let mut chain = probe(&shared);
+
+    assert_eq!(Relay::exchange_shared(&shared, &mut chain, &body).0, 202);
+    assert_eq!(Relay::flush_shared(&shared, &mut chain).unwrap(), 1);
+    assert_eq!(Relay::exchange_shared(&shared, &mut chain, &body).0, 200);
+    assert!(chain.calls >= 2);
+    assert!(chain.free_during_calls);
+}
+
+#[test]
+fn flush_shared_recovers_and_keeps_a_capped_credit_pending() {
+    let s = setup();
+    let mut r = relay(&s);
+    let (t, owner) = credit(&s, 0);
+    let w = wallet(r.request_dst());
+    let body = exchange_body(&t, &owner, &w.blinded);
+    r.exchange(&body);
+    r.chain.fail = true;
+    assert!(r.flush().is_err());
+    let shared = std::sync::Mutex::new(r);
+
+    struct Capped;
+    impl Chain for Capped {
+        fn is_spent(&mut self, _: &[u8; 32]) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn relay_claim(&mut self, claims: &[Claim]) -> Result<Vec<bool>, String> {
+            Ok(vec![false; claims.len()])
+        }
+        fn claimed_by_relay(&mut self, _: &[u8; 32]) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+    assert_eq!(Relay::flush_shared(&shared, &mut Capped).unwrap(), 0);
+    assert_eq!(shared.lock().unwrap().exchange(&body).0, 202);
+}
+
+#[test]
+fn two_requests_racing_for_one_credit_cannot_both_be_recorded() {
+    let s = setup();
+    let r = relay(&s);
+    let (t, owner) = credit(&s, 0);
+    let first = wallet(r.request_dst());
+    let second = wallet(r.request_dst());
+    let body = exchange_body(&t, &owner, &first.blinded);
+    let other = exchange_body(&t, &owner, &second.blinded);
+    let shared = std::sync::Mutex::new(r);
+    let mut chain = probe(&shared);
+    // The other request lands while this one waits for the chain.
+    chain.during_is_spent = Some(other.clone());
+
+    assert_eq!(Relay::exchange_shared(&shared, &mut chain, &body).0, 409);
+    assert_eq!(shared.lock().unwrap().exchange(&other).0, 202, "the first one recorded stays");
+}
+
+fn temp_log(tag: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("ona-relay-{}-{tag}.log", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+fn line_count(path: &std::path::Path) -> usize {
+    std::fs::read_to_string(path).unwrap().lines().count()
+}
+
+#[test]
+fn a_torn_last_line_is_cut_and_the_store_keeps_working() {
+    let path = temp_log("torn");
+    std::fs::write(&path, "{\"x\":\"aa\"}\n{\"x\":\"b").unwrap();
+    let mut store = FileStore::open(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"x\":\"aa\"}\n");
+    assert!(!store.use_request_token("aa").unwrap());
+    assert!(store.use_request_token("bb").unwrap());
+    drop(store);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"x\":\"aa\"}\n{\"x\":\"bb\"}\n");
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn a_last_line_without_a_newline_is_cut_even_if_it_parses() {
+    let path = temp_log("no-newline");
+    std::fs::write(&path, "{\"x\":\"aa\"}\n{\"x\":\"bb\"}").unwrap();
+    let mut store = FileStore::open(&path).unwrap();
+    assert!(store.use_request_token("bb").unwrap(), "that write was never acknowledged");
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn damage_to_a_complete_line_is_refused_and_left_alone() {
+    let path = temp_log("damaged");
+    let damaged = "{\"x\":\"aa\"}\nnot json\n{\"x\":\"bb\"}\ntorn";
+    std::fs::write(&path, damaged).unwrap();
+    assert!(FileStore::open(&path).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), damaged);
+    std::fs::remove_file(&path).unwrap();
+}
+
+fn pending_state(tag: &str) -> ExchangeState {
+    ExchangeState::Pending { blinded_hash: "h".into(), token: format!("credit-{tag}"), owner_sig: "s".into(), blinded: vec![] }
+}
+
+fn submitted_state(tag: &str) -> ExchangeState {
+    ExchangeState::Submitted { blinded_hash: "h".into(), token: format!("credit-{tag}"), owner_sig: "s".into(), blinded: vec![] }
+}
+
+fn done_state() -> ExchangeState {
+    ExchangeState::Done { blinded_hash: "h".into(), signatures: vec!["sig".into()] }
+}
+
+#[test]
+fn compaction_keeps_every_used_token_and_drops_finished_credits() {
+    let path = temp_log("compact");
+    let mut store = FileStore::open(&path).unwrap();
+    for i in 0..10 {
+        let nf = format!("{i}");
+        store.put(&nf, pending_state(&nf)).unwrap();
+        store.put(&nf, submitted_state(&nf)).unwrap();
+        store.put(&nf, done_state()).unwrap();
+        assert!(store.use_request_token(&format!("t{i}")).unwrap());
+    }
+    store.put("open", submitted_state("open")).unwrap();
+    assert_eq!(line_count(&path), 41);
+
+    store.compact().unwrap();
+    assert_eq!(line_count(&path), 21, "one line per credit and per used token");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("credit-3"), "a finished exchange no longer holds its credit");
+    assert!(text.contains("credit-open"), "an open one still does");
+
+    // Writing still goes to the new file.
+    assert!(store.use_request_token("after").unwrap());
+    drop(store);
+
+    let mut store = FileStore::open(&path).unwrap();
+    for i in 0..10 {
+        assert!(!store.use_request_token(&format!("t{i}")).unwrap(), "t{i} stays used");
+        assert_eq!(store.get(&format!("{i}")), Some(done_state()));
+    }
+    assert!(!store.use_request_token("after").unwrap());
+    assert_eq!(store.unfinished().len(), 1);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn the_log_is_compacted_automatically_after_finished_exchanges() {
+    let path = temp_log("auto");
+    let mut store = FileStore::open(&path).unwrap();
+    let rounds = 200;
+    for i in 0..rounds {
+        let nf = format!("{i}");
+        store.put(&nf, pending_state(&nf)).unwrap();
+        store.put(&nf, submitted_state(&nf)).unwrap();
+        store.put(&nf, done_state()).unwrap();
+    }
+    assert!(line_count(&path) < rounds * 2, "{} lines", line_count(&path));
+    drop(store);
+    let store = FileStore::open(&path).unwrap();
+    for i in 0..rounds {
+        assert_eq!(store.get(&format!("{i}")), Some(done_state()));
+    }
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn compaction_preserves_a_returned_token_as_usable() {
+    let path = temp_log("released");
+    let mut store = FileStore::open(&path).unwrap();
+    assert!(store.use_request_token("kept").unwrap());
+    assert!(store.use_request_token("returned").unwrap());
+    store.release_request_token("returned").unwrap();
+    store.compact().unwrap();
+    drop(store);
+    let mut store = FileStore::open(&path).unwrap();
+    assert!(!store.use_request_token("kept").unwrap());
+    assert!(store.use_request_token("returned").unwrap());
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn a_leftover_compaction_file_is_ignored() {
+    let path = temp_log("leftover");
+    let leftover = format!("{}.compact", path.display());
+    std::fs::write(&path, "{\"x\":\"aa\"}\n").unwrap();
+    std::fs::write(&leftover, "garbage from a crash").unwrap();
+    let mut store = FileStore::open(&path).unwrap();
+    assert!(!store.use_request_token("aa").unwrap());
+    store.compact().unwrap();
+    assert!(!std::path::Path::new(&leftover).exists());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"x\":\"aa\"}\n");
     std::fs::remove_file(&path).unwrap();
 }
 

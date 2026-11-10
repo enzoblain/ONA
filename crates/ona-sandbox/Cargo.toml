@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 ona-token = { path = "../ona-token" }
 ona-near = { path = "../ona-near" }
+ona-deploy = { path = "../ona-deploy" }
 ona-signer = { path = "../ona-signer" }
 ona-server = { path = "../ona-server" }
 near-sandbox = "0.3"

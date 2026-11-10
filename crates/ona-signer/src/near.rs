@@ -1,12 +1,7 @@
 //! The `Chain` used in production: reads and writes `ona-mint` over NEAR RPC.
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use ed25519_dalek::SigningKey;
 use ona_near::Client;
 use ona_token::{g2_from_raw, G1_LEN, G2_LEN, G2_RAW_LEN};
 use serde_json::{json, Value};
@@ -39,31 +34,6 @@ impl NearChain {
             None => Ok(()),
         }
     }
-}
-
-/// Reads a NEAR account key (`ed25519:<base58>`) from a file only its owner can read.
-pub fn load_account_key(path: &Path) -> Result<SigningKey, String> {
-    let meta = fs::metadata(path).map_err(|e| format!("cannot read account key: {e}"))?;
-    if meta.permissions().mode() & 0o077 != 0 {
-        return Err("account key file is accessible to other users".into());
-    }
-    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    parse_account_key(text.trim())
-}
-
-/// Accepts the 64-byte form NEAR tools write, and refuses one whose public half does not match.
-pub fn parse_account_key(text: &str) -> Result<SigningKey, String> {
-    let encoded = text.strip_prefix("ed25519:").ok_or("account key must start with ed25519:")?;
-    let bytes = bs58::decode(encoded).into_vec().map_err(|_| "account key is not base58".to_string())?;
-    if bytes.len() != 64 {
-        return Err("account key must be 64 bytes".into());
-    }
-    let seed: [u8; 32] = bytes[..32].try_into().map_err(|_| "account key length".to_string())?;
-    let key = SigningKey::from_bytes(&seed);
-    if key.verifying_key().as_bytes()[..] != bytes[32..] {
-        return Err("account key is inconsistent".into());
-    }
-    Ok(key)
 }
 
 fn parse_u64(value: &Value) -> Option<u64> {
@@ -143,6 +113,70 @@ impl Chain for NearChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// A local stand-in for a NEAR node: answers key lookups, and any transaction with `tx_result`.
+    fn fake_rpc(tx_result: Value) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                    if read == 0 {
+                        break;
+                    }
+                }
+                let result = if String::from_utf8_lossy(&request).contains("view_access_key") {
+                    json!({"nonce": 1, "block_hash": "11111111111111111111111111111111"})
+                } else {
+                    tx_result.clone()
+                };
+                let body = json!({"jsonrpc": "2.0", "id": "1", "result": result}).to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        url
+    }
+
+    fn chain_against(tx_result: Value) -> NearChain {
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let mut bytes = key.to_bytes().to_vec();
+        bytes.extend_from_slice(key.verifying_key().as_bytes());
+        let text = format!("ed25519:{}", bs58::encode(bytes).into_string());
+        let client = Client::new(&fake_rpc(tx_result), ona_near::parse_account_key(&text).unwrap());
+        NearChain::new(client, "signer.test".into(), "mint.test".into())
+    }
+
+    #[test]
+    fn issue_only_succeeds_on_an_explicit_success() {
+        assert!(chain_against(json!({"status": {"SuccessValue": ""}})).issue(1, vec![]).is_ok());
+        assert!(chain_against(json!({"status": {"Failure": {}}})).issue(1, vec![]).is_err());
+        // The signer marks a record done when `issue` returns Ok, so this must be an error.
+        assert!(chain_against(json!({"status": "Started"})).issue(1, vec![]).is_err());
+        assert!(chain_against(json!({})).issue(1, vec![]).is_err());
+    }
 
     #[test]
     fn pending_records_are_parsed() {
@@ -164,39 +198,6 @@ mod tests {
         assert!(parse_pending(&json!({"not": "a list"})).is_err());
         assert!(parse_pending(&json!([{"id":"x","deadline":"1","locked_until":"0","items":[]}])).is_err());
         assert!(parse_pending(&json!([{"id":"1","deadline":"1","items":[]}])).is_err(), "a missing lock field must not read as unlocked");
-    }
-
-    fn encoded_key(key: &SigningKey) -> Vec<u8> {
-        let mut bytes = key.to_bytes().to_vec();
-        bytes.extend_from_slice(key.verifying_key().as_bytes());
-        bytes
-    }
-
-    #[test]
-    fn account_keys_are_validated() {
-        let key = SigningKey::from_bytes(&[5u8; 32]);
-        let text = format!("ed25519:{}", bs58::encode(encoded_key(&key)).into_string());
-        assert_eq!(parse_account_key(&text).unwrap().to_bytes(), key.to_bytes());
-
-        assert!(parse_account_key("secp256k1:abc").is_err());
-        assert!(parse_account_key("ed25519:not-base-58!").is_err());
-        assert!(parse_account_key(&format!("ed25519:{}", bs58::encode([1u8; 32]).into_string())).is_err());
-
-        let mut wrong = encoded_key(&key);
-        wrong[40] ^= 1;
-        assert!(parse_account_key(&format!("ed25519:{}", bs58::encode(wrong).into_string())).is_err());
-    }
-
-    #[test]
-    fn an_account_key_readable_by_others_is_refused() {
-        let path = std::env::temp_dir().join(format!("ona-account-key-{}", std::process::id()));
-        let key = SigningKey::from_bytes(&[6u8; 32]);
-        fs::write(&path, format!("ed25519:{}\n", bs58::encode(encoded_key(&key)).into_string())).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(load_account_key(&path).err().unwrap().contains("other users"));
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(load_account_key(&path).is_ok());
-        fs::remove_file(&path).unwrap();
     }
 
     #[test]

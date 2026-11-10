@@ -23,7 +23,7 @@ content, but the requests, the payment and the agent's actions still identify yo
 
 | Component | Role | Language |
 |---|---|---|
-| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report, Tor client (Arti) | Rust |
+| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Reaches the network through a local `tor` over SOCKS5 (`ona-tor`) | Rust |
 | Desktop app | Connects a NEAR wallet for deposits, starts missions, asks for confirmations, shows the exposure report | Tauri + JavaScript |
 | iOS app | Remote control of the computer over Tor: mission progress and confirmations. Holds no tokens and no pseudonym table | Swift |
 | `ona-server` | Thin relay in a TEE (Phala dstack): holds the NEAR AI Cloud key, enforces a flat request size, submits transactions | Rust |
@@ -44,16 +44,18 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-token` blind BLS tokens | done | native tests |
 | `ona-mint` contract | done, gas measured ([SPEC](SPEC.md#measured-gas)) | mocked NEAR VM with real BLS and ed25519 host functions, and a local NEAR node |
 | `ona-registry` contract | done | mocked NEAR VM only |
+| `ona-deploy` deployment tool | done, refuses mainnet, testnet not tried yet | unit tests |
 | `ona-near` RPC client | done | unit tests, and a local NEAR node through `ona-sandbox` |
 | `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
-| `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done, no production binary yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
+| `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done; the `ona-relay` program has not run yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
 | `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
 | Desktop app | not in this repository yet | none |
 | iOS app (`ios/`) | Tor spike: Arti embedded in a test app, which reached a test onion service | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
 | iOS app (`ios/`) | mission screens, QR pairing and signed confirmations against a mock computer, labelled `mode: mock`. Tor transport (Arti) written, but no end-to-end run over Tor yet. The Secure Enclave key path has not run on a device yet | iOS simulator (software key), unit tests on the Mac ([notes](docs/ios/app.md)) |
-| Tor on the computer, Phala enclave | not built | none |
+| `ona-tor` client through Tor | library done, no program uses it yet ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
+| Phala enclave | not built | none |
 
 ## Run it
 
@@ -79,6 +81,11 @@ To measure gas on a local node, build the contract as in `verify.sh`, set `NEAR_
 - The computer must be on for a mission to progress.
 - The same team would operate the relay, the signer and the anchoring.
 - Testnet only. The mint has no real-money deployment planned.
+- **A dishonest relay may still be able to read replies.** With encryption version 2, the relay controls which client key the reply is encrypted to.
+  The client now uses version 3, which binds the reply key, but this fixes the problem only if the NEAR AI gateway accepts version 3, which is **not verified**.
+  Version 3 was tested only against a simulated enclave. A relay running in an attested enclave is not in place yet.
+- The relay serves a fixed pool of connections with per-request deadlines, but a few dozen slow clients can still keep it busy. Do not expose it
+  to the internet yet.
 - A stolen signer key can drain the reserve at the speed of the hourly redemption limit. There is no key rotation.
 - An attacker holding tokens can use up a tier's hourly limit and delay exits for that tier.
 

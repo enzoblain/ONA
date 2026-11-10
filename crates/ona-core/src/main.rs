@@ -1,8 +1,10 @@
 //! `ona`: reads one JSON request per line on stdin and prints one JSON reply per line.
-//! `ona demo` runs a full mission against the fakes. Nothing here touches a network or a chain.
+//! `ona demo` runs a full mission against the fakes. `ona real` uses the real model, configured by
+//! the `ONA_REAL_*` variables: only then does anything here touch a network. Never a chain.
 
 use std::io::{self, BufRead};
 
+use ona_core::remote::RemoteConfig;
 use ona_core::Core;
 use serde_json::{json, Value};
 
@@ -35,6 +37,12 @@ fn main() {
         return;
     }
     let mut core = Core::new();
+    if std::env::args().nth(1).as_deref() == Some("real") {
+        if let Err(e) = RemoteConfig::from_env().and_then(|config| core.use_real_model(config)) {
+            eprintln!("cannot use the real model: {e}");
+            std::process::exit(1);
+        }
+    }
     for line in io::stdin().lock().lines() {
         match line {
             Ok(request) => println!("{}", core.dispatch(&request)),

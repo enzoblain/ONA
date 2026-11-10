@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ona_near::Client;
-use ona_signer::near::{load_account_key, NearChain};
+use ona_near::{load_account_key, Client};
+use ona_signer::near::NearChain;
 use ona_signer::{FileDurable, KeyStore, Signer};
 
 const TICK: Duration = Duration::from_secs(5);
@@ -34,7 +34,8 @@ fn run() -> Result<(), String> {
     let rpc = env("ONA_RPC_URL")?;
     let mint = env("ONA_MINT")?;
     let account = env("ONA_SIGNER_ACCOUNT")?;
-    let account_key = load_account_key(&PathBuf::from(env("ONA_SIGNER_ACCOUNT_KEY_FILE")?))?;
+    let account_key =
+        load_account_key(&PathBuf::from(env("ONA_SIGNER_ACCOUNT_KEY_FILE")?)).map_err(|e| e.to_string())?;
     let keys = KeyStore::load(&PathBuf::from(env("ONA_SIGNER_KEYS_FILE")?))?;
     let state = FileDurable::open(&PathBuf::from(env("ONA_SIGNER_STATE_FILE")?))?;
 
@@ -50,6 +51,10 @@ fn run() -> Result<(), String> {
                 }
             }
             Err(e) => eprintln!("tick failed: {e}"),
+        }
+        // Restarting reopens the state file, which repairs a partial last line.
+        if let Some(reason) = signer.halted() {
+            return Err(format!("stopping, durable state is unsafe: {reason}"));
         }
         std::thread::sleep(TICK);
     }

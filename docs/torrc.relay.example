@@ -1,0 +1,10 @@
+# Publishes the ONA relay as a version 3 onion service. See docs/TOR.md.
+# The relay itself listens on 127.0.0.1 only and is never exposed directly.
+
+# This tor only hosts the service: it accepts no local SOCKS client.
+SocksPort 0
+
+# Holds the service's private key. Back it up privately and never commit it.
+HiddenServiceDir /opt/homebrew/var/lib/tor/ona-relay
+HiddenServiceVersion 3
+HiddenServicePort 80 127.0.0.1:8787

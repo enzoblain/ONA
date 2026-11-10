@@ -106,10 +106,25 @@ for one chat, `forget` deletes any chat at once. No chat result ever goes on cha
 keychain is wired in. What the user copies or backs up is their own choice and must be stated in the app.
 
 ## Encrypted model client (`crates/ona-core/src/e2ee.rs`)
-NEAR AI encryption version 2 through the relay. Each request gets a new client key and a fresh attestation nonce. A reply counts only
+NEAR AI encryption version 3 through the relay, written from the public `nearai/inference-proxy` sources and tested only against a simulated
+enclave. Each encrypted request field is bound to the reply key, so a relay replacing `X-Client-Pub-Key` makes the request undecryptable. This
+fixes the reply-key attack only if the NEAR AI gateway accepts version 3, which is **not verified**. Version 2 needs an explicit setting, and a
+failed call never falls back to it. Version 3 does not bind a reply to one precise request, a replay carrying the original reply key is still
+processed, and the relay still sees sizes and counters. Each request gets a new client key and a fresh attestation nonce. A reply counts only
 if the signature comes from the attested model key (`provider_tee`) and covers the exact bytes sent and received. Every request carries
 `max_tokens`, and a per-client budget stops calls before they spend. The relay sees the usage counters, so pricing must be flat per
 request. TDX and NVIDIA quotes are not verified yet.
+
+`crates/ona-core/src/quote.rs` checks a model attestation, not yet called by the client. **It is worth nothing until the Intel signature
+check is implemented:** that check (meant for `dcap-qvl`) and NVIDIA's service are traits with no implementation, so nothing passes outside
+tests, and without the signature anyone can write a quote holding any value. With it, a quote passes only if MRTD and RTMR0 to RTMR2 are
+on the caller's list, the event log replays to RTMR3, its `os-image-hash` and `compose-hash` events name a listed image and the hash of the
+reported `app_compose`, `report_data = signing_address || nonce` (32 + 32 bytes), `mr_config_id = 0x01 || compose hash || 15 zero bytes`,
+the enclave is not in debug mode, and the deployment hash is listed. `mr_config_id` alone proves nothing: the host chooses it. **The GPU
+evidence is not bound to the TDX quote:** its nonce shows it is fresh, but a relay can copy a genuine payload from another machine.
+Formats were checked on one real report (2026-11-10) that NEAR AI's official verifier accepted, not against the verifier's source. RTMR3
+events carry no digest in the log: each is `sha384(event_type as u32 little-endian || ":" || event || ":" || payload)`. The listed values
+in `observed_2026_11_10` were seen in that report, not published by NEAR AI, and change with each image update.
 
 ## Wallet (`crates/ona-wallet`)
 Append-only encrypted file, synced before the action it protects: token secrets before the deposit, spending mark before a spend.
@@ -117,8 +132,20 @@ Removing lines from the end is not detected. Key storage in the operating system
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit
-route that exists only in that binary). `NearRelayChain` connects it to the contract. `gateway.rs` passes encrypted NEAR AI calls byte for byte: it forwards an allowlist of headers,
-requires a one-use request token per chat, refuses a request without `max_tokens` within the limit or with an unknown model, and withholds a
-reply over budget. No production binary, padded batches, Tor or enclave yet. Credit exchange writes state durably before each
-irreversible step and signs only after the chain confirms. Request tokens are recorded as used before the model call. A reply
-over the per-request budget is withheld.
+route that exists only in that binary). `NearRelayChain` connects it to the contract. `gateway.rs` passes encrypted NEAR AI calls byte for byte: it forwards an allowlist of headers and
+requires a one-use request token per chat. Before the token is spent, a chat must have exactly `model`, `messages`, `stream` and `max_tokens`, no duplicated
+JSON key, one user message in hexadecimal, the encryption headers, a listed model and a body of at most 64 KiB. Attestation and signature routes accept only
+the exact forms used by the client, under one limit per minute for all clients. Service errors keep their status and lose their text. A reply over
+budget is withheld, as a last resort since the call is already paid. `ona-relay` is the program that runs all this. It has not run yet. No padded batches or enclave yet.
+
+The relay is not trusted with content: with encryption version 2 a dishonest relay can replace the client key and read the reply. Version 3 closes this
+only if the NEAR AI gateway accepts it, which is not verified.
+
+Each connection has one deadline to send its whole request and one to receive the whole reply. Connections are served by a fixed pool with a bounded queue,
+and a full queue answers 503. Chain and model calls run without holding the relay state.
+
+Credit exchange checks the credit and its owner signature before anything else, writes state durably before each irreversible step and signs only after
+the chain confirms. A `false` from `relay_claim` is read again in a final block: claimed by this relay gives the tokens, spent by someone else refuses, and
+anything else, such as the hourly limit, stays pending. Request tokens are recorded as used before the model call, and returned durably only when the
+service refused the connection or answered 401, 402 or 429. The journal cuts a last line without a newline at startup, stops after a failed write until
+restarted, and is rewritten with one line per credit and per used token.
