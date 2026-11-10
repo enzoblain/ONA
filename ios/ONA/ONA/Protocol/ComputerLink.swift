@@ -55,6 +55,7 @@ enum ComputerMessages {
         switch error {
         case "stale confirmation": "Cette demande a changé entre-temps : rouvrez-la."
         case "not paired", "unknown pairing": "L'ordinateur ne reconnaît plus ce téléphone : refaites l'appairage."
+        case "pairing not verified": "Confirmez sur l'ordinateur que les deux codes sont identiques."
         case "unknown or used pairing code": "Ce code d'appairage a déjà servi ou a expiré : affichez-en un nouveau sur l'ordinateur."
         case "pairing signature does not verify", "signature does not verify", "missing or malformed signature":
             "L'ordinateur a rejeté la signature de ce téléphone."
