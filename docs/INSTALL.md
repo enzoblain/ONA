@@ -158,6 +158,9 @@ To serve, on `127.0.0.1` only:
 cargo run -p ona-server --bin ona-relay -- run
 ```
 
+It serves 8 connections at a time and keeps 32 waiting; beyond that it answers 503. Attestation and signature routes are limited to 600 calls per
+minute across all clients. If the store reports a write error, every further write is refused until the relay is restarted.
+
 ## Not available yet
 
 No NEAR testnet deployment, tested real model connection, Tor, enclave, desktop app or iOS app. See the status table in the [README](../README.md).

@@ -121,8 +121,20 @@ Removing lines from the end is not detected. Key storage in the operating system
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit
-route that exists only in that binary). `NearRelayChain` connects it to the contract. `gateway.rs` passes encrypted NEAR AI calls byte for byte: it forwards an allowlist of headers,
-requires a one-use request token per chat, refuses a request without `max_tokens` within the limit or with an unknown model, and withholds a
-reply over budget. `ona-relay` is the program that runs all this. It has not run yet. No padded batches, Tor or enclave yet. Credit exchange writes state durably before each
-irreversible step and signs only after the chain confirms. Request tokens are recorded as used before the model call. A reply
-over the per-request budget is withheld.
+route that exists only in that binary). `NearRelayChain` connects it to the contract. `gateway.rs` passes encrypted NEAR AI calls byte for byte: it forwards an allowlist of headers and
+requires a one-use request token per chat. Before the token is spent, a chat must have exactly `model`, `messages`, `stream` and `max_tokens`, no duplicated
+JSON key, one user message in hexadecimal, the encryption headers, a listed model and a body of at most 64 KiB. Attestation and signature routes accept only
+the exact forms used by the client, under one limit per minute for all clients. Service errors keep their status and lose their text. A reply over
+budget is withheld, as a last resort since the call is already paid. `ona-relay` is the program that runs all this. It has not run yet. No padded batches or enclave yet.
+
+The relay is not trusted with content: with encryption version 2 a dishonest relay can replace the client key and read the reply. Version 3 closes this
+only if the NEAR AI gateway accepts it, which is not verified.
+
+Each connection has one deadline to send its whole request and one to receive the whole reply. Connections are served by a fixed pool with a bounded queue,
+and a full queue answers 503. Chain and model calls run without holding the relay state.
+
+Credit exchange checks the credit and its owner signature before anything else, writes state durably before each irreversible step and signs only after
+the chain confirms. A `false` from `relay_claim` is read again in a final block: claimed by this relay gives the tokens, spent by someone else refuses, and
+anything else, such as the hourly limit, stays pending. Request tokens are recorded as used before the model call, and returned durably only when the
+service refused the connection or answered 401, 402 or 429. The journal cuts a last line without a newline at startup, stops after a failed write until
+restarted, and is rewritten with one line per credit and per used token.
