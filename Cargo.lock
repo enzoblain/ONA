@@ -2034,6 +2034,7 @@ dependencies = [
  "rand",
  "serde_json",
  "sha2 0.10.9",
+ "ureq",
 ]
 
 [[package]]

@@ -43,6 +43,7 @@ struct FakeEnclave {
     last_body: Vec<u8>,
     last_request: Vec<u8>,
     last_raw: Vec<u8>,
+    last_token: String,
     chats: usize,
 }
 
@@ -56,6 +57,7 @@ impl FakeEnclave {
             last_body: vec![],
             last_request: vec![],
             last_raw: vec![],
+            last_token: String::new(),
             chats: 0,
         }
     }
@@ -94,6 +96,7 @@ impl Transport for FakeEnclave {
 
     fn post(&mut self, _path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String> {
         self.chats += 1;
+        self.last_token = header(headers, "X-Ona-Token").to_string();
         self.last_request = body.to_vec();
         let request: Value = serde_json::from_slice(body).unwrap();
         let encrypted = unhex(request["messages"][0]["content"].as_str().unwrap());
@@ -162,6 +165,14 @@ fn encryption_interoperates_with_a_client_key() {
     tampered[last] ^= 1;
     assert!(key.decrypt(&tampered).is_err());
     assert!(key.decrypt(&[0u8; 20]).is_err());
+}
+
+#[test]
+fn a_request_token_travels_in_its_header() {
+    let mut enclave = FakeEnclave::new(Attack::None);
+    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000);
+    c.chat_with_token("x", "abc123").unwrap();
+    assert_eq!(enclave.last_token, "abc123");
 }
 
 #[test]

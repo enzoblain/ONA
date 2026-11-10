@@ -253,8 +253,17 @@ impl<T: Transport> E2eeClient<T> {
         attested_model_key(&report, &nonce)
     }
 
-    /// Sends one prompt. The budget is checked first, so an exhausted client spends nothing.
+    /// Sends one prompt, paid with a request token bought from the relay.
+    pub fn chat_with_token(&mut self, prompt: &str, token: &str) -> Result<ChatReply, String> {
+        self.send_chat(prompt, Some(token))
+    }
+
     pub fn chat(&mut self, prompt: &str) -> Result<ChatReply, String> {
+        self.send_chat(prompt, None)
+    }
+
+    /// The budget is checked first, so an exhausted client spends nothing.
+    fn send_chat(&mut self, prompt: &str, token: Option<&str>) -> Result<ChatReply, String> {
         if self.spent + u64::from(self.max_tokens) > self.token_budget {
             return Err("token budget exhausted".into());
         }
@@ -278,6 +287,9 @@ impl<T: Transport> E2eeClient<T> {
             ("X-Model-Pub-Key".to_string(), to_hex(&model_key)),
             ("X-Encryption-Version".to_string(), "2".to_string()),
         ]);
+        if let Some(token) = token {
+            headers.push(("X-Ona-Token".to_string(), token.to_string()));
+        }
         let (status, raw) = self.transport.post("/v1/chat/completions", &headers, &body)?;
         if status != 200 {
             return Err(format!("chat failed with status {status}"));

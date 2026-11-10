@@ -117,6 +117,8 @@ Removing lines from the end is not detected. Key storage in the operating system
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit
-route that exists only in that binary). `NearRelayChain` connects it to the contract. No padded batches, real model, Tor or enclave yet. Credit exchange writes state durably before each
+route that exists only in that binary). `NearRelayChain` connects it to the contract. `gateway.rs` passes encrypted NEAR AI calls byte for byte: it forwards an allowlist of headers,
+requires a one-use request token per chat, refuses a request without `max_tokens` within the limit or with an unknown model, and withholds a
+reply over budget. No production binary, padded batches, Tor or enclave yet. Credit exchange writes state durably before each
 irreversible step and signs only after the chain confirms. Request tokens are recorded as used before the model call. A reply
 over the per-request budget is withheld.

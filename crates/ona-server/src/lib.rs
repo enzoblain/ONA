@@ -5,6 +5,7 @@
 //! Not done yet: fixed-size batches padded with the relay's own tokens, the real RPC client, Tor,
 //! and the enclave.
 
+pub mod gateway;
 pub mod http;
 pub mod mock;
 pub mod near;
