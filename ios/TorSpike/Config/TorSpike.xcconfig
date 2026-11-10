@@ -1,0 +1,10 @@
+// Shared build settings of the Tor spike. Personal values (signing team, test onion) go in Local.xcconfig,
+// which is not tracked: copy Local.xcconfig.example to Local.xcconfig.
+
+PRODUCT_BUNDLE_IDENTIFIER = org.ona.torspike
+ONA_TEST_ONION =
+
+// ArtiBridge.xcframework only has an arm64 simulator slice (Apple-silicon Macs).
+EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64
+
+#include? "Local.xcconfig"

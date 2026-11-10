@@ -1,0 +1,399 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0C0000000000000000000B00 /* ArtiBridge.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0C0000000000000000000205 /* ArtiBridge.xcframework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		0C0000000000000000000100 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0C0000000000000000000000 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0C0000000000000000000600;
+			remoteInfo = ONA;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		0C0000000000000000000200 /* ONA.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ONA.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0C0000000000000000000201 /* ONATests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ONATests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0C0000000000000000000202 /* ONA.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ONA.xcconfig; sourceTree = "<group>"; };
+		0C0000000000000000000203 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		0C0000000000000000000204 /* Local.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text; path = Local.xcconfig.example; sourceTree = "<group>"; };
+		0C0000000000000000000205 /* ArtiBridge.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = ArtiBridge.xcframework; path = ../ArtiBridge/ArtiBridge.xcframework; sourceTree = SOURCE_ROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		0C0000000000000000000300 /* ONA */ = {isa = PBXFileSystemSynchronizedRootGroup; path = ONA; sourceTree = "<group>"; };
+		0C0000000000000000000301 /* ONATests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = ONATests; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		0C0000000000000000000400 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0C0000000000000000000B00 /* ArtiBridge.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0C0000000000000000000401 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0C0000000000000000000500 = {
+			isa = PBXGroup;
+			children = (
+				0C0000000000000000000300 /* ONA */,
+				0C0000000000000000000301 /* ONATests */,
+				0C0000000000000000000502 /* Config */,
+				0C0000000000000000000503 /* Frameworks */,
+				0C0000000000000000000501 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		0C0000000000000000000501 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				0C0000000000000000000200 /* ONA.app */,
+				0C0000000000000000000201 /* ONATests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		0C0000000000000000000502 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				0C0000000000000000000202 /* ONA.xcconfig */,
+				0C0000000000000000000204 /* Local.xcconfig.example */,
+				0C0000000000000000000203 /* Info.plist */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		0C0000000000000000000503 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				0C0000000000000000000205 /* ArtiBridge.xcframework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0C0000000000000000000600 /* ONA */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0C0000000000000000000801 /* Build configuration list for PBXNativeTarget "ONA" */;
+			buildPhases = (
+				0C0000000000000000000701 /* Sources */,
+				0C0000000000000000000400 /* Frameworks */,
+				0C0000000000000000000702 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				0C0000000000000000000300 /* ONA */,
+			);
+			name = ONA;
+			productName = ONA;
+			productReference = 0C0000000000000000000200 /* ONA.app */;
+			productType = "com.apple.product-type.application";
+		};
+		0C0000000000000000000601 /* ONATests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0C0000000000000000000802 /* Build configuration list for PBXNativeTarget "ONATests" */;
+			buildPhases = (
+				0C0000000000000000000703 /* Sources */,
+				0C0000000000000000000401 /* Frameworks */,
+				0C0000000000000000000704 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0C0000000000000000000A00 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				0C0000000000000000000301 /* ONATests */,
+			);
+			name = ONATests;
+			productName = ONATests;
+			productReference = 0C0000000000000000000201 /* ONATests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0C0000000000000000000000 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					0C0000000000000000000601 = {
+						TestTargetID = 0C0000000000000000000600;
+					};
+				};
+			};
+			buildConfigurationList = 0C0000000000000000000800 /* Build configuration list for PBXProject "ONA" */;
+			developmentRegion = fr;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				fr,
+				Base,
+			);
+			mainGroup = 0C0000000000000000000500;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 0C0000000000000000000501 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				0C0000000000000000000600 /* ONA */,
+				0C0000000000000000000601 /* ONATests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		0C0000000000000000000702 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0C0000000000000000000704 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0C0000000000000000000701 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0C0000000000000000000703 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0C0000000000000000000A00 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0C0000000000000000000600 /* ONA */;
+			targetProxy = 0C0000000000000000000100 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0C0000000000000000000900 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		0C0000000000000000000901 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		0C0000000000000000000902 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0C0000000000000000000202 /* ONA.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ONA;
+				INFOPLIST_KEY_NSCameraUsageDescription = "ONA utilise la caméra pour lire le code d'appairage affiché par l'ordinateur.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Face ID protège la clé qui signe vos confirmations.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ONA joint l'ordinateur sur le réseau local pour suivre la mission et transmettre vos confirmations.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		0C0000000000000000000903 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0C0000000000000000000202 /* ONA.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ONA;
+				INFOPLIST_KEY_NSCameraUsageDescription = "ONA utilise la caméra pour lire le code d'appairage affiché par l'ordinateur.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Face ID protège la clé qui signe vos confirmations.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ONA joint l'ordinateur sur le réseau local pour suivre la mission et transmettre vos confirmations.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		0C0000000000000000000904 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0C0000000000000000000202 /* ONA.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(PRODUCT_BUNDLE_IDENTIFIER).tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ONA.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ONA";
+			};
+			name = Debug;
+		};
+		0C0000000000000000000905 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0C0000000000000000000202 /* ONA.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(PRODUCT_BUNDLE_IDENTIFIER).tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ONA.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ONA";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0C0000000000000000000800 /* Build configuration list for PBXProject "ONA" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0C0000000000000000000900 /* Debug */,
+				0C0000000000000000000901 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0C0000000000000000000801 /* Build configuration list for PBXNativeTarget "ONA" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0C0000000000000000000902 /* Debug */,
+				0C0000000000000000000903 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0C0000000000000000000802 /* Build configuration list for PBXNativeTarget "ONATests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0C0000000000000000000904 /* Debug */,
+				0C0000000000000000000905 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 0C0000000000000000000000 /* Project object */;
+}

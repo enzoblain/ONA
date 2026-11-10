@@ -1,0 +1,10 @@
+// Shared build settings of the ONA iOS app. Personal values go in Local.xcconfig (not tracked):
+// copy Local.xcconfig.example to Local.xcconfig.
+
+PRODUCT_BUNDLE_IDENTIFIER = org.ona.remote
+
+// ArtiBridge.xcframework (Tor, step 4) has only an arm64 simulator slice (Apple-silicon Macs).
+// Build it first: ios/ArtiBridge/build-xcframework.sh
+EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64
+
+#include? "Local.xcconfig"

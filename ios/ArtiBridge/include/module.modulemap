@@ -1,0 +1,4 @@
+module ArtiBridge {
+    header "ArtiBridge.h"
+    export *
+}
