@@ -1,6 +1,6 @@
 <img src="assets/logo.png" alt="ONA logo" width="120">
 
-# ONA: a private AI chat, built so that no one links who you are to what you ask
+# ONA: a private AI assistant, built so that no one links who you are to what you ask
 
 Built at NEAR HACKATHON · Tracks: to be confirmed · Network: NEAR testnet (planned) · Not audited
 
@@ -10,9 +10,9 @@ Built at NEAR HACKATHON · Tracks: to be confirmed · Network: NEAR testnet (pla
 
 ## What it is
 
-ONA is a chat with an AI, like ChatGPT or Claude, for the questions you would rather not attach your name to. You write
-to it from your computer or your phone. It can also act for you (search the web, contact someone, pay), each time after
-you confirm.
+ONA is an AI assistant for sensitive matters: legal, medical, financial or professional questions you would not want
+tied to your name. You talk to it from your computer or your phone. It can also act on your behalf (search the web,
+contact a professional, make a payment), and asks for your explicit confirmation before each of these actions.
 
 The difference is who sees what. ONA is designed so that no single party gets both who you are and what you asked:
 
