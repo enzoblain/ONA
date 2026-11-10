@@ -6,6 +6,8 @@ enum SignedFields {
     static let pairDomain = "ona/pair/v0"
     static let confirmDomain = "ona/confirm/v0"
     static let sasDomain = "ona/sas/v0"
+    static let messageDomain = "ona/message/v0"
+    static let deleteDomain = "ona/delete/v0"
 
     enum Field {
         case text(String?)
@@ -36,6 +38,16 @@ enum SignedFields {
             .text(confirmDomain), .text(pairingID), .text(answer.id), .text(answer.decision.rawValue),
             .text(answer.firm), .text(answer.digest),
         ])
+    }
+
+    /// A message to the agent. `chatID` is nil for the first message of a new chat.
+    static func chatMessage(pairingID: String, chatID: String?, text: String) -> Data {
+        encode([.text(messageDomain), .text(pairingID), .text(chatID), .text(text)])
+    }
+
+    /// Deleting a chat on the computer.
+    static func deleteChat(pairingID: String, chatID: String) -> Data {
+        encode([.text(deleteDomain), .text(pairingID), .text(chatID)])
     }
 
     /// 6-digit code shown on both sides after pairing, compared by the person.

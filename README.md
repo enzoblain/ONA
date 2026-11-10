@@ -53,7 +53,7 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
 | Desktop app | not in this repository yet | none |
 | iOS app (`ios/`) | Tor (Arti embedded): an earlier test build reached a test onion service; the Tor screen is now a tab of the app | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
-| iOS app (`ios/`) | mission screens, QR pairing and signed confirmations against a mock computer, labelled `mode: mock`. Over Tor (Arti), pairing, polling and a signed confirmation passed once end to end in the simulator. The Secure Enclave key path has not run on a device yet | iOS simulator (software key), unit tests on the Mac ([notes](docs/ios/app.md)) |
+| iOS app (`ios/`) | chat-style conversations with the agent, QR pairing and signed messages and confirmations against a mock computer, labelled `mode: mock` (the mock replays one demo mission for any request). Over Tor (Arti), pairing, polling and a signed confirmation passed once end to end in the simulator. The Secure Enclave key path has not run on a device yet | iOS simulator (software key), unit tests on the Mac ([notes](docs/ios/app.md)) |
 | `ona-tor` client through Tor | library done, no program uses it yet ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
 | Phala enclave | not built | none |
 

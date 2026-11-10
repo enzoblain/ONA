@@ -36,8 +36,11 @@ des builds pour iPhone). Un nouveau QR : `curl -X POST http://127.0.0.1:8790/v0/
 
 Barre d'onglets en bas (Liquid Glass à partir d'iOS 26) :
 
-- **Accueil** : appairage (scan du QR, ou coller son texte), puis mission en cours et confirmations. Un badge signale
-  une confirmation en attente.
+- **Accueil** : appairage (scan du QR, ou coller son texte), puis **liste des conversations** avec l'agent (bouton
+  « + » en haut à droite, suppression par balayage, appui long ou menu « … »). Une conversation ressemble à Claude ou
+  ChatGPT : messages, étapes de l'agent groupées et repliables (« 3 étapes »), ligne « en cours », cartes de
+  confirmation en Liquid Glass, relevé d'exposition à la fin, champ de saisie flottant (texte seulement). Un badge
+  sur l'onglet compte les conversations qui attendent une confirmation. Cible : iOS 26.
 - **Tor** : état de Tor (arrêté, démarrage avec progression, connecté, erreur avec « Détails »), démarrer / arrêter,
   données Tor gardées sur le téléphone et bouton pour les effacer (remplace le « démarrage à froid » de l'ancienne app
   de test), version d'Arti.

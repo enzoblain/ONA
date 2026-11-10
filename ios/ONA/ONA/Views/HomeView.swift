@@ -1,60 +1,21 @@
 import SwiftUI
 
-/// "Accueil" tab: pairing when there is no computer yet, then the mission and its confirmations.
+/// "Accueil" tab: pairing when there is no computer yet, then the conversations with the agent.
 struct HomeView: View {
     @Bindable var model: RemoteModel
-    @State private var openConfirmation: Pending?
 
     var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle("ONA")
-                .refreshable { await model.refresh() }
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    if model.isSimulation { SimulationBanner() }
-                }
-        }
-        .sheet(item: $openConfirmation) { pending in
-            ConfirmationView(model: model, pending: pending)
-        }
-        .alert("Action impossible", isPresented: .constant(model.actionError != nil && openConfirmation == nil)) {
-            Button("OK") { model.clearActionError() }
-        } message: {
-            Text(model.actionError ?? "")
-        }
-        // A confirmation that is no longer pending (answered, or replaced) closes its sheet.
-        .onChange(of: model.pending) { _, new in
-            if let open = openConfirmation, open.id != new?.id { openConfirmation = nil }
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if !model.isPaired {
-            PairingView(model: model)
-        } else if let mission = model.mission {
-            MissionView(model: model, mission: mission) { openConfirmation = $0 }
+        if model.isPaired {
+            ChatListView(model: model)
         } else {
-            noMission
-        }
-    }
-
-    private var noMission: some View {
-        List {
-            Section {
-                ConnectionStatusRow(connection: model.connection, computer: model.pairing?.name, viaTor: model.usesTor)
+            NavigationStack {
+                PairingView(model: model)
+                    .navigationTitle("ONA")
             }
-            Section {
-                ContentUnavailableView(
-                    "Aucune mission en cours",
-                    systemImage: "tray",
-                    description: Text("Lancez une mission sur l'ordinateur. Vous suivrez ici son avancement et confirmerez les choix importants.")
-                )
-            }
-            if model.isSimulation {
-                Section {
-                    Button("Démarrer une simulation") { Task { await model.mock(.start) } }
-                }
+            .alert("Action impossible", isPresented: .constant(model.actionError != nil)) {
+                Button("OK") { model.clearActionError() }
+            } message: {
+                Text(model.actionError ?? "")
             }
         }
     }

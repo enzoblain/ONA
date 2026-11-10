@@ -8,6 +8,26 @@ protocol ComputerLink: Sendable {
     func confirm(_ confirmation: ConfirmationAnswer) async throws -> Ack
     /// Routes that exist only on the mock computer.
     func mock(_ action: MockAction) async throws -> Ack
+
+    // Conversations
+    func chats() async throws -> ChatList
+    func chat(_ id: String) async throws -> ChatReply
+    func newChat(_ request: ChatMessageRequest) async throws -> NewChatAck
+    func send(_ request: ChatMessageRequest, to chatID: String) async throws -> Ack
+    func deleteChat(_ chatID: String, _ request: ChatDeleteRequest) async throws -> Ack
+}
+
+/// Paths of the conversation routes, shared by both links. Chat ids come from the computer: only safe characters.
+enum ChatPaths {
+    static let list = "v0/chats"
+
+    static func chat(_ id: String) -> String { "v0/chats/\(safe(id))" }
+    static func messages(_ id: String) -> String { "v0/chats/\(safe(id))/messages" }
+    static func delete(_ id: String) -> String { "v0/chats/\(safe(id))/delete" }
+
+    static func safe(_ id: String) -> String {
+        id.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_" } ? id : "invalid"
+    }
 }
 
 enum MockAction: String, Sendable {
@@ -77,7 +97,27 @@ struct HTTPComputerLink: ComputerLink {
         try await post("v0/mock/\(action.rawValue)", body: [String: String]())
     }
 
-    private func post(_ path: String, body: some Encodable) async throws -> Ack {
+    func chats() async throws -> ChatList {
+        try await send(URLRequest(url: baseURL.appending(path: ChatPaths.list)))
+    }
+
+    func chat(_ id: String) async throws -> ChatReply {
+        try await send(URLRequest(url: baseURL.appending(path: ChatPaths.chat(id))))
+    }
+
+    func newChat(_ request: ChatMessageRequest) async throws -> NewChatAck {
+        try await post(ChatPaths.list, body: request)
+    }
+
+    func send(_ request: ChatMessageRequest, to chatID: String) async throws -> Ack {
+        try await post(ChatPaths.messages(chatID), body: request)
+    }
+
+    func deleteChat(_ chatID: String, _ request: ChatDeleteRequest) async throws -> Ack {
+        try await post(ChatPaths.delete(chatID), body: request)
+    }
+
+    private func post<T: Decodable>(_ path: String, body: some Encodable) async throws -> T {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

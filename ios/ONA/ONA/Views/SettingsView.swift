@@ -9,18 +9,6 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 computerSection
-                if model.isSimulation {
-                    Section {
-                        Button("Nouvelle simulation") { Task { await model.mock(.start) } }
-                        Button("Effacer la simulation", role: .destructive) {
-                            Task { await model.mock(.reset) }
-                        }
-                    } header: {
-                        Text("Simulation")
-                    } footer: {
-                        Text("Visible seulement avec un ordinateur simulé (tests).")
-                    }
-                }
                 Section {
                     Text("Ce téléphone garde l'appairage (nom et adresse de l'ordinateur, sa clé publique, la clé de ce téléphone) et, si Tor sert, l'annuaire du réseau Tor (voir l'onglet Tor). Rien n'est sauvegardé dans iCloud.")
                         .font(.callout)

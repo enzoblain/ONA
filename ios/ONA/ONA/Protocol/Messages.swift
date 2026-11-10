@@ -76,7 +76,11 @@ enum Step: Decodable, Equatable, Sendable {
     case unknown(String)
 
     init(from decoder: Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(String.self)
+        self.init(raw: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    /// From the protocol's step names (`search`, `prepare_payment`…).
+    init(raw: String) {
         self = switch raw {
         case "search": .search
         case "read": .read
