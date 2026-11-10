@@ -78,6 +78,9 @@ To measure gas on a local node, build the contract as in `verify.sh`, set `NEAR_
 - The computer must be on for a mission to progress.
 - The same team would operate the relay, the signer and the anchoring.
 - Testnet only. The mint has no real-money deployment planned.
+- **Today a dishonest relay can read messages.** With encryption version 2, the relay controls which client key the reply is encrypted to.
+  The fix is version 3, which binds the reply key, together with a relay running in an attested enclave. Neither is in place yet.
+- The relay is not hardened yet: one slow connection can stall it. Do not expose it to the internet.
 - A stolen signer key can drain the reserve at the speed of the hourly redemption limit. There is no key rotation.
 - An attacker holding tokens can use up a tier's hourly limit and delay exits for that tier.
 
