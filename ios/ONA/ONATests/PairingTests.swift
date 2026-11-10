@@ -269,3 +269,57 @@ enum PairingTestsHelpers {
         try ProtocolCoding.decoder.decode(Pending.self, from: Data(#"{"id":"c-1","kind":"plan","plan":["search"]}"#.utf8))
     }
 }
+
+@Suite("Endpoints and replies")
+struct EndpointTests {
+    @Test func onionWinsOverLocalAddress() {
+        let local = URL(string: "http://10.0.0.2:8790")!
+        #expect(Endpoint(onion: "abc.onion", address: local) == .onion("abc.onion"))
+        #expect(Endpoint(onion: nil, address: local) == .local(local))
+        #expect(Endpoint(onion: "not-an-onion", address: local) == .local(local))
+        #expect(Endpoint(onion: nil, address: nil) == nil)
+    }
+
+    @Test func decodesErrorBodiesOnlyWhenAsked() throws {
+        let body = Data(#"{"ok":false,"error":"stale confirmation","mode":"mock"}"#.utf8)
+        let ack = try ProtocolCoding.decodeReply(Ack.self, status: 409, body: body, acceptErrorBody: true)
+        #expect(ack.error == "stale confirmation")
+        #expect(throws: LinkError.self) {
+            try ProtocolCoding.decodeReply(ComputerState.self, status: 409, body: body, acceptErrorBody: false)
+        }
+    }
+
+    @MainActor @Test func pairsWithAnOnionCode() async throws {
+        let computer = SoftwareDeviceKey()
+        let link = FakeLink(stateData: MessageTests.waitingForPayment, computerKey: computer.publicKey)
+        let endpoints = EndpointRecorder()
+        let store = MemoryPairingStore()
+        let model = RemoteModel(store: store, makeLink: { endpoint in endpoints.add(endpoint); return link },
+                                makeKey: { SoftwareDeviceKey() })
+        let onion = String(repeating: "a", count: 56) + ".onion"
+        let object: [String: Any] = ["v": 0, "name": "Mac", "address": NSNull(), "onion": onion,
+                                     "computer_key": computer.publicKey.base64EncodedString(), "code": "abc"]
+        let json = try JSONSerialization.data(withJSONObject: object).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        await model.pair(with: PairingPayload.prefix + json)
+        #expect(model.actionError == nil)
+        #expect(model.usesTor)
+        #expect(endpoints.all == [.onion(onion)])
+        #expect(try store.load()?.onion == onion)
+    }
+
+    @MainActor @Test func theMacPackageCannotReachAnOnion() async {
+        let model = RemoteModel(store: MemoryPairingStore(), makeKey: { SoftwareDeviceKey() })
+        let link = RemoteModel.localOnlyLink(.onion("x.onion"))
+        await #expect(throws: LinkError.self) { try await link.state() }
+        #expect(!model.isPaired)
+    }
+}
+
+final class EndpointRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var endpoints: [Endpoint] = []
+    func add(_ endpoint: Endpoint) { lock.withLock { endpoints.append(endpoint) } }
+    var all: [Endpoint] { lock.withLock { endpoints } }
+}

@@ -52,7 +52,7 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
 | Desktop app | not in this repository yet | none |
 | iOS app (`ios/`) | Tor spike: Arti embedded in a test app, which reached a test onion service | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
-| iOS app (`ios/`) | mission screens, QR pairing and signed confirmations against a mock computer, labelled `mode: mock`; no Tor yet. The Secure Enclave key path has not run on a device yet | iOS simulator (software key), unit tests on the Mac ([notes](docs/ios/app.md)) |
+| iOS app (`ios/`) | mission screens, QR pairing and signed confirmations against a mock computer, labelled `mode: mock`. Tor transport (Arti) written, but no end-to-end run over Tor yet. The Secure Enclave key path has not run on a device yet | iOS simulator (software key), unit tests on the Mac ([notes](docs/ios/app.md)) |
 | Tor on the computer, Phala enclave | not built | none |
 
 ## Run it
@@ -94,7 +94,7 @@ iOS side, pinned exactly (`Cargo.lock` pins the transitive ones):
 
 | Library | Version | Used by | Notes |
 |---|---|---|---|
-| `arti-client` (Tor Project) | 0.48.0 | `ios/ArtiBridge` | Features: tokio, native-tls, compression, onion-service-client, static-sqlite |
+| `arti-client` (Tor Project) | 0.48.0 | `ios/ArtiBridge` (Tor spike and the iOS app) | Features: tokio, native-tls, compression, onion-service-client, static-sqlite |
 | `tor-rtcompat` (Tor Project) | 0.48.0 | `ios/ArtiBridge` | |
 | `tokio` | 1.54.1 | `ios/ArtiBridge` | |
 | `serde_json` | 1.0.154 | `ios/ArtiBridge` | |

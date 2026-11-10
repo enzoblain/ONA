@@ -61,7 +61,8 @@ humaines d'`ona-core` (branche `main`, `crates/ona-core/src/lib.rs`) : `accept_p
      "code": "<base64url, 16 octets aléatoires, usage unique>" }
    ```
 
-   `address` sert à l'étape 2 (réseau local) ; à l'étape 4, `onion` la remplace.
+   `address` sert à l'étape 2 (réseau local). À l'étape 4, `onion` (adresse v3 en `.onion`) la remplace : le téléphone
+   parle alors HTTP/1.0 au port 80 du service onion, par Tor. Quand les deux sont présents, `onion` l'emporte.
 2. Le téléphone crée une clé P-256 dans le Secure Enclave (utilisation protégée par Face ID ou le code) et envoie :
 
    ```json

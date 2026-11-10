@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		0C0000000000000000000B00 /* ArtiBridge.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0C0000000000000000000205 /* ArtiBridge.xcframework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		0C0000000000000000000100 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -22,6 +26,7 @@
 		0C0000000000000000000202 /* ONA.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = ONA.xcconfig; sourceTree = "<group>"; };
 		0C0000000000000000000203 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		0C0000000000000000000204 /* Local.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text; path = Local.xcconfig.example; sourceTree = "<group>"; };
+		0C0000000000000000000205 /* ArtiBridge.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = ArtiBridge.xcframework; path = ../ArtiBridge/ArtiBridge.xcframework; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -34,6 +39,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0C0000000000000000000B00 /* ArtiBridge.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -53,6 +59,7 @@
 				0C0000000000000000000300 /* ONA */,
 				0C0000000000000000000301 /* ONATests */,
 				0C0000000000000000000502 /* Config */,
+				0C0000000000000000000503 /* Frameworks */,
 				0C0000000000000000000501 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -74,6 +81,14 @@
 				0C0000000000000000000203 /* Info.plist */,
 			);
 			path = Config;
+			sourceTree = "<group>";
+		};
+		0C0000000000000000000503 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				0C0000000000000000000205 /* ArtiBridge.xcframework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -257,6 +272,13 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -287,6 +309,13 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;

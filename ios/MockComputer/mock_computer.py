@@ -308,7 +308,8 @@ def public_host(host: str) -> str:
 
 def print_pairing(pairing: Pairing, qr: bool) -> None:
     payload = pairing.payload()
-    print(f"==> Pairing QR text (single use, address {pairing.address}):\n{payload}", flush=True)
+    where = pairing.onion or pairing.address
+    print(f"==> Pairing QR text (single use, {where}):\n{payload}", flush=True)
     if qr:
         script = Path(__file__).with_name("pairing_qr.swift")
         out = Path("/tmp") / "ona-mock-pairing.png"
@@ -327,10 +328,19 @@ def main() -> None:
     parser.add_argument("--no-start", action="store_true", help="do not open a demo mission at launch")
     parser.add_argument("--address", help="address put in the pairing QR (default: guessed from --host)")
     parser.add_argument("--qr", action="store_true", help="also open the pairing QR as an image (macOS)")
+    parser.add_argument("--onion", help="step 4: put this .onion address in the QR instead of a local address "
+                                        "(see run_onion.sh)")
     args = parser.parse_args()
 
-    address = args.address or f"http://{public_host(args.host)}:{args.port}"
-    pairing = Pairing("Ordinateur simulé", address)
+    if args.onion:
+        address = None
+        onion = args.onion.strip()
+        if not onion.endswith(".onion"):
+            parser.error("--onion must end with .onion")
+    else:
+        address = args.address or f"http://{public_host(args.host)}:{args.port}"
+        onion = None
+    pairing = Pairing("Ordinateur simulé", address, onion)
     computer = Computer(args.step_seconds, pairing)
     if not args.no_start:
         computer.start()

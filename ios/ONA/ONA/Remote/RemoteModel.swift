@@ -35,12 +35,12 @@ final class RemoteModel {
     private var key: (any DeviceKey)?
     private var pollTask: Task<Void, Never>?
     private let store: any PairingStore
-    private let makeLink: @Sendable (URL) -> any ComputerLink
+    private let makeLink: @Sendable (Endpoint) -> any ComputerLink
     private let makeKey: @Sendable () throws -> any DeviceKey
 
     init(
         store: any PairingStore = KeychainPairingStore(),
-        makeLink: @escaping @Sendable (URL) -> any ComputerLink = { HTTPComputerLink(baseURL: $0) },
+        makeLink: @escaping @Sendable (Endpoint) -> any ComputerLink = RemoteModel.localOnlyLink,
         makeKey: @escaping @Sendable () throws -> any DeviceKey = DeviceKeys.create
     ) {
         self.store = store
@@ -57,6 +57,16 @@ final class RemoteModel {
     var pending: Pending? { state?.mission?.pending }
     var isSimulation: Bool { sawSimulation || (state?.isSimulation ?? false) }
     var isPaired: Bool { pairing != nil }
+    /// True when the paired computer is reached through Tor.
+    var usesTor: Bool { pairing.flatMap { Endpoint(onion: $0.onion, address: $0.address) }?.isTor ?? false }
+
+    /// Default link factory for builds without Tor (the Mac test package). The app passes one that handles onions.
+    nonisolated static func localOnlyLink(_ endpoint: Endpoint) -> any ComputerLink {
+        switch endpoint {
+        case .local(let url): HTTPComputerLink(baseURL: url)
+        case .onion: UnavailableLink(reason: "Tor n'est pas disponible dans cette version")
+        }
+    }
 
     // MARK: - Pairing
 
@@ -69,8 +79,8 @@ final class RemoteModel {
             actionError = Self.describe(failure)
             return
         }
-        guard let address = payload.address else {
-            actionError = "Ce code demande Tor (adresse .onion), pas encore pris en charge par cette version."
+        guard let endpoint = Endpoint(onion: payload.onion, address: payload.address) else {
+            actionError = Self.describe(.noAddress)
             return
         }
         sending = true
@@ -86,7 +96,7 @@ final class RemoteModel {
                                           signature: try key.sign(message).base64EncodedString())
                 return (key, request)
             }.value
-            let link = makeLink(address)
+            let link = makeLink(endpoint)
             let ack = try await link.pair(request)
             if ack.mode?.isSimulation == true { sawSimulation = true }
             guard ack.ok, let pairingID = ack.pairingId else {
@@ -94,7 +104,7 @@ final class RemoteModel {
                 return
             }
             let stored = StoredPairing(
-                pairingID: pairingID, name: payload.name, address: address, onion: payload.onion,
+                pairingID: pairingID, name: payload.name, address: payload.address, onion: payload.onion,
                 computerKey: payload.computerKey, keyKind: key.kind, keyRepresentation: key.storedRepresentation,
                 pairedAt: .now
             )
@@ -230,11 +240,11 @@ final class RemoteModel {
     }
 
     private func use(_ stored: StoredPairing, key: (any DeviceKey)? = nil, link: (any ComputerLink)? = nil) throws {
-        guard let address = stored.address else {
-            throw LinkError.unreachable("appairage Tor pas encore pris en charge")
+        guard let endpoint = Endpoint(onion: stored.onion, address: stored.address) else {
+            throw LinkError.unreachable("appairage sans adresse")
         }
         self.key = try key ?? DeviceKeys.load(kind: stored.keyKind, representation: stored.keyRepresentation)
-        self.link = link ?? makeLink(address)
+        self.link = link ?? makeLink(endpoint)
         pairing = stored
         state = nil
         connection = .idle

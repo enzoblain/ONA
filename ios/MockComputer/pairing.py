@@ -56,10 +56,11 @@ def b64decode(text: str) -> bytes:
 class Pairing:
     """One computer key, one pending pairing code, at most one paired phone (enough for the mock)."""
 
-    def __init__(self, name: str, address: str):
+    def __init__(self, name: str, address: str | None, onion: str | None = None):
         self.lock = threading.Lock()
         self.name = name
         self.address = address
+        self.onion = onion
         self._private, self.computer_key = p256.generate_keypair()
         self.code = b64url(secrets.token_bytes(16))
         self.phone_key: bytes | None = None
@@ -68,7 +69,7 @@ class Pairing:
 
     def payload(self) -> str:
         """Text of the pairing QR code."""
-        data = {"v": 0, "name": self.name, "address": self.address, "onion": None,
+        data = {"v": 0, "name": self.name, "address": self.address, "onion": self.onion,
                 "computer_key": base64.b64encode(self.computer_key).decode("ascii"), "code": self.code}
         return PAYLOAD_PREFIX + b64url(json.dumps(data, separators=(",", ":")).encode("utf-8"))
 

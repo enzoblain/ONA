@@ -1,7 +1,7 @@
 import Foundation
 
-/// How the phone reaches the computer. Steps 2–3: plain HTTP on the local network (mock computer).
-/// Step 4 adds a Tor implementation behind the same protocol.
+/// How the phone reaches the computer: `HTTPComputerLink` on the local network (steps 2–3), `TorComputerLink` over
+/// Tor to the computer's onion service (step 4, app only).
 protocol ComputerLink: Sendable {
     func state() async throws -> ComputerState
     func pair(_ request: PairRequest) async throws -> Ack
@@ -21,7 +21,7 @@ enum LinkError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unreachable(let detail): "Ordinateur injoignable (\(detail)). Il doit être allumé et sur le même réseau."
+        case .unreachable(let detail): "Ordinateur injoignable (\(detail)). Il doit être allumé."
         case .badStatus(let code, let message): "Réponse \(code)\(message.map { " : \($0)" } ?? "")"
         case .badReply(let detail): "Réponse illisible : \(detail)"
         }
@@ -78,15 +78,6 @@ struct HTTPComputerLink: ComputerLink {
             throw LinkError.unreachable(error.localizedDescription)
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        let decoder = ProtocolCoding.decoder
-        guard (200..<300).contains(status) || acceptErrorBody else {
-            let ack = try? decoder.decode(Ack.self, from: data)
-            throw LinkError.badStatus(status, ack?.error)
-        }
-        do {
-            return try decoder.decode(T.self, from: data)
-        } catch {
-            throw LinkError.badReply(String(describing: error))
-        }
+        return try ProtocolCoding.decodeReply(T.self, status: status, body: data, acceptErrorBody: acceptErrorBody)
     }
 }

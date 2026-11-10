@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct ONAApp: App {
-    @State private var model = RemoteModel()
+    @State private var model = RemoteModel(makeLink: AppLinks.make)
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -13,9 +13,11 @@ struct ONAApp: App {
         .onChange(of: scenePhase, initial: true) { _, phase in
             // Polls only while the app is on screen: no push notifications, no background refresh.
             if phase == .active {
+                ArtiTor.shared.setDormant(false)
                 model.startPolling()
             } else if phase == .background {
                 model.stopPolling()
+                ArtiTor.shared.setDormant(true)
             }
         }
     }

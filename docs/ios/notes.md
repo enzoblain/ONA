@@ -37,6 +37,11 @@ Voir `app.md` et `protocol-draft.md`. Proposition pour la question 2 ci-dessous 
 l'appairage (`POST /v0/pair`), avec un code à 6 chiffres comparé sur les deux écrans. Reste : essai sur iPhone réel
 (Secure Enclave, Face ID), et le côté ordinateur dans `ona-core`.
 
+## Étape 4 (pilotage via Tor) : code fait, bout en bout pas encore réussi
+
+Voir `app.md`. Le réseau de l'école filtre Tor ; à refaire sur le partage de connexion. Côté ordinateur réel : servir
+le protocole sur un `.onion` (Hugo).
+
 ## Questions ouvertes à régler avec l'équipe
 
 1. **Démarrage de Tor à chaque ouverture.** Sans push et avec la suspension en arrière-plan, Tor redémarre presque à

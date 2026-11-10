@@ -23,6 +23,9 @@ type Client = TorClient<PreferredRuntime>;
 /// Version of `arti-client` this bridge is built against (kept equal to the pin in Cargo.toml).
 const ARTI_CLIENT_VERSION: &str = "0.48.0";
 
+/// Bootstrap gives up after this long, so a network that blocks Tor fails with an error instead of hanging.
+const BOOTSTRAP_TIMEOUT_SECS: u64 = 120;
+
 /// Largest response body returned to Swift, in bytes. The rest is counted, not copied.
 const MAX_BODY_RETURNED: usize = 4096;
 
@@ -115,7 +118,7 @@ pub extern "C" fn arti_bridge_version() -> *mut c_char {
     ffi(|| Ok(json!({ "bridge": env!("CARGO_PKG_VERSION"), "arti_client": ARTI_CLIENT_VERSION })))
 }
 
-/// Creates the Tor client and bootstraps it. Blocks until the client can carry traffic.
+/// Creates the Tor client and bootstraps it. Blocks until the client can carry traffic, or 120 s at most.
 ///
 /// `state_dir` and `cache_dir` must be writable directories inside the app sandbox. Arti's file-permission checks
 /// (fs-mistrust) are disabled: on iOS the sandbox already isolates the app, and the app does not control the
@@ -150,9 +153,20 @@ pub unsafe extern "C" fn arti_bridge_bootstrap(state_dir: *const c_char, cache_d
         // Stored before bootstrapping so that `arti_bridge_status` can report progress meanwhile.
         set_client(Some(client.clone()));
 
-        if let Err(e) = rt.block_on(client.bootstrap()) {
-            set_client(None);
-            return Err(arti_error("bootstrap", &e));
+        let limit = Duration::from_secs(BOOTSTRAP_TIMEOUT_SECS);
+        // The timer must be created inside the runtime: `timeout` panics outside a Tokio context.
+        match rt.block_on(async { tokio::time::timeout(limit, client.bootstrap()).await }) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                set_client(None);
+                return Err(arti_error("bootstrap", &e));
+            }
+            Err(_) => {
+                set_client(None);
+                return Err(format!(
+                    "bootstrap timed out after {BOOTSTRAP_TIMEOUT_SECS} s (is Tor blocked on this network?)"
+                ));
+            }
         }
         Ok(json!({ "bootstrap_ms": millis(started.elapsed()) }))
     })
@@ -177,8 +191,50 @@ pub extern "C" fn arti_bridge_status() -> *mut c_char {
     })
 }
 
+/// Largest HTTP response read by `arti_bridge_http_request`, in bytes.
+const MAX_RESPONSE: u64 = 1 << 20;
+
+/// Opens a Tor stream to `host:port`, writes `request`, reads the response until the server closes the stream
+/// (at most `max_response` bytes). Returns (connect_ms, response bytes).
+async fn exchange(
+    client: &Client,
+    host: &str,
+    port: u16,
+    request: &[u8],
+    timeout_ms: u64,
+    max_response: u64,
+) -> Result<(u64, Vec<u8>), String> {
+    let started = Instant::now();
+    let work = async {
+        let mut stream = client.connect((host, port)).await.map_err(|e| arti_error("connect", &e))?;
+        let connect_ms = millis(started.elapsed());
+        stream.write_all(request).await.map_err(|e| format!("write: {e}"))?;
+        stream.flush().await.map_err(|e| format!("flush: {e}"))?;
+        let mut response = Vec::new();
+        (&mut stream)
+            .take(max_response + 1)
+            .read_to_end(&mut response)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+        if response.len() as u64 > max_response {
+            return Err(format!("response larger than {max_response} bytes"));
+        }
+        Ok::<_, String>((connect_ms, response))
+    };
+    tokio::time::timeout(Duration::from_millis(timeout_ms), work)
+        .await
+        .map_err(|_| format!("timed out after {timeout_ms} ms"))?
+}
+
+fn check_target(host: &str, path: &str) -> Result<(), String> {
+    if host.is_empty() || host.contains(['\r', '\n', ' ']) || path.contains(['\r', '\n', ' ']) || !path.starts_with('/') {
+        return Err("invalid host or path".to_owned());
+    }
+    Ok(())
+}
+
 /// Opens a Tor stream to `host:port` (a `.onion` address or a regular host), sends a plain HTTP/1.0 GET for `path`
-/// and reads the whole response. Gives up after `timeout_ms`.
+/// and reads the whole response. Gives up after `timeout_ms`. Used by the Tor spike app.
 ///
 /// Returns `{"ok":true,"connect_ms":N,"total_ms":N,"status_line":"…","bytes":N,"body":"…"}`. `body` holds at most
 /// the first 4096 bytes of the response body (lossy UTF-8).
@@ -196,52 +252,137 @@ pub unsafe extern "C" fn arti_bridge_http_get(
     let path = unsafe { arg(path, "path") };
     ffi(move || {
         let (host, path) = (host?, path?);
-        if host.contains(['\r', '\n']) || path.contains(['\r', '\n']) || !path.starts_with('/') {
-            return Err("invalid host or path".to_owned());
+        check_target(&host, &path)?;
+        let client = current_client().ok_or("Tor client not started")?;
+        let rt = runtime()?;
+        let started = Instant::now();
+        let request = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        let (connect_ms, response) =
+            rt.block_on(exchange(&client, &host, port, request.as_bytes(), timeout_ms, MAX_RESPONSE))?;
+
+        let text = String::from_utf8_lossy(&response);
+        let status_line = text.lines().next().unwrap_or_default().to_owned();
+        let body = match text.split_once("\r\n\r\n") {
+            Some((_, body)) => body,
+            None => "",
+        };
+        let body: String = body.chars().scan(0usize, |n, c| {
+            *n += c.len_utf8();
+            (*n <= MAX_BODY_RETURNED).then_some(c)
+        }).collect();
+        Ok(json!({
+            "connect_ms": connect_ms,
+            "total_ms": millis(started.elapsed()),
+            "status_line": status_line,
+            "bytes": response.len(),
+            "body": body,
+        }))
+    })
+}
+
+/// One HTTP/1.0 request over a Tor stream, for the ONA protocol (JSON bodies). `method` is `GET` or `POST`;
+/// `body` (may be null when `body_len` is 0) is sent with `Content-Type: application/json`.
+///
+/// Returns `{"ok":true,"status":200,"body":"…","connect_ms":N,"total_ms":N}`. The response body must be UTF-8 and at
+/// most 1 MiB. A non-2xx status is still `"ok":true`: the caller reads `status` and `body`.
+///
+/// # Safety
+/// `host`, `method` and `path` must be NUL-terminated strings; `body` must be null or point to `body_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arti_bridge_http_request(
+    host: *const c_char,
+    port: u16,
+    method: *const c_char,
+    path: *const c_char,
+    body: *const u8,
+    body_len: usize,
+    timeout_ms: u64,
+) -> *mut c_char {
+    let host = unsafe { arg(host, "host") };
+    let method = unsafe { arg(method, "method") };
+    let path = unsafe { arg(path, "path") };
+    let body: Vec<u8> = if body.is_null() || body_len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: guaranteed by the caller (see function contract).
+        unsafe { std::slice::from_raw_parts(body, body_len) }.to_vec()
+    };
+    ffi(move || {
+        let (host, method, path) = (host?, method?, path?);
+        check_target(&host, &path)?;
+        if method != "GET" && method != "POST" {
+            return Err(format!("unsupported method {method}"));
         }
         let client = current_client().ok_or("Tor client not started")?;
         let rt = runtime()?;
+        let started = Instant::now();
 
-        rt.block_on(async {
-            let started = Instant::now();
-            let request = async {
-                let mut stream = client
-                    .connect((host.as_str(), port))
-                    .await
-                    .map_err(|e| arti_error("connect", &e))?;
-                let connect_ms = millis(started.elapsed());
+        let mut request = format!("{method} {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n");
+        if method == "POST" {
+            request += &format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len());
+        }
+        request += "\r\n";
+        let mut bytes = request.into_bytes();
+        bytes.extend_from_slice(&body);
 
-                let request = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-                stream.write_all(request.as_bytes()).await.map_err(|e| format!("write: {e}"))?;
-                stream.flush().await.map_err(|e| format!("flush: {e}"))?;
-
-                let mut response = Vec::new();
-                stream.read_to_end(&mut response).await.map_err(|e| format!("read: {e}"))?;
-                Ok::<_, String>((connect_ms, response))
-            };
-            let (connect_ms, response) = tokio::time::timeout(Duration::from_millis(timeout_ms), request)
-                .await
-                .map_err(|_| format!("timed out after {timeout_ms} ms"))??;
-
-            let text = String::from_utf8_lossy(&response);
-            let status_line = text.lines().next().unwrap_or_default().to_owned();
-            let body = match text.split_once("\r\n\r\n") {
-                Some((_, body)) => body,
-                None => "",
-            };
-            let body: String = body.chars().scan(0usize, |n, c| {
-                *n += c.len_utf8();
-                (*n <= MAX_BODY_RETURNED).then_some(c)
-            }).collect();
-            Ok(json!({
-                "connect_ms": connect_ms,
-                "total_ms": millis(started.elapsed()),
-                "status_line": status_line,
-                "bytes": response.len(),
-                "body": body,
-            }))
-        })
+        let (connect_ms, response) = rt.block_on(exchange(&client, &host, port, &bytes, timeout_ms, MAX_RESPONSE))?;
+        let (head, payload) = split_response(&response).ok_or("malformed HTTP response")?;
+        let status = parse_status(head).ok_or("malformed HTTP status line")?;
+        let body = String::from_utf8(payload.to_vec()).map_err(|_| "response body is not UTF-8".to_owned())?;
+        Ok(json!({
+            "status": status,
+            "body": body,
+            "connect_ms": connect_ms,
+            "total_ms": millis(started.elapsed()),
+        }))
     })
+}
+
+/// Splits an HTTP response into head and body at the first empty line.
+fn split_response(response: &[u8]) -> Option<(&[u8], &[u8])> {
+    let at = response.windows(4).position(|w| w == b"\r\n\r\n")?;
+    Some((&response[..at], &response[at + 4..]))
+}
+
+/// `HTTP/1.x 200 OK` → 200.
+fn parse_status(head: &[u8]) -> Option<u16> {
+    let line = head.split(|&b| b == b'\n').next()?;
+    let line = std::str::from_utf8(line).ok()?.trim_end();
+    let mut parts = line.splitn(3, ' ');
+    let version = parts.next()?;
+    if !version.starts_with("HTTP/1.") {
+        return None;
+    }
+    parts.next()?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_and_parses_a_response() {
+        let response = b"HTTP/1.0 409 Conflict\r\nContent-Type: application/json\r\n\r\n{\"ok\":false}";
+        let (head, body) = split_response(response).unwrap();
+        assert_eq!(parse_status(head), Some(409));
+        assert_eq!(body, b"{\"ok\":false}");
+    }
+
+    #[test]
+    fn refuses_garbage() {
+        assert!(split_response(b"no header end").is_none());
+        assert_eq!(parse_status(b"SSH-2.0 hello"), None);
+        assert_eq!(parse_status(b"HTTP/1.1 abc OK"), None);
+    }
+
+    #[test]
+    fn refuses_header_injection() {
+        assert!(check_target("example.onion", "/v0/state").is_ok());
+        assert!(check_target("example.onion\r\nX: y", "/").is_err());
+        assert!(check_target("example.onion", "/a b").is_err());
+        assert!(check_target("example.onion", "v0/state").is_err());
+        assert!(check_target("", "/").is_err());
+    }
 }
 
 /// Soft dormant mode suspends Arti's background tasks (to call when the app goes to the background).

@@ -64,7 +64,7 @@ struct RootView: View {
     private var noMission: some View {
         List {
             Section {
-                ConnectionStatusRow(connection: model.connection, computer: model.pairing?.name)
+                ConnectionStatusRow(connection: model.connection, computer: model.pairing?.name, viaTor: model.usesTor)
             }
             Section {
                 ContentUnavailableView(
@@ -85,6 +85,7 @@ struct RootView: View {
 struct ConnectionStatusRow: View {
     let connection: RemoteModel.Connection
     let computer: String?
+    var viaTor = false
 
     var body: some View {
         switch connection {
@@ -92,13 +93,14 @@ struct ConnectionStatusRow: View {
             Label("Aucun ordinateur appairé", systemImage: "link.badge.plus")
                 .foregroundStyle(.secondary)
         case .idle, .connecting:
-            Label("Connexion à l'ordinateur…", systemImage: "antenna.radiowaves.left.and.right")
+            Label(viaTor ? "Démarrage de Tor et connexion à l'ordinateur…" : "Connexion à l'ordinateur…",
+                  systemImage: "antenna.radiowaves.left.and.right")
                 .foregroundStyle(.secondary)
         case .connected(let date):
             Label {
-                Text("\(computer ?? "Ordinateur") — à jour \(date.formatted(date: .omitted, time: .standard))")
+                Text("\(computer ?? "Ordinateur") — à jour \(date.formatted(date: .omitted, time: .standard))\(viaTor ? " · via Tor" : "")")
             } icon: {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                Image(systemName: viaTor ? "lock.circle.fill" : "checkmark.circle.fill").foregroundStyle(.green)
             }
         case .failed(let message):
             Label {
@@ -122,8 +124,12 @@ struct ConnectionView: View {
                 if let pairing = model.pairing {
                     Section {
                         LabeledContent("Nom", value: pairing.name)
-                        if let address = pairing.address {
-                            LabeledContent("Adresse") { Text(address.absoluteString).font(.callout.monospaced()) }
+                        if let onion = pairing.onion {
+                            LabeledContent("Adresse Tor") {
+                                Text(onion).font(.caption.monospaced()).multilineTextAlignment(.trailing)
+                            }
+                        } else if let address = pairing.address {
+                            LabeledContent("Adresse locale") { Text(address.absoluteString).font(.callout.monospaced()) }
                         }
                         LabeledContent("Appairé le", value: pairing.pairedAt.formatted(date: .abbreviated, time: .shortened))
                         LabeledContent("Clé de ce téléphone") {
@@ -138,7 +144,7 @@ struct ConnectionView: View {
                         Text("Seul cet appairage est gardé sur le téléphone, dans le Trousseau (cet appareil seulement).")
                     }
                     Section {
-                        ConnectionStatusRow(connection: model.connection, computer: pairing.name)
+                        ConnectionStatusRow(connection: model.connection, computer: pairing.name, viaTor: model.usesTor)
                     }
                 }
                 if model.isSimulation {

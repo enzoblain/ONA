@@ -1,4 +1,4 @@
-# App iOS ONA — étapes 2 et 3 (écrans, appairage, signatures)
+# App iOS ONA — étapes 2 à 4 (écrans, appairage, signatures, Tor)
 
 Document interne. Créé le 2026-11-10.
 
@@ -6,19 +6,23 @@ Document interne. Créé le 2026-11-10.
 
 | Chemin | Rôle |
 |---|---|
-| `ios/ONA/` | App SwiftUI « ONA » (iOS 18+) : appairage par QR, suivi de mission, trois confirmations signées, relevé d'exposition. Pas encore de Tor. |
+| `ios/ONA/` | App SwiftUI « ONA » (iOS 18+) : appairage par QR, suivi de mission, trois confirmations signées, relevé d'exposition, transport par Tor (Arti embarqué) quand le QR donne une adresse `.onion`. |
+| `ios/ONA/ONA/Tor/` | `ArtiTor` (pont Rust `ios/ArtiBridge`) et `TorComputerLink` : le protocole en HTTP/1.0 vers le port 80 du service onion de l'ordinateur. Dans l'app seulement, pas dans `Package.swift`. |
 | `ios/ONA/ONATests/` | Tests unitaires (Swift Testing) : paiement, messages, appairage, octets signés, signatures, Trousseau simulé. |
 | `ios/ONA/Package.swift` | Fait tourner la partie sans interface (`Protocol/`, `Pairing/`, `Remote/`) et ses tests sur le Mac : `cd ios/ONA && swift test`. |
 | `ios/MockComputer/mock_computer.py` | Faux ordinateur (Python, bibliothèque standard seulement), suit `protocol-draft.md`. Tout ce qu'il renvoie porte `mode: mock`. |
 | `ios/MockComputer/pairing.py`, `p256.py` | Appairage et vérification des signatures du faux ordinateur. `p256.py` : P-256 en Python pur, **pour le faux ordinateur seulement** (ni revu, ni à temps constant). |
 | `ios/MockComputer/pairing_qr.swift` | Affiche le QR d'appairage en image (`--qr`). |
+| `ios/MockComputer/run_onion.sh` | Étape 4 : le faux ordinateur joignable seulement par Tor (service onion C Tor, clé hors du dépôt), QR avec l'adresse `.onion`. |
 | `ios/MockComputer/test_*.py` | Tests du faux ordinateur. |
 | `docs/ios/protocol-draft.md` | Brouillon du protocole téléphone ↔ ordinateur, à valider avec Hugo. |
 
 ## Lancer
 
 ```bash
-python3 ios/MockComputer/mock_computer.py --qr              # simulateur iOS ; ouvre aussi le QR en image
+ios/ArtiBridge/build-xcframework.sh                         # une fois : Arti pour l'app (~5 min)
+ios/MockComputer/run_onion.sh --qr                          # étape 4 : faux ordinateur derrière un .onion
+python3 ios/MockComputer/mock_computer.py --qr              # sans Tor, simulateur iOS ; ouvre aussi le QR en image
 python3 ios/MockComputer/mock_computer.py --host 0.0.0.0 --qr   # iPhone sur le même réseau
 open ios/ONA/ONA.xcodeproj
 ```
@@ -70,6 +74,25 @@ des builds pour iPhone). Un nouveau QR : `curl -X POST http://127.0.0.1:8790/v0/
   signature avec la clé rechargée acceptée.
 - **Le simulateur n'a pas de Secure Enclave** : il utilise une clé logicielle (affichée comme telle dans l'app). Le
   chemin Secure Enclave + Face ID n'a pas encore tourné.
+
+### Étape 4 (Tor), état le 2026-11-10
+
+- Code : le QR peut donner une adresse `.onion` au lieu d'une adresse locale ; l'app passe alors tout le protocole
+  (appairage, état, confirmations signées) par Arti 0.48.0. Le pont Rust gagne une requête HTTP générique (GET/POST,
+  réponse ≤ 1 Mio) et une limite de 120 s au démarrage de Tor. Arti passe en mode dormant quand l'app passe en
+  arrière-plan.
+- Tests : 3 tests Rust (lecture de la réponse HTTP, refus d'injection d'en-têtes), 34 tests Swift (dont le choix
+  `.onion` / adresse locale et un appairage `.onion`), 19 tests Python. Tous passés.
+- **Bout en bout par Tor : pas encore réussi.** Sur le Wi-Fi de l'école (10.2.x.x), C Tor a fini par démarrer après
+  de nombreuses coupures TLS, mais Arti n'a obtenu aucun circuit vers le `.onion` du faux ordinateur (« Failed to
+  obtain hidden service circuit », 4 essais depuis le Mac). Dans le simulateur, l'app démarre Arti (cache écrit) mais
+  n'aboutit pas sur ce réseau. À refaire sur un réseau qui laisse passer Tor (partage de connexion).
+- Vérifié : sur ce réseau, avec un cache Arti vide, le démarrage de Tor s'arrête au bout de 120 s et l'app affiche
+  « bootstrap timed out after 120 s (is Tor blocked on this network?) » (simulateur et Mac). Une première version de
+  cette limite faisait paniquer le pont (minuteur Tokio créé hors du runtime) ; la panique était rattrapée et
+  affichée, elle est corrigée.
+- Pas encore fait : autorisation client Tor (restricted discovery) pour que seul le téléphone appairé puisse joindre
+  le `.onion` ; côté ordinateur réel dans `ona-core`.
 
 ## Pas encore fait
 

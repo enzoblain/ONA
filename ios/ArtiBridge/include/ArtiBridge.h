@@ -6,6 +6,7 @@
 #define ARTI_BRIDGE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -17,6 +18,8 @@ char *arti_bridge_version(void);
 char *arti_bridge_bootstrap(const char *state_dir, const char *cache_dir);
 char *arti_bridge_status(void);
 char *arti_bridge_http_get(const char *host, uint16_t port, const char *path, uint64_t timeout_ms);
+char *arti_bridge_http_request(const char *host, uint16_t port, const char *method, const char *path,
+                               const uint8_t *body, size_t body_len, uint64_t timeout_ms);
 void arti_bridge_set_dormant(bool dormant);
 void arti_bridge_shutdown(void);
 void arti_bridge_string_free(char *s);

@@ -8,7 +8,7 @@ struct MissionView: View {
     var body: some View {
         List {
             Section {
-                ConnectionStatusRow(connection: model.connection, computer: model.state?.computer.name)
+                ConnectionStatusRow(connection: model.connection, computer: model.state?.computer.name, viaTor: model.usesTor)
             }
 
             Section {
