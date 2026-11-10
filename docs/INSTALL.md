@@ -45,6 +45,34 @@ Its startup output gives the request key and domain tag. Routes, all `POST` with
 | `/exchange` | `token`, `owner_sig`, `blinded` (8 hex points) | 202 while pending, then 200 with `signatures` when the same request is repeated |
 | `/chat` | `token` (hex, 80 bytes), `prompt` | `reply`, `tokens_used`, `mode` |
 
+## Use the real model
+
+`ona real` works like plain `ona`, but the planner and the page reader call a real model through a relay. Every call spends credits.
+Nothing selects this mode by default: without the word `real`, or with any required variable missing, no real call is made.
+
+| Variable | Value |
+|---|---|
+| `ONA_REAL_RELAY_URL` | relay address: `https`, or `http` on `127.0.0.1` or `localhost` only |
+| `ONA_REAL_MODEL` | model name, which the relay must allow |
+| `ONA_REAL_MAX_TOKENS` | ceiling on the reply tokens of one call, at most the relay's own limit. The prompt counts on top of it |
+| `ONA_REAL_TOKEN_BUDGET` | most tokens in total for this run of `ona`, prompts and replies, at least one call's ceiling |
+| `ONA_REAL_TOKENS_FILE` | optional, a file with one request token per line, one spent per call and removed from the file before it is sent. Refused if empty. `ona-relay` refuses a chat without one |
+
+**Until the enclave quotes are verified in this client, the relay can read the content of a mission and make up replies. Do not run a
+sensitive mission in this mode.**
+
+```
+cargo run -p ona-core --bin ona -- real
+```
+
+Each call reserves its reply ceiling plus one token per byte of prompt before it is sent. That reservation stays spent if the call fails,
+and only the usage in a validly signed reply replaces it, so the real cost of a call can exceed the ceiling. A mission is limited to 4 KB and
+a page to 32 KB. The budget is counted in memory, so restarting `ona` starts it again. A call stops before sending when the budget or the
+request tokens run out, and the model stops after three failures in a row where nothing was sent. Only the model is real: the web and
+the payments stay fake, and those replies still say `"mode":"mock"`. For each real call the journal keeps the response id, the model,
+the token count and salted fingerprints, never the content. The exposure report counts real and fake calls apart (`model_calls_real`,
+`model_calls_mock`, `real_calls`), and its `mode` is `mixed` when real calls and fake parts are both present. This mode has never run against NEAR AI.
+
 ## Measure gas on a local node
 
 ```
@@ -132,4 +160,4 @@ cargo run -p ona-server --bin ona-relay -- run
 
 ## Not available yet
 
-No NEAR testnet deployment, real model connection, Tor, enclave, desktop app or iOS app. See the status table in the [README](../README.md).
+No NEAR testnet deployment, tested real model connection, Tor, enclave, desktop app or iOS app. See the status table in the [README](../README.md).

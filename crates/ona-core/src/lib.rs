@@ -1,14 +1,18 @@
-//! `ona-core`: local mission logic. The model, the web and the chain are behind traits and are
-//! faked in this version. Every reply is labelled `mode: mock` so a fake can't pass for a result.
+//! `ona-core`: local mission logic. The model, the web and the chain are behind traits. The web and
+//! the chain are faked in this version, and the model is faked unless a real one is configured.
+//! Every reply is labelled with its `mode` so a fake can't pass for a result.
 
 pub mod e2ee;
 pub mod gate;
 pub mod journal;
 pub mod reader;
+pub mod remote;
 pub mod vault;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -71,18 +75,69 @@ pub fn validate_plan(plan: &[Step]) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// What the journal records about a real call. Never any content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealCall {
+    pub model: String,
+    /// Known only for a reply whose signature was verified.
+    pub response_id: Option<String>,
+    pub tokens_used: u64,
+}
+
 /// A model reply, always carrying how it was produced.
 #[derive(Debug, Clone)]
 pub struct ModelReply {
     pub text: String,
     pub mode: &'static str,
+    /// `None` for a fake.
+    pub call: Option<RealCall>,
+}
+
+/// A call that gave no usable reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelFailure {
+    /// Fixed wording, safe for the journal.
+    pub reason: &'static str,
+    /// For the caller only. Not journaled.
+    pub detail: String,
+    /// `Some` if the request left the machine.
+    pub call: Option<RealCall>,
+    /// The input itself is unacceptable, so trying it again cannot help.
+    pub refused_input: bool,
 }
 
 /// The planner sees only the mission, the reader sees only one page. Separate calls, no shared
 /// context, and neither one has tools.
 pub trait Model {
-    fn plan(&mut self, mission: &str) -> ModelReply;
-    fn read_page(&mut self, page: &str) -> ModelReply;
+    fn plan(&mut self, mission: &str) -> Result<ModelReply, ModelFailure>;
+    fn read_page(&mut self, page: &str) -> Result<ModelReply, ModelFailure>;
+
+    /// Says whether a call could be made now, so a page is not fetched for nothing.
+    fn ready(&self) -> Result<(), ModelFailure> {
+        Ok(())
+    }
+
+    fn mode(&self) -> &'static str {
+        MODE
+    }
+}
+
+impl Model for Box<dyn Model> {
+    fn plan(&mut self, mission: &str) -> Result<ModelReply, ModelFailure> {
+        (**self).plan(mission)
+    }
+
+    fn read_page(&mut self, page: &str) -> Result<ModelReply, ModelFailure> {
+        (**self).read_page(page)
+    }
+
+    fn ready(&self) -> Result<(), ModelFailure> {
+        (**self).ready()
+    }
+
+    fn mode(&self) -> &'static str {
+        (**self).mode()
+    }
 }
 
 pub trait Web {
@@ -123,6 +178,7 @@ pub struct Mission<M, W, P> {
     payment: Option<PaymentIntent>,
     confirmed: Option<String>,
     outputs: BTreeMap<&'static str, u32>,
+    error_mode: Option<&'static str>,
 }
 
 type Reply = Result<Value, String>;
@@ -131,7 +187,7 @@ impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
     pub fn open(model: M, web: W, payments: P, policy: Policy, salt: [u8; 32], text: &str) -> Self {
         let mut journal = Journal::new(salt);
         let fingerprint = journal.fingerprint(text.as_bytes());
-        journal.append(Kind::MissionOpen, json!({"mission": fingerprint, "mode": MODE}));
+        journal.append(Kind::MissionOpen, json!({"mission": fingerprint, "mode": model.mode()}));
         Self {
             model,
             web,
@@ -150,11 +206,17 @@ impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
             payment: None,
             confirmed: None,
             outputs: BTreeMap::new(),
+            error_mode: None,
         }
     }
 
     pub fn phase(&self) -> Phase {
         self.phase
+    }
+
+    /// The mode of the model call just made, if any: an error only carries it when it came from one.
+    pub fn take_error_mode(&mut self) -> Option<&'static str> {
+        self.error_mode.take()
     }
 
     pub fn plan(&self) -> &[Step] {
@@ -170,8 +232,12 @@ impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
         if self.phase != Phase::Open {
             return Err("a plan was already proposed".into());
         }
-        let reply = self.model.plan(&self.mission_text);
-        self.commit_llm("plan", &reply);
+        let input = self.journal.fingerprint(self.mission_text.as_bytes());
+        let reply = match self.model.plan(&self.mission_text) {
+            Ok(reply) => reply,
+            Err(failure) => return Err(self.model_failed("plan", &input, failure)),
+        };
+        self.commit_llm("plan", &input, &reply);
         let plan: Vec<Step> =
             serde_json::from_str(&reply.text).map_err(|_| "plan does not match the catalogue".to_string())?;
         validate_plan(&plan).map_err(String::from)?;
@@ -207,9 +273,40 @@ impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
         self.cursor += 1;
     }
 
-    fn commit_llm(&mut self, role: &str, reply: &ModelReply) {
+    fn commit_llm(&mut self, role: &str, input: &str, reply: &ModelReply) {
+        self.error_mode = Some(reply.mode);
         let response = self.journal.fingerprint(reply.text.as_bytes());
-        self.journal.append(Kind::LlmCommit, json!({"role": role, "response": response, "mode": reply.mode}));
+        let mut data = json!({"role": role, "response": response, "mode": reply.mode});
+        if let Some(call) = &reply.call {
+            data["input"] = json!(input);
+            data["model"] = json!(call.model);
+            data["response_id"] = json!(call.response_id);
+            data["tokens_used"] = json!(call.tokens_used);
+            data["outcome"] = json!("ok");
+        }
+        self.journal.append(Kind::LlmCommit, data);
+    }
+
+    /// A request that left the machine is exposure even without a reply. One that never left is
+    /// a refusal.
+    fn model_failed(&mut self, role: &str, input: &str, failure: ModelFailure) -> String {
+        self.error_mode = Some(self.model.mode());
+        match &failure.call {
+            Some(call) => self.journal.append(
+                Kind::LlmCommit,
+                json!({
+                    "role": role,
+                    "input": input,
+                    "mode": remote::REAL_MODE,
+                    "model": call.model,
+                    "response_id": call.response_id,
+                    "tokens_used": call.tokens_used,
+                    "outcome": "failed",
+                }),
+            ),
+            None => self.journal.append(Kind::GateDecision, json!({"output": "model", "result": failure.reason})),
+        }
+        failure.detail
     }
 
     fn gate_log(&mut self, output: &str, verdict: Result<(), &gate::GateError>) {
@@ -233,7 +330,7 @@ impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
         self.count_output("search");
         self.handles.extend(handles.iter().cloned());
         let fingerprint = self.journal.fingerprint(query.as_bytes());
-        self.journal.append(Kind::ToolCommit, json!({"tool": "search", "query": fingerprint, "results": handles.len()}));
+        self.journal.append(Kind::ToolCommit, json!({"tool": "search", "query": fingerprint, "results": handles.len(), "mode": MODE}));
         self.advance();
         Ok(json!({"handles": handles, "mode": MODE}))
     }
@@ -244,14 +341,29 @@ impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
         let checked = self.policy.check_fetch(handle, &self.handles);
         self.gate_log("fetch", checked.as_ref().map(|_| *&()));
         checked.map_err(|e| e.as_str().to_string())?;
+        if let Err(failure) = self.model.ready() {
+            return Err(self.model_failed("reader", "", failure));
+        }
         let page = self.web.fetch(handle).ok_or("page not available")?;
         self.count_output("fetch");
-        let reply = self.model.read_page(&page);
-        self.commit_llm("reader", &reply);
-        let offer = reader::parse_offer(&reply.text, &page);
         let page_fingerprint = self.journal.fingerprint(page.as_bytes());
+        let reply = match self.model.read_page(&page) {
+            Ok(reply) => reply,
+            Err(failure) => {
+                // The page was fetched, so it counts. A page refused for its size uses up its step.
+                // Otherwise the step stays: the budget limits retries of a call that was sent, and
+                // the model stops after repeated failures that sent nothing.
+                self.journal.append(Kind::ToolCommit, json!({"tool": "fetch", "page": page_fingerprint, "accepted": false, "mode": MODE}));
+                if failure.refused_input {
+                    self.advance();
+                }
+                return Err(self.model_failed("reader", &page_fingerprint, failure));
+            }
+        };
+        self.commit_llm("reader", &page_fingerprint, &reply);
+        let offer = reader::parse_offer(&reply.text, &page);
         let accepted = offer.is_ok();
-        self.journal.append(Kind::ToolCommit, json!({"tool": "fetch", "page": page_fingerprint, "accepted": accepted}));
+        self.journal.append(Kind::ToolCommit, json!({"tool": "fetch", "page": page_fingerprint, "accepted": accepted, "mode": MODE}));
         // Consecutive Read steps are one per page, so a refused page still consumes its step.
         self.advance();
         let offer = offer.map_err(|e| e.as_str().to_string())?;
@@ -292,7 +404,7 @@ impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
         self.web.contact(&firm, message);
         self.count_output("contact");
         let fingerprint = self.journal.fingerprint(message.as_bytes());
-        self.journal.append(Kind::ToolCommit, json!({"tool": "contact", "firm": firm, "message": fingerprint}));
+        self.journal.append(Kind::ToolCommit, json!({"tool": "contact", "firm": firm, "message": fingerprint, "mode": MODE}));
         self.advance();
         Ok(json!({"sent": true, "mode": MODE}))
     }
@@ -345,13 +457,14 @@ impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
         if self.phase == Phase::Closed {
             return Err("mission already closed".into());
         }
-        self.journal.append(Kind::MissionClose, json!({"steps_done": self.cursor, "mode": MODE}));
+        let mode = self.model.mode();
+        self.journal.append(Kind::MissionClose, json!({"steps_done": self.cursor, "mode": mode}));
         self.phase = Phase::Closed;
         self.mission_text.clear();
         self.offers.clear();
         self.ranked.clear();
         let head: String = self.journal.head().iter().map(|b| format!("{b:02x}")).collect();
-        Ok(json!({"head": head, "entries": self.journal.len(), "mode": MODE}))
+        Ok(json!({"head": head, "entries": self.journal.len(), "mode": mode}))
     }
 
     pub fn exposure(&self) -> Value {
@@ -366,6 +479,8 @@ pub fn exposure_report(journal: &Journal) -> Value {
     let mut payments = Vec::new();
     let mut firms = BTreeSet::new();
     let mut model_calls = 0u64;
+    let mut mock_calls = 0u64;
+    let mut real_calls = Vec::new();
     let mut any_mock = false;
     for entry in journal.entries() {
         let data = &entry["data"];
@@ -380,7 +495,20 @@ pub fn exposure_report(journal: &Journal) -> Value {
                     firms.insert(firm.to_string());
                 }
             }
-            "llm_commit" => model_calls += 1,
+            "llm_commit" => {
+                model_calls += 1;
+                if data["mode"] == remote::REAL_MODE {
+                    real_calls.push(json!({
+                        "role": data["role"],
+                        "model": data["model"],
+                        "response_id": data["response_id"],
+                        "tokens_used": data["tokens_used"],
+                        "outcome": data["outcome"],
+                    }));
+                } else {
+                    mock_calls += 1;
+                }
+            }
             "gate_decision" if data["result"] != "allow" => {
                 let key = format!("{}: {}", data["output"].as_str().unwrap_or("?"), data["result"].as_str().unwrap_or("?"));
                 *refused.entry(key).or_insert(0) += 1;
@@ -389,13 +517,21 @@ pub fn exposure_report(journal: &Journal) -> Value {
             _ => {}
         }
     }
+    let mode = match (!real_calls.is_empty(), any_mock) {
+        (true, true) => "mixed",
+        (false, true) => MODE,
+        (_, false) => remote::REAL_MODE,
+    };
     json!({
         "outputs": outputs,
         "refused_by_gate": refused,
         "firms_contacted": firms,
         "payments": payments,
         "model_calls": model_calls,
-        "mode": if any_mock { MODE } else { "real" },
+        "model_calls_mock": mock_calls,
+        "model_calls_real": real_calls.len(),
+        "real_calls": real_calls,
+        "mode": mode,
     })
 }
 
@@ -415,18 +551,18 @@ impl Default for MockModel {
 pub const DEMO_PLAN: &str = r#"["search","read","read","compare","confirm_recipient","contact","prepare_payment","confirm_payment","pay"]"#;
 
 impl Model for MockModel {
-    fn plan(&mut self, _mission: &str) -> ModelReply {
-        ModelReply { text: self.plan_reply.clone(), mode: MODE }
+    fn plan(&mut self, _mission: &str) -> Result<ModelReply, ModelFailure> {
+        Ok(ModelReply { text: self.plan_reply.clone(), mode: MODE, call: None })
     }
 
-    fn read_page(&mut self, page: &str) -> ModelReply {
+    fn read_page(&mut self, page: &str) -> Result<ModelReply, ModelFailure> {
         // Pages in the demo carry the offer as a line starting with "OFFER ".
         let text = page
             .lines()
             .find_map(|l| l.strip_prefix("OFFER "))
             .unwrap_or("{}")
             .to_string();
-        ModelReply { text, mode: MODE }
+        Ok(ModelReply { text, mode: MODE, call: None })
     }
 }
 
@@ -503,10 +639,17 @@ pub fn demo_policy() -> Policy {
 pub type DemoMission = Mission<MockModel, MockWeb, MockPayments>;
 
 /// One JSON request, one JSON reply. Both front ends go through this single entry point.
+///
+/// The model is the fake unless `use_real_model` is called. It moves from one mission to the next,
+/// so its token budget covers all of them.
 pub struct Core {
-    mission: Option<DemoMission>,
+    mission: Option<CoreMission>,
     vault: Option<vault::Vault>,
+    model: Option<Box<dyn Model>>,
+    model_mode: &'static str,
 }
+
+type CoreMission = Mission<Box<dyn Model>, MockWeb, MockPayments>;
 
 fn unix_now() -> Result<u64, String> {
     std::time::SystemTime::now()
@@ -523,11 +666,26 @@ impl Default for Core {
 
 impl Core {
     pub fn new() -> Self {
-        Self { mission: None, vault: None }
+        Self { mission: None, vault: None, model: Some(Box::new(MockModel::default())), model_mode: MODE }
     }
 
     pub fn with_vault(vault: vault::Vault) -> Self {
-        Self { mission: None, vault: Some(vault) }
+        Self { vault: Some(vault), ..Self::new() }
+    }
+
+    /// Replaces the model. Refused during a mission, whose plan was made with the previous one.
+    pub fn set_model(&mut self, model: Box<dyn Model>) -> Result<(), String> {
+        if self.mission.is_some() {
+            return Err("cannot change the model after a mission was opened".into());
+        }
+        self.model_mode = model.mode();
+        self.model = Some(model);
+        Ok(())
+    }
+
+    /// Switches to the real model. Only an explicit call with a full configuration does this.
+    pub fn use_real_model(&mut self, config: remote::RemoteConfig) -> Result<(), String> {
+        self.set_model(Box::new(remote::http_model(config)?))
     }
 
     fn run(&mut self, request: &Value) -> Reply {
@@ -553,17 +711,26 @@ impl Core {
             };
         }
         if cmd == "open" {
+            if self.mission.as_ref().is_some_and(|m| m.phase() != Phase::Closed) {
+                return Err("close the current mission first".into());
+            }
             let mission = text("mission")?;
-            let salt: [u8; 32] = Sha256::digest(mission.as_bytes()).into();
+            // Random, so that someone holding the journal cannot test a guessed mission against it.
+            let mut salt = [0u8; 32];
+            OsRng.fill_bytes(&mut salt);
+            let model = match self.mission.take() {
+                Some(previous) => previous.model,
+                None => self.model.take().ok_or("no model configured")?,
+            };
             self.mission = Some(Mission::open(
-                MockModel::default(),
+                model,
                 MockWeb::demo(),
                 MockPayments::default(),
                 demo_policy(),
                 salt,
                 &mission,
             ));
-            return Ok(json!({"opened": true, "mode": MODE}));
+            return Ok(json!({"opened": true, "mode": self.model_mode}));
         }
         let m = self.mission.as_mut().ok_or("no open mission")?;
         match cmd.as_str() {
@@ -591,12 +758,13 @@ impl Core {
             Ok(v) => self.run(&v),
             Err(_) => Err("request is not valid JSON".to_string()),
         };
+        let error_mode = self.mission.as_mut().and_then(|m| m.take_error_mode()).unwrap_or(MODE);
         match reply {
             Ok(mut v) => {
                 v["ok"] = json!(true);
                 v.to_string()
             }
-            Err(e) => json!({"ok": false, "error": e, "mode": MODE}).to_string(),
+            Err(e) => json!({"ok": false, "error": e, "mode": error_mode}).to_string(),
         }
     }
 }

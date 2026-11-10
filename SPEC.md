@@ -106,7 +106,11 @@ for one chat, `forget` deletes any chat at once. No chat result ever goes on cha
 keychain is wired in. What the user copies or backs up is their own choice and must be stated in the app.
 
 ## Encrypted model client (`crates/ona-core/src/e2ee.rs`)
-NEAR AI encryption version 2 through the relay. Each request gets a new client key and a fresh attestation nonce. A reply counts only
+NEAR AI encryption version 3 through the relay, written from the public `nearai/inference-proxy` sources and tested only against a simulated
+enclave. Each encrypted request field is bound to the reply key, so a relay replacing `X-Client-Pub-Key` makes the request undecryptable. This
+fixes the reply-key attack only if the NEAR AI gateway accepts version 3, which is **not verified**. Version 2 needs an explicit setting, and a
+failed call never falls back to it. Version 3 does not bind a reply to one precise request, a replay carrying the original reply key is still
+processed, and the relay still sees sizes and counters. Each request gets a new client key and a fresh attestation nonce. A reply counts only
 if the signature comes from the attested model key (`provider_tee`) and covers the exact bytes sent and received. Every request carries
 `max_tokens`, and a per-client budget stops calls before they spend. The relay sees the usage counters, so pricing must be flat per
 request. TDX and NVIDIA quotes are not verified yet.

@@ -32,6 +32,9 @@ enum Attack {
     GatewaySignature,
     OtherSigner,
     SwapModelKey,
+    SwapReplyKey,
+    DowngradeHeader,
+    WrongLabel,
 }
 
 /// Plays the relay and the enclave, and can misbehave in the ways a malicious relay could.
@@ -44,6 +47,7 @@ struct FakeEnclave {
     last_request: Vec<u8>,
     last_raw: Vec<u8>,
     last_token: String,
+    last_version: String,
     chats: usize,
 }
 
@@ -58,6 +62,7 @@ impl FakeEnclave {
             last_request: vec![],
             last_raw: vec![],
             last_token: String::new(),
+            last_version: String::new(),
             chats: 0,
         }
     }
@@ -100,11 +105,23 @@ impl Transport for FakeEnclave {
         self.last_request = body.to_vec();
         let request: Value = serde_json::from_slice(body).unwrap();
         let encrypted = unhex(request["messages"][0]["content"].as_str().unwrap());
-        let enclave = ClientKeyFor(&self.model_key);
-        let prompt = String::from_utf8(enclave.decrypt(&encrypted)).unwrap();
-        self.received_prompts.push(prompt);
 
-        let client_key: [u8; 32] = unhex(header(headers, "X-Client-Pub-Key")).try_into().unwrap();
+        // What the enclave receives, after anything a dishonest relay changed on the way.
+        self.last_version = header(headers, "X-Encryption-Version").to_string();
+        let version = if self.attack == Attack::DowngradeHeader { "2" } else { self.last_version.as_str() };
+        let client_key: [u8; 32] = if self.attack == Attack::SwapReplyKey {
+            SigningKey::generate(&mut OsRng).verifying_key().to_bytes()
+        } else {
+            unhex(header(headers, "X-Client-Pub-Key")).try_into().unwrap()
+        };
+        let label = if self.attack == Attack::WrongLabel { "messages[].name" } else { MESSAGE_CONTENT_FIELD };
+        let aad = if version == "3" { request_aad_v3(&client_key, label) } else { vec![] };
+
+        let Some(prompt) = ClientKeyFor(&self.model_key).decrypt(&encrypted, &aad) else {
+            return Ok((400, b"request cannot be decrypted".to_vec()));
+        };
+        self.received_prompts.push(String::from_utf8(prompt).unwrap());
+
         let reply = encrypt_to(&client_key, b"secret reply").unwrap();
         let raw = json!({
             "id": "reply-1",
@@ -129,16 +146,16 @@ impl Transport for FakeEnclave {
 struct ClientKeyFor<'a>(&'a SigningKey);
 
 impl ClientKeyFor<'_> {
-    fn decrypt(&self, blob: &[u8]) -> Vec<u8> {
-        use chacha20poly1305::aead::{Aead, KeyInit};
+    fn decrypt(&self, blob: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
         use x25519_dalek::{PublicKey, StaticSecret};
         let peer: [u8; 32] = blob[..32].try_into().unwrap();
         let shared = StaticSecret::from(self.0.to_scalar_bytes()).diffie_hellman(&PublicKey::from(peer));
         let mut key = [0u8; 32];
         hkdf::Hkdf::<Sha256>::new(None, shared.as_bytes()).expand(b"ed25519_encryption", &mut key).unwrap();
         chacha20poly1305::XChaCha20Poly1305::new((&key).into())
-            .decrypt(chacha20poly1305::XNonce::from_slice(&blob[32..56]), &blob[56..])
-            .unwrap()
+            .decrypt(chacha20poly1305::XNonce::from_slice(&blob[32..56]), Payload { msg: &blob[56..], aad })
+            .ok()
     }
 }
 
@@ -152,6 +169,94 @@ fn a_chat_round_trips_through_the_enclave() {
     let reply = c.chat("mon dossier confidentiel").unwrap();
     assert_eq!(reply, ChatReply { content: "secret reply".into(), tokens_used: 50 });
     assert_eq!(c.tokens_spent(), 50);
+}
+
+#[test]
+fn version_3_is_the_default() {
+    let mut enclave = FakeEnclave::new(Attack::None);
+    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000);
+    assert_eq!(c.chat("bonjour").unwrap().content, "secret reply");
+    assert_eq!(enclave.last_version, "3");
+    assert_eq!(enclave.received_prompts, vec!["bonjour"]);
+}
+
+#[test]
+fn version_2_needs_an_explicit_setting() {
+    let mut enclave = FakeEnclave::new(Attack::None);
+    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000).with_encryption_version(EncryptionVersion::V2);
+    assert_eq!(c.chat("bonjour").unwrap().content, "secret reply");
+    assert_eq!(enclave.last_version, "2");
+}
+
+/// The request never opens, nothing reaches the model, and the client does not try another version.
+fn assert_refused_without_downgrade(attack: Attack) {
+    let mut enclave = FakeEnclave::new(attack);
+    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000);
+    assert!(c.chat("dossier Dupont").unwrap_err().contains("chat failed"));
+    assert!(enclave.received_prompts.is_empty(), "the model must not see the prompt");
+    assert_eq!(enclave.chats, 1, "a failure is not retried");
+    assert_eq!(enclave.last_version, "3", "and never with a lower version");
+}
+
+#[test]
+fn a_replaced_reply_key_makes_the_request_undecryptable() {
+    assert_refused_without_downgrade(Attack::SwapReplyKey);
+}
+
+#[test]
+fn a_version_changed_on_the_way_is_refused() {
+    assert_refused_without_downgrade(Attack::DowngradeHeader);
+}
+
+#[test]
+fn a_changed_field_label_is_refused() {
+    assert_refused_without_downgrade(Attack::WrongLabel);
+}
+
+#[test]
+fn the_v3_associated_data_has_the_documented_layout() {
+    let key = [7u8; 32];
+    let mut expected = b"nearai-e2ee-request-v3".to_vec();
+    expected.push(0x02);
+    expected.extend_from_slice(&key);
+    expected.push(0x00);
+    expected.extend_from_slice(b"messages[].content");
+    assert_eq!(request_aad_v3(&key, "messages[].content"), expected);
+}
+
+#[test]
+fn every_part_of_the_v3_associated_data_is_enforced() {
+    let model = SigningKey::generate(&mut OsRng);
+    let reply_key = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+    let other_key = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+    let good = request_aad_v3(&reply_key, MESSAGE_CONTENT_FIELD);
+    let blob = encrypt_with_aad(&model.verifying_key().to_bytes(), b"secret", &good).unwrap();
+    let enclave = ClientKeyFor(&model);
+    assert_eq!(enclave.decrypt(&blob, &good).unwrap(), b"secret");
+
+    let mut other_version = good.clone();
+    other_version[21] = b'2';
+    let mut other_suite = good.clone();
+    other_suite[22] = 0x01;
+    for wrong in [
+        vec![],
+        other_version,
+        other_suite,
+        request_aad_v3(&other_key, MESSAGE_CONTENT_FIELD),
+        request_aad_v3(&reply_key, "messages[].name"),
+    ] {
+        assert!(enclave.decrypt(&blob, &wrong).is_none());
+    }
+}
+
+#[test]
+fn each_v3_field_gets_its_own_ephemeral_key_and_nonce() {
+    let model = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+    let aad = request_aad_v3(&[7u8; 32], MESSAGE_CONTENT_FIELD);
+    let first = encrypt_with_aad(&model, b"same", &aad).unwrap();
+    let second = encrypt_with_aad(&model, b"same", &aad).unwrap();
+    assert_ne!(first[..32], second[..32]);
+    assert_ne!(first[32..56], second[32..56]);
 }
 
 #[test]

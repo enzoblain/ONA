@@ -1,23 +1,33 @@
 //! End-to-end encrypted chat with NEAR AI Cloud, through a relay that holds the API key.
 //!
-//! Follows encryption version 2, as checked with a real model call on 2026-11-10. The relay sees
-//! ciphertext, the model name, the token limit and the usage counters.
+//! Uses encryption version 3 by default, written from the public `nearai/inference-proxy` sources
+//! as read on 2026-11-10 and tested only against a simulated enclave. Whether the NEAR AI gateway
+//! accepts version 3 is not verified. Version 2, checked with a real model call on 2026-11-10, is
+//! used only when asked for with `with_encryption_version`. A failed call never falls back to it.
+//! The relay sees ciphertext, the model name, the token limit and the usage counters.
 //!
-//! Limits of encryption version 2:
-//! - A dishonest relay can replace `X-Client-Pub-Key` and read the reply: the signed text covers
-//!   the request and response bytes, not that header. The prompt stays confidential. The swap
-//!   can show up afterwards, as a validly signed reply this client cannot decrypt, reported with
-//!   `DISHONEST_RELAY_ALERT`. By then the relay has already read that reply, and a relay that
-//!   returns an error instead is not detected at all.
-//! - The relay sees the length of each prompt and reply. Nothing is padded here: nothing verified
-//!   shows that the enclave removes padding, so it would reach the model as part of the prompt.
+//! Version 3 binds each encrypted request field to the reply key, so a relay replacing
+//! `X-Client-Pub-Key` makes the decryption of the request fail inside the enclave. It does not:
+//! - bind a reply to one precise request, and a replay carrying the original reply key is still
+//!   processed;
+//! - hide sizes and counters from the relay.
+//!
+//! In version 2 a dishonest relay can replace `X-Client-Pub-Key` and read the reply: the signed
+//! text covers the request and response bytes, not that header. The prompt stays confidential. The
+//! swap can show up afterwards, as a validly signed reply this client cannot decrypt, reported with
+//! `DISHONEST_RELAY_ALERT`. By then the relay has already read that reply, and a relay that returns
+//! an error instead is not detected at all.
+//!
+//! In both versions the relay sees the length of each prompt and reply. Nothing is padded here:
+//! nothing verified shows that the enclave removes padding, so it would reach the model as part of
+//! the prompt.
 //!
 //! Not done here: verifying the Intel TDX and NVIDIA quotes. Until that check is added, the key
 //! returned by `attested_model_key` is only as trustworthy as the party that returned the report.
 
 use std::time::Duration;
 
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
@@ -29,6 +39,10 @@ use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 
 const INFO: &[u8] = b"ed25519_encryption";
 const HEADER_LEN: usize = 32 + 24;
+const REQUEST_AAD_PREFIX_V3: &[u8] = b"nearai-e2ee-request-v3";
+const ED25519_SUITE_V3: u8 = 0x02;
+/// Label of a message's content in the version 3 associated data.
+pub const MESSAGE_CONTENT_FIELD: &str = "messages[].content";
 /// Most tokens one reply may use, thinking included. Every real call costs credits.
 pub const DEFAULT_MAX_TOKENS: u32 = 512;
 /// Starts the error returned when the model signed a reply that this client cannot decrypt.
@@ -82,8 +96,39 @@ fn ed_public_to_x25519(ed_public: &[u8; 32]) -> Result<[u8; 32], String> {
     Ok(key.to_montgomery().to_bytes())
 }
 
+/// Which NEAR AI encryption protocol a client speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionVersion {
+    V2,
+    V3,
+}
+
+impl EncryptionVersion {
+    fn header(self) -> &'static str {
+        match self {
+            Self::V2 => "2",
+            Self::V3 => "3",
+        }
+    }
+}
+
+/// Associated data of one version 3 request field, which binds it to the ed25519 reply key.
+pub fn request_aad_v3(reply_key_ed: &[u8; 32], field: &str) -> Vec<u8> {
+    let mut aad = REQUEST_AAD_PREFIX_V3.to_vec();
+    aad.push(ED25519_SUITE_V3);
+    aad.extend_from_slice(reply_key_ed);
+    aad.push(0x00);
+    aad.extend_from_slice(field.as_bytes());
+    aad
+}
+
 /// Encrypts to an ed25519 public key. Output: ephemeral public key, nonce, ciphertext.
 pub fn encrypt_to(recipient_ed: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    encrypt_with_aad(recipient_ed, plaintext, &[])
+}
+
+/// As `encrypt_to`, with a new ephemeral key and nonce and the given associated data.
+pub fn encrypt_with_aad(recipient_ed: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, String> {
     let recipient = XPublic::from(ed_public_to_x25519(recipient_ed)?);
     let ephemeral = StaticSecret::random_from_rng(OsRng);
     let shared = ephemeral.diffie_hellman(&recipient);
@@ -94,7 +139,7 @@ pub fn encrypt_to(recipient_ed: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, 
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
     let ciphertext = XChaCha20Poly1305::new((&key).into())
-        .encrypt(XNonce::from_slice(&nonce), plaintext)
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
         .map_err(|_| "encryption failed".to_string())?;
     let mut out = XPublic::from(&ephemeral).as_bytes().to_vec();
     out.extend_from_slice(&nonce);
@@ -252,6 +297,7 @@ pub struct E2eeClient<T> {
     token_budget: u64,
     spent: u64,
     signature_retry_delay: Duration,
+    version: EncryptionVersion,
 }
 
 fn base_headers() -> Vec<(String, String)> {
@@ -271,7 +317,14 @@ impl<T: Transport> E2eeClient<T> {
             token_budget,
             spent: 0,
             signature_retry_delay: SIGNATURE_RETRY_DELAY,
+            version: EncryptionVersion::V3,
         }
+    }
+
+    /// Explicit configuration only: the client never changes version by itself after a failure.
+    pub fn with_encryption_version(mut self, version: EncryptionVersion) -> Self {
+        self.version = version;
+        self
     }
 
     pub fn tokens_spent(&self) -> u64 {
@@ -338,7 +391,11 @@ impl<T: Transport> E2eeClient<T> {
         }
         let model_key = self.fetch_model_key()?;
         let client = ClientKey::generate();
-        let ciphertext = encrypt_to(&model_key, prompt.as_bytes())?;
+        let aad = match self.version {
+            EncryptionVersion::V2 => Vec::new(),
+            EncryptionVersion::V3 => request_aad_v3(&client.public_bytes(), MESSAGE_CONTENT_FIELD),
+        };
+        let ciphertext = encrypt_with_aad(&model_key, prompt.as_bytes(), &aad)?;
         let body = json!({
             "model": self.model,
             "messages": [{"role": "user", "content": to_hex(&ciphertext)}],
@@ -354,7 +411,7 @@ impl<T: Transport> E2eeClient<T> {
             ("X-Signing-Algo".to_string(), "ed25519".to_string()),
             ("X-Client-Pub-Key".to_string(), to_hex(&client.public_bytes())),
             ("X-Model-Pub-Key".to_string(), to_hex(&model_key)),
-            ("X-Encryption-Version".to_string(), "2".to_string()),
+            ("X-Encryption-Version".to_string(), self.version.header().to_string()),
         ]);
         if let Some(token) = token {
             headers.push(("X-Ona-Token".to_string(), token.to_string()));
@@ -387,7 +444,7 @@ impl<T: Transport> E2eeClient<T> {
             return Err("reply has no content; the token limit may be too low".into());
         }
         let plaintext = client.decrypt(&encrypted).map_err(|e| {
-            format!("{DISHONEST_RELAY_ALERT}: the model signed this reply but it cannot be decrypted ({e}); the relay may have replaced the client key and read it")
+            format!("{DISHONEST_RELAY_ALERT}: the model signed this reply but it cannot be decrypted ({e}); the relay may have tampered with the exchange, and with encryption version 2 it may have replaced the client key and read the reply")
         })?;
         let content = String::from_utf8(plaintext).map_err(|_| "reply is not text".to_string())?;
         Ok(ChatReply { content, tokens_used: u32::try_from(tokens_used).unwrap_or(u32::MAX) })

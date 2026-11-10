@@ -219,11 +219,11 @@ struct CompromisedModel {
 }
 
 impl Model for CompromisedModel {
-    fn plan(&mut self, _: &str) -> ModelReply {
-        ModelReply { text: DEMO_PLAN.into(), mode: MODE }
+    fn plan(&mut self, _: &str) -> Result<ModelReply, ModelFailure> {
+        Ok(ModelReply { text: DEMO_PLAN.into(), mode: MODE, call: None })
     }
-    fn read_page(&mut self, _: &str) -> ModelReply {
-        ModelReply { text: self.reply.clone(), mode: MODE }
+    fn read_page(&mut self, _: &str) -> Result<ModelReply, ModelFailure> {
+        Ok(ModelReply { text: self.reply.clone(), mode: MODE, call: None })
     }
 }
 
