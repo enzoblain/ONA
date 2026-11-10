@@ -26,6 +26,11 @@ Limite : un Xcode bêta ne permet pas d'envoyer sur TestFlight. Il faudra la ver
 définition du « simulateur de foule » (absent du README). Le journal est dans `ona-core` (Rust) : interface à fixer avec
 Hugo.
 
+## Étape 2 (écrans sur serveur simulé) : en cours
+
+App `ios/ONA` et faux ordinateur `ios/MockComputer`, sur un brouillon de protocole (`protocol-draft.md`) calqué sur
+`ona-core`. Détails et vérifications : `app.md`. À faire : faire valider le protocole par Hugo, essayer sur l'iPhone.
+
 ## Questions ouvertes à régler avec l'équipe
 
 1. **Démarrage de Tor à chaque ouverture.** Sans push et avec la suspension en arrière-plan, Tor redémarre presque à

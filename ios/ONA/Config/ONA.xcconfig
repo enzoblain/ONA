@@ -1,0 +1,9 @@
+// Shared build settings of the ONA iOS app. Personal values go in Local.xcconfig (not tracked):
+// copy Local.xcconfig.example to Local.xcconfig.
+
+PRODUCT_BUNDLE_IDENTIFIER = org.ona.remote
+
+// Address of the computer (step 2: the mock computer, ios/MockComputer). "$()" keeps "//" from starting a comment.
+ONA_COMPUTER_URL = http:/$()/127.0.0.1:8790
+
+#include? "Local.xcconfig"

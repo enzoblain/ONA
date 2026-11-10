@@ -51,7 +51,8 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
 | Desktop app | not in this repository yet | none |
-| iOS app (`ios/`) | Tor spike only: Arti embedded in a test app, which reached a test onion service | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
+| iOS app (`ios/`) | Tor spike: Arti embedded in a test app, which reached a test onion service | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
+| iOS app (`ios/`) | mission screens and the three confirmations against a mock computer, labelled `mode: mock`; no pairing, no Tor yet | iOS simulator, and unit tests on the Mac ([notes](docs/ios/app.md)) |
 | Tor on the computer, Phala enclave | not built | none |
 
 ## Run it
@@ -101,6 +102,8 @@ iOS side, pinned exactly (`Cargo.lock` pins the transitive ones):
 | `sysinfo` | 0.38.4, patched | `ios/ArtiBridge` (via `tor-memquota`) | Local copy with a one-function change so it builds for iOS: `ios/ArtiBridge/patches/sysinfo-0.38.4/ONA-PATCH.md` |
 
 Test tooling, not shipped: C Tor 0.4.9.16 (Homebrew) runs the test onion service on the developer's Mac.
+The iOS app (`ios/ONA`) uses only Apple frameworks (SwiftUI, Foundation, CryptoKit). The mock computer
+(`ios/MockComputer`) uses only the Python standard library.
 
 ## Related project
 
