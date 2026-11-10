@@ -1,6 +1,7 @@
 //! `ona-core`: local mission logic. The model, the web and the chain are behind traits and are
 //! faked in this version. Every reply is labelled `mode: mock` so a fake can't pass for a result.
 
+pub mod e2ee;
 pub mod gate;
 pub mod journal;
 pub mod reader;

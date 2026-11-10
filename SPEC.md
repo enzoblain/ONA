@@ -105,6 +105,12 @@ extend it. Expiry destroys the key, then the file, and a read is refused even if
 for one chat, `forget` deletes any chat at once. No chat result ever goes on chain. Keys are in a private local file until the
 keychain is wired in. What the user copies or backs up is their own choice and must be stated in the app.
 
+## Encrypted model client (`crates/ona-core/src/e2ee.rs`)
+NEAR AI encryption version 2 through the relay. Each request gets a new client key and a fresh attestation nonce. A reply counts only
+if the signature comes from the attested model key (`provider_tee`) and covers the exact bytes sent and received. Every request carries
+`max_tokens`, and a per-client budget stops calls before they spend. The relay sees the usage counters, so pricing must be flat per
+request. TDX and NVIDIA quotes are not verified yet.
+
 ## Wallet (`crates/ona-wallet`)
 Append-only encrypted file, synced before the action it protects: token secrets before the deposit, spending mark before a spend.
 Removing lines from the end is not detected. Key storage in the operating system's keychain is not implemented.

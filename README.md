@@ -49,8 +49,9 @@ content, but the requests, the payment and the agent's actions still identify yo
 | `ona-server` relay | logic, HTTP and chain client done, model still fake | fake chain, and a local NEAR node |
 | `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
+| `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
 | Desktop app, iOS app | not in this repository yet | none |
-| NEAR AI Cloud client, Tor, Phala enclave | not built | none |
+| Tor, Phala enclave | not built | none |
 
 ## Run it
 
