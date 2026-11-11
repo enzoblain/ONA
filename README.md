@@ -158,8 +158,10 @@ program refuses to let the library download one), and run `cargo run -p ona-sand
 - **A dishonest relay may still be able to read replies.** With encryption version 2, the relay controls which client key the reply is encrypted to.
   The client now uses version 3, which binds the reply key, but this fixes the problem only if the NEAR AI gateway accepts version 3, which is **not verified**.
   Version 3 was tested only against a simulated enclave. A relay running in an attested enclave is not in place yet.
-- The relay serves a fixed pool of connections with per-request deadlines, but a few dozen slow clients can still keep it busy. Do not expose it
-  to the internet yet.
+- The relay serves a fixed pool of 32 connections with per-request deadlines, so 32 slow clients are enough to keep it busy. Do not expose it
+  to the internet yet; behind an onion service, rely on its denial-of-service protection.
+- The signer and the relay read the chain through two RPC endpoints and stop when they disagree. Two endpoints that lie together still
+  decide what gets signed.
 - A stolen signer key can drain the reserve at the speed of the hourly redemption limit. There is no key rotation.
 - An attacker holding tokens can keep a tier's redemption limit used up and slow exits for that tier (the relay has its own limit).
 
@@ -170,7 +172,8 @@ More in [SPEC.md](SPEC.md).
 Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`,
 `unicode-normalization`.
 The NEAR client, the deployment tool and the crowd simulator also use `ureq` (with `rustls`), `bs58`, `base64`, `anyhow`, `libc`,
-`zeroize`, `rand` and `rand_chacha`. `Cargo.lock` fixes every version, and `verify.sh` builds with `--locked`.
+`zeroize`, `rand` and `rand_chacha`. The relay and the signer use `ureq` 3.5.1 and `zeroize` 1.9.1, pinned exactly. `Cargo.lock` fixes
+every version, and `verify.sh` builds with `--locked`.
 
 Client core (`crates/ona-core`), pinned exactly:
 

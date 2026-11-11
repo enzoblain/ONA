@@ -3,10 +3,13 @@ use std::sync::mpsc::channel;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use ona_server::gateway::{Backend, BackendFailure, GatewayPolicy, NearAiBackend, MAX_CHAT_BODY};
+use ona_server::gateway::{
+    Backend, BackendFailure, GatewayPolicy, NearAiBackend, ATTESTATIONS_PER_TOKEN, ENCRYPTION_OVERHEAD, MAX_CHAT_BODY,
+    SIGNATURES_PER_CHAT, TEMPLATE_TOKENS,
+};
 use ona_server::http::Request;
 use ona_server::mock::{MockChain, MockModel};
-use ona_server::{Config, FileStore, MemoryStore, Relay, Store};
+use ona_server::{Config, FileStore, MemoryStore, Relay, SharedRelay, Store};
 use ona_token::{hash_to_g1, keygen, sign_blinded, SecretKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -20,6 +23,10 @@ struct FakeBackend {
     calls: Vec<(String, String, Vec<(String, String)>, Vec<u8>)>,
     reply: BackendReply,
 }
+
+const PROMPT: usize = 120;
+/// One token over what a chat may consume: reply, largest prompt and chat template.
+const OVER: u64 = LIMIT as u64 + PROMPT as u64 + TEMPLATE_TOKENS + 1;
 
 fn ok_reply(tokens: u64) -> BackendReply {
     Ok((200, json!({"id":"r1","usage":{"total_tokens":tokens}}).to_string().into_bytes()))
@@ -54,6 +61,7 @@ fn setup_with<S: Store>(store: S, key_bytes: [u8; 32]) -> Setup<S> {
         credit_key,
         tokens_per_credit: 2,
         max_tokens_per_request: LIMIT,
+        max_prompt_bytes: PROMPT,
     };
     let relay = Relay::new(store, MockChain::default(), MockModel, config, SecretKey::from_bytes(&key_bytes).unwrap());
     Setup {
@@ -128,6 +136,25 @@ fn get(target: &str) -> Request {
     Request { method: "GET".into(), target: target.into(), headers: vec![], body: vec![] }
 }
 
+/// A free route call showing a request token.
+fn get_with(target: &str, token: &str) -> Request {
+    let mut request = get(target);
+    request.headers.push(("X-Ona-Token".to_string(), token.to_string()));
+    request
+}
+
+fn signature_target(id: &str) -> String {
+    format!("/v1/signature/{id}?signing_algo=ed25519")
+}
+
+fn store_at(path: &std::path::Path) -> FileStore {
+    if path.exists() {
+        FileStore::open(path, "test").unwrap()
+    } else {
+        FileStore::create(path, "test").unwrap()
+    }
+}
+
 fn attestation_target(model: &str, nonce: &str) -> String {
     format!("/v1/attestation/report?model={model}&provider=near&signing_algo=ed25519&include_tls_fingerprint=false&nonce={nonce}")
 }
@@ -154,7 +181,95 @@ fn identifying_headers_and_the_token_are_not_forwarded() {
     s.send(&chat(Some(&token), good_body()));
     let headers = &s.backend.calls[0].2;
     let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
-    assert_eq!(names, vec!["X-Signing-Algo", "X-Client-Pub-Key", "X-Model-Pub-Key", "X-Encryption-Version"]);
+    assert_eq!(
+        names,
+        vec![
+            "Content-Type",
+            "X-Signing-Algo",
+            "X-Client-Pub-Key",
+            "X-Model-Pub-Key",
+            "X-Encryption-Version",
+            "Accept-Encoding"
+        ]
+    );
+}
+
+#[test]
+fn the_relay_sets_the_content_type_and_free_routes_pass_no_client_header() {
+    let mut s = setup();
+    let token = s.token();
+    let mut request = chat(Some(&token), good_body());
+    request.headers.push(("Content-Type".to_string(), "text/plain".to_string()));
+    assert_eq!(s.send(&request).0, 200);
+    let content_types: Vec<&str> =
+        s.backend.calls[0].2.iter().filter(|(k, _)| k == "Content-Type").map(|(_, v)| v.as_str()).collect();
+    assert_eq!(content_types, vec!["application/json"]);
+
+    let unused = s.token();
+    let mut attestation = get_with(&good_attestation(), &unused);
+    attestation.headers.extend(encryption_headers());
+    assert_eq!(s.send(&attestation).0, 200);
+    let names: Vec<&str> = s.backend.calls[1].2.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, vec!["Accept-Encoding"]);
+}
+
+#[test]
+fn x_no_aliasing_must_be_a_plain_word() {
+    let mut s = setup();
+    let token = s.token();
+    for value in ["", "a b", "x".repeat(17).as_str(), "1;drop"] {
+        let mut headers = encryption_headers();
+        headers.push(("x-no-aliasing".to_string(), value.to_string()));
+        assert_eq!(s.send(&chat_with_headers(Some(&token), good_body(), headers)).0, 400, "{value:?}");
+    }
+    let mut headers = encryption_headers();
+    headers.push(("x-no-aliasing".to_string(), "true".to_string()));
+    assert_eq!(s.send(&chat_with_headers(Some(&token), good_body(), headers)).0, 200);
+}
+
+#[test]
+fn the_service_is_always_asked_for_an_uncompressed_reply() {
+    let mut s = setup();
+    let token = s.token();
+    let mut request = chat(Some(&token), good_body());
+    request.headers.push(("Accept-Encoding".to_string(), "gzip, br".to_string()));
+    assert_eq!(s.send(&request).0, 200);
+    let mut attestation = get_with(&good_attestation(), &s.token());
+    attestation.headers.push(("Accept-Encoding".to_string(), "gzip".to_string()));
+    assert_eq!(s.send(&attestation).0, 200);
+    assert_eq!(s.backend.calls.len(), 2);
+    for (_, _, headers, _) in &s.backend.calls {
+        let asked: Vec<&str> =
+            headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("accept-encoding")).map(|(_, v)| v.as_str()).collect();
+        assert_eq!(asked, vec!["identity"], "a compressed reply could not be read and would be withheld after billing");
+    }
+}
+
+#[test]
+fn encryption_versions_2_and_3_are_the_only_ones_passed_on() {
+    let mut s = setup();
+    for (version, expected) in [("2", 200), ("3", 200), ("1", 400), ("4", 400), ("", 400), ("03", 400), ("3 2", 400)] {
+        let token = s.token();
+        let headers = encryption_headers()
+            .into_iter()
+            .map(|(k, v)| if k == "X-Encryption-Version" { (k, version.to_string()) } else { (k, v) })
+            .collect();
+        assert_eq!(s.send(&chat_with_headers(Some(&token), good_body(), headers)).0, expected, "version {version:?}");
+    }
+    assert_eq!(s.backend.calls.len(), 2);
+}
+
+#[test]
+fn the_content_must_be_lowercase_hexadecimal() {
+    let mut s = setup();
+    let token = s.token();
+    for content in ["ABCD", "aBcd", "0x00"] {
+        let payload =
+            json!({"model":"m/1","messages":[{"role":"user","content":content}],"stream":false,"max_tokens":LIMIT});
+        assert_eq!(s.send(&chat(Some(&token), payload.to_string().into_bytes())).0, 400, "{content}");
+    }
+    assert!(s.backend.calls.is_empty());
+    assert_eq!(s.send(&chat(Some(&token), good_body())).0, 200, "lowercase, as the clients write it");
 }
 
 #[test]
@@ -261,7 +376,9 @@ fn a_chat_body_over_the_cap_does_not_cost_a_token() {
 #[test]
 fn a_reply_over_budget_is_withheld() {
     let mut s = setup();
-    s.backend.reply = ok_reply(u64::from(LIMIT) * 2 + 1);
+    s.backend.reply = ok_reply(OVER - 1);
+    assert_eq!(s.send(&chat(Some(&s.token()), good_body())).0, 200, "the largest prompt and the template fit");
+    s.backend.reply = ok_reply(OVER);
     let token = s.token();
     let (status, reply) = s.send(&chat(Some(&token), good_body()));
     assert_eq!(status, 402);
@@ -289,7 +406,7 @@ fn service_errors_keep_the_status_and_hide_the_body() {
         assert_eq!(reply["error"], "model service error");
     }
     s.backend.reply = Ok((500, b"internal: key=secret".to_vec()));
-    let (status, reply) = s.send(&get(&good_attestation()));
+    let (status, reply) = s.send(&get_with(&good_attestation(), &s.token()));
     assert_eq!(status, 500);
     assert!(!reply.to_string().contains("secret"), "free routes too");
 
@@ -319,13 +436,13 @@ fn a_call_that_was_certainly_not_billed_returns_the_token_durably() {
     for outcome in outcomes {
         let token;
         {
-            let mut s = setup_with(FileStore::open(&path).unwrap(), key);
+            let mut s = setup_with(store_at(&path), key);
             s.backend.reply = outcome;
             token = s.token();
             assert_ne!(s.send(&chat(Some(&token), good_body())).0, 200);
         }
         // Only a restart proves that the return was written to disk.
-        let mut s = setup_with(FileStore::open(&path).unwrap(), key);
+        let mut s = setup_with(store_at(&path), key);
         assert_eq!(s.send(&chat(Some(&token), good_body())).0, 200, "the token is usable again");
         assert_eq!(s.send(&chat(Some(&token), good_body())).0, 409, "and still only once");
     }
@@ -345,12 +462,12 @@ fn a_call_that_may_have_been_billed_keeps_the_token_spent() {
     for outcome in outcomes {
         let token;
         {
-            let mut s = setup_with(FileStore::open(&path).unwrap(), key);
+            let mut s = setup_with(store_at(&path), key);
             s.backend.reply = outcome;
             token = s.token();
             s.send(&chat(Some(&token), good_body()));
         }
-        let mut s = setup_with(FileStore::open(&path).unwrap(), key);
+        let mut s = setup_with(store_at(&path), key);
         assert_eq!(s.send(&chat(Some(&token), good_body())).0, 409);
     }
     std::fs::remove_file(&path).unwrap();
@@ -385,11 +502,111 @@ fn a_silent_service_is_cut_by_the_global_timeout() {
 }
 
 #[test]
-fn attestations_and_signatures_are_free() {
+fn attestations_and_signatures_cost_no_token() {
     let mut s = setup();
-    assert_eq!(s.send(&get(&good_attestation())).0, 200);
-    assert_eq!(s.send(&get("/v1/signature/chatcmpl-a_1B?signing_algo=ed25519")).0, 200);
-    assert_eq!(s.backend.calls.len(), 2);
+    let token = s.token();
+    assert_eq!(s.send(&get_with(&good_attestation(), &token)).0, 200);
+    s.backend.reply = Ok((200, json!({"id":"chatcmpl-a_1B","usage":{"total_tokens":10}}).to_string().into_bytes()));
+    assert_eq!(s.send(&chat(Some(&token), good_body())).0, 200, "the token shown for the attestation is still unused");
+    assert_eq!(s.send(&get_with(&signature_target("chatcmpl-a_1B"), &token)).0, 200);
+    assert_eq!(s.backend.calls.len(), 3);
+}
+
+#[test]
+fn an_attestation_needs_an_unused_request_token_and_each_gives_a_few() {
+    let mut s = setup();
+    assert_eq!(s.send(&get(&good_attestation())).0, 401, "anonymous calls are refused");
+    assert_eq!(s.send(&get_with(&good_attestation(), &setup().token())).0, 401, "a forged token too");
+
+    let token = s.token();
+    for _ in 0..ATTESTATIONS_PER_TOKEN {
+        assert_eq!(s.send(&get_with(&good_attestation(), &token)).0, 200);
+    }
+    assert_eq!(s.send(&get_with(&good_attestation(), &token)).0, 429);
+
+    let spent = s.token();
+    assert_eq!(s.send(&chat(Some(&spent), good_body())).0, 200);
+    assert_eq!(s.send(&get_with(&good_attestation(), &spent)).0, 409, "a spent token gives no attestation");
+    assert_eq!(s.backend.calls.len(), usize::from(ATTESTATIONS_PER_TOKEN) + 1);
+}
+
+#[test]
+fn a_signature_needs_the_token_of_the_chat_it_signs() {
+    let mut s = setup();
+    let other = s.token();
+    assert_eq!(s.send(&get(&signature_target("r1"))).0, 401);
+    assert_eq!(s.send(&get_with(&signature_target("r1"), &other)).0, 401, "an unused token is no ticket");
+
+    let paid = s.token();
+    assert_eq!(s.send(&chat(Some(&paid), good_body())).0, 200);
+    assert_eq!(s.send(&get_with(&signature_target("r2"), &paid)).0, 401, "only for its own reply");
+    for _ in 0..SIGNATURES_PER_CHAT {
+        assert_eq!(s.send(&get_with(&signature_target("r1"), &paid)).0, 200);
+    }
+    assert_eq!(s.send(&get_with(&signature_target("r1"), &paid)).0, 429);
+    assert_eq!(s.backend.calls.len(), 1 + usize::from(SIGNATURES_PER_CHAT));
+}
+
+#[test]
+fn a_withheld_reply_gives_no_signature_ticket() {
+    let mut s = setup();
+    s.backend.reply = ok_reply(OVER);
+    let token = s.token();
+    assert_eq!(s.send(&chat(Some(&token), good_body())).0, 402);
+    assert_eq!(s.send(&get_with(&signature_target("r1"), &token)).0, 401);
+}
+
+#[test]
+fn a_reply_without_an_id_gives_no_signature_ticket() {
+    let mut s = setup();
+    s.backend.reply = Ok((200, json!({"usage":{"total_tokens":10}}).to_string().into_bytes()));
+    let token = s.token();
+    assert_eq!(s.send(&chat(Some(&token), good_body())).0, 200);
+    assert_eq!(s.send(&get_with(&signature_target("anything"), &token)).0, 401, "no reply id, so nothing to sign");
+}
+
+#[test]
+fn a_signature_the_service_did_not_answer_is_not_counted() {
+    let mut s = setup();
+    let paid = s.token();
+    assert_eq!(s.send(&chat(Some(&paid), good_body())).0, 200);
+    s.backend.reply = Ok((503, vec![]));
+    for _ in 0..10 {
+        assert_eq!(s.send(&get_with(&signature_target("r1"), &paid)).0, 503);
+    }
+    s.backend.reply = ok_reply(10);
+    for _ in 0..SIGNATURES_PER_CHAT {
+        assert_eq!(s.send(&get_with(&signature_target("r1"), &paid)).0, 200, "failed fetches used none of the four");
+    }
+}
+
+#[test]
+fn a_token_returned_after_an_unbilled_chat_keeps_its_attestation_count() {
+    let mut s = setup();
+    let token = s.token();
+    for _ in 0..ATTESTATIONS_PER_TOKEN {
+        assert_eq!(s.send(&get_with(&good_attestation(), &token)).0, 200);
+    }
+    s.backend.reply = Ok((429, vec![]));
+    assert_eq!(s.send(&chat(Some(&token), good_body())).0, 429, "not billed, so the token comes back");
+    s.backend.reply = ok_reply(10);
+    assert_eq!(
+        s.send(&get_with(&good_attestation(), &token)).0,
+        429,
+        "returning the token does not give it fresh attestations"
+    );
+}
+
+#[test]
+fn a_spent_token_loses_its_attestation_count_and_its_attestations() {
+    let mut s = setup();
+    let token = s.token();
+    for _ in 0..ATTESTATIONS_PER_TOKEN {
+        assert_eq!(s.send(&get_with(&good_attestation(), &token)).0, 200);
+    }
+    assert_eq!(s.send(&get_with(&good_attestation(), &token)).0, 429, "the count does not reset by itself");
+    assert_eq!(s.send(&chat(Some(&token), good_body())).0, 200, "attestations do not spend the token");
+    assert_eq!(s.send(&get_with(&good_attestation(), &token)).0, 409, "once spent, none at all");
 }
 
 #[test]
@@ -449,25 +666,66 @@ fn a_percent_sign_is_refused_in_any_target() {
 }
 
 #[test]
-fn free_routes_have_a_global_limit() {
+fn attestations_have_a_global_limit_that_never_stops_a_paid_signature() {
     let mut s = setup();
     s.policy.free_routes_per_minute = 3;
-    assert_eq!(s.send(&get(&good_attestation())).0, 200);
-    assert_eq!(s.send(&get("/v1/signature/r1?signing_algo=ed25519")).0, 200);
-    assert_eq!(s.send(&get(&good_attestation())).0, 200);
-    assert_eq!(s.send(&get("/v1/signature/r2?signing_algo=ed25519")).0, 429);
-    assert_eq!(s.send(&get(&good_attestation())).0, 429);
+    for _ in 0..3 {
+        assert_eq!(s.send(&get_with(&good_attestation(), &s.token())).0, 200);
+    }
+    assert_eq!(s.send(&get_with(&good_attestation(), &s.token())).0, 429, "one client cannot take more");
     assert_eq!(s.backend.calls.len(), 3, "calls over the limit never reach the service");
 
     let token = s.token();
     assert_eq!(s.send(&chat(Some(&token), good_body())).0, 200, "paid chats are not limited by it");
+    assert_eq!(s.send(&get_with(&signature_target("r1"), &token)).0, 200, "nor the signature a chat paid for");
 }
 
-type SharedRelay = Mutex<Relay<MemoryStore, MockChain, MockModel>>;
+#[test]
+fn a_message_longer_than_the_budget_is_refused_before_the_token_is_spent() {
+    let mut s = setup();
+    let token = s.token();
+    let fits = "ab".repeat(PROMPT + ENCRYPTION_OVERHEAD);
+    let over = "ab".repeat(PROMPT + ENCRYPTION_OVERHEAD + 1);
+    let payload = |content: &str| {
+        json!({"model":"m/1","messages":[{"role":"user","content":content}],"stream":false,"max_tokens":LIMIT})
+            .to_string()
+            .into_bytes()
+    };
+    let (status, reply) = s.send(&chat(Some(&token), payload(&over)));
+    assert_eq!((status, reply["error"].as_str()), (413, Some("message too long for the request budget")));
+    assert!(s.backend.calls.is_empty(), "the service is never paid for it");
+    assert_eq!(s.send(&chat(Some(&token), payload(&fits))).0, 200, "the token is still good");
+}
+
+#[test]
+fn a_redirect_from_the_service_is_not_followed() {
+    let elsewhere = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let elsewhere_port = elsewhere.local_addr().unwrap().port();
+    elsewhere.set_nonblocking(true).unwrap();
+    let service = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = service.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        if let Ok((mut stream, _)) = service.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let reply = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{elsewhere_port}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    let mut backend = NearAiBackend::with_timeout(&format!("http://127.0.0.1:{port}"), "test".into(), Duration::from_secs(2));
+    let _ = backend.forward("POST", "/v1/chat/completions", &[], b"ciphertext");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(elsewhere.accept().is_err(), "the encrypted body must not be sent to another host");
+}
+
+type Locked = Mutex<Relay<MemoryStore, MockChain, MockModel>>;
 
 /// Records whether the relay could be locked while the service was being called.
 struct ProbeBackend<'a> {
-    relay: &'a SharedRelay,
+    relay: &'a Locked,
     free_during_call: bool,
 }
 
@@ -483,9 +741,51 @@ fn the_relay_is_not_locked_during_the_model_call() {
     let s = setup();
     let token = s.token();
     let policy = s.policy.clone();
-    let relay = Mutex::new(s.relay);
-    let mut backend = ProbeBackend { relay: &relay, free_during_call: false };
-    let (status, _) = Relay::gateway_shared(&relay, &mut backend, &policy, &chat(Some(&token), good_body()));
+    let shared = SharedRelay::new(s.relay);
+    let mut backend = ProbeBackend { relay: shared.state(), free_during_call: false };
+    let (status, _) = shared.gateway(&mut backend, &policy, &chat(Some(&token), good_body()));
     assert_eq!(status, 200);
     assert!(backend.free_during_call);
+}
+
+#[test]
+fn a_request_token_is_checked_without_locking_the_relay() {
+    let s = setup();
+    let forged = setup().token();
+    let policy = s.policy.clone();
+    let shared = SharedRelay::new(s.relay);
+
+    let held = shared.state().lock().unwrap();
+    let (done, finished) = channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut backend = FakeBackend { calls: vec![], reply: ok_reply(10) };
+            done.send(shared.gateway(&mut backend, &policy, &chat(Some(&forged), good_body())).0).unwrap();
+            done.send(shared.gateway(&mut backend, &policy, &chat(Some(&forged), b"[]".to_vec())).0).unwrap();
+        });
+        let first = finished.recv_timeout(Duration::from_secs(10));
+        let second = finished.recv_timeout(Duration::from_secs(10));
+        drop(held);
+        assert_eq!(first, Ok(401), "the token signature must be checked while the relay is locked elsewhere");
+        assert_eq!(second, Ok(400), "and the chat policy too");
+    });
+}
+
+#[test]
+fn a_poisoned_relay_answers_503() {
+    let s = setup();
+    let token = s.token();
+    let policy = s.policy.clone();
+    let shared = SharedRelay::new(s.relay);
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = shared.state().lock().unwrap();
+        panic!("simulated panic while the relay is locked");
+    }));
+    assert!(poisoned.is_err());
+
+    let mut backend = FakeBackend { calls: vec![], reply: ok_reply(10) };
+    let (status, body) = shared.gateway(&mut backend, &policy, &chat(Some(&token), good_body()));
+    assert_eq!(status, 503);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["error"], "relay unavailable");
+    assert!(backend.calls.is_empty(), "nothing is sent for a relay whose state is unknown");
 }

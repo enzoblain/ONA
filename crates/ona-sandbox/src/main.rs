@@ -16,12 +16,12 @@ use ed25519_dalek::SigningKey;
 use ona_near::{Action, Client, Outcome};
 use ona_server::mock::MockModel;
 use ona_server::near::NearRelayChain;
-use ona_server::{Config, MemoryStore, Relay};
+use ona_server::{exchange_digest, system_time_ns, Config, MemoryStore, Relay};
 use ona_signer::near::NearChain;
 use ona_signer::{KeyStore, MemoryDurable, Signer};
 use ona_token::{
-    blind, claim_digest, keygen, redeem_digest, sign_blinded, sign_digest, spend_digest, token_dst, unblind,
-    ChangeOut, PendingToken, SecretKey, Token, G1_LEN, G2_LEN,
+    blind, claim_digest_until, keygen, redeem_digest_until, sign_blinded, sign_digest, spend_digest_until, token_dst,
+    unblind, ChangeOut, PendingToken, SecretKey, Token, G1_LEN, G2_LEN,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -32,6 +32,12 @@ const MILLI: u128 = NEAR / 1000;
 const UNIT: u128 = 100 * MILLI;
 const STORAGE_PER_TOKEN: u128 = MILLI;
 const ISSUE_FEE_PER_TOKEN: u128 = 2 * MILLI;
+const HOUR_NS: u64 = 3_600_000_000_000;
+/// The most tokens one deposit may hold, and claims one `relay_claim` may carry (`ona-mint`).
+const MAX_ISSUE: usize = 32;
+const MAX_CLAIM: usize = 28;
+/// Read timeout of the two-endpoint reader. Both endpoints are the same local node here.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const WASM: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/wasm32-unknown-unknown/contract/ona_mint.wasm"
@@ -121,14 +127,22 @@ impl Env {
             .collect()
     }
 
+    /// An owner signature valid for one hour of block time.
+    fn expiry(&self) -> Result<u64> {
+        Ok(self.chain.final_timestamp()?.saturating_add(HOUR_NS))
+    }
+
     fn redeem(&mut self, t: &Token, owner: &SigningKey) -> Result<Outcome> {
         let (bob, mint) = (self.bob.clone(), self.mint.clone());
-        let d = redeem_digest(&mint, &bob, &t.nullifier());
-        self.chain.call(&bob, &mint, "redeem", json!({"token":token_json(t),"owner_sig":b64(&sign_digest(owner, &d))}), 0)
+        let expires_at = self.expiry()?;
+        let d = redeem_digest_until(&mint, &bob, &t.nullifier(), expires_at);
+        let args = json!({"token":token_json(t),"owner_sig":b64(&sign_digest(owner, &d)),"expires_at":expires_at.to_string()});
+        self.chain.call(&bob, &mint, "redeem", args, 0)
     }
 
     fn spend_call(&mut self, t: &Token, owner: &SigningKey, to: &str, amount: u128, fee: u128, change: &[ChangeOut]) -> Result<Outcome> {
-        let d = spend_digest(&self.mint, &self.relay, t.denom_id, &t.nullifier(), to, amount, fee, change);
+        let expires_at = self.expiry()?;
+        let d = spend_digest_until(&self.mint, &self.relay, t.denom_id, &t.nullifier(), to, amount, fee, change, expires_at);
         let change_json: Vec<Value> = change.iter().map(|c| json!({"denom_id":c.denom_id,"blinded":b64(&c.blinded)})).collect();
         let (relay, mint) = (self.relay.clone(), self.mint.clone());
         self.chain.call(
@@ -138,6 +152,7 @@ impl Env {
             json!({
                 "token":token_json(t),"owner_sig":b64(&sign_digest(owner, &d)),"to":to,
                 "amount":amount.to_string(),"fee":fee.to_string(),"change":change_json,
+                "expires_at":expires_at.to_string(),
             }),
             0,
         )
@@ -232,7 +247,7 @@ async fn main() -> Result<()> {
     e.rows.push(("deploy + new (4 denominations)".into(), o.tgas));
     e.check_reserve("deploy")?;
 
-    for n in [1usize, 2, 8, 64] {
+    for n in [1usize, 2, 8, MAX_ISSUE] {
         e.issue(0, n)?;
     }
 
@@ -308,13 +323,14 @@ async fn main() -> Result<()> {
     e.check_reserve("spend to missing account")?;
 
     // relay batches
-    for n in [1usize, 8, 32] {
-        let tokens = e.issue(2, if n == 1 { 1 } else { n })?;
+    for n in [1usize, 8, MAX_CLAIM] {
+        let tokens = e.issue(2, n)?;
+        let expires_at = e.expiry()?;
         let items: Vec<Value> = tokens
             .iter()
             .map(|(t, o)| {
-                let d = claim_digest(&mint, &relay, &t.nullifier());
-                json!({"token":token_json(t),"owner_sig":b64(&sign_digest(o, &d))})
+                let d = claim_digest_until(&mint, &relay, &t.nullifier(), expires_at);
+                json!({"token":token_json(t),"owner_sig":b64(&sign_digest(o, &d)),"expires_at":expires_at.to_string()})
             })
             .collect();
         let o = e.chain.call(&relay, &mint, "relay_claim", json!({"items":items}), 0)?;
@@ -332,7 +348,14 @@ async fn main() -> Result<()> {
         .map(|k| SecretKey::from_bytes(&k.to_bytes()))
         .collect::<Result<_, _>>()
         .map_err(|x| anyhow!("{x}"))?;
-    let mut near_chain = NearChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), e.signer.clone(), mint.clone());
+    // One local node read twice: the agreement check passes trivially here; the programs refuse this.
+    let reads = || -> Result<_> {
+        Ok(ona_signer::crossrpc::CrossRpc::new(
+            ona_signer::crossrpc::HttpRpc::new(&rpc_url, READ_TIMEOUT).map_err(|x| anyhow!(x))?,
+            ona_signer::crossrpc::HttpRpc::new(&rpc_url, READ_TIMEOUT).map_err(|x| anyhow!(x))?,
+        ))
+    };
+    let mut near_chain = NearChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), reads()?, e.signer.clone(), mint.clone());
     let mut signer_loop = Signer::new(KeyStore::from_keys(keys), MemoryDurable::default());
     signer_loop.check_keys(&mut near_chain).map_err(|x| anyhow!(x))?;
     let mut issued = false;
@@ -356,7 +379,12 @@ async fn main() -> Result<()> {
 
     // The real relay: credit claimed on chain, request tokens signed, then one model call.
     let (credit, credit_owner) = e.issue(0, 1)?.pop().ok_or_else(|| anyhow!("no credit"))?;
-    let relay_chain = NearRelayChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), relay.clone(), mint.clone());
+    let relay_reads = ona_server::crossrpc::CrossRpc::new(
+        ona_server::crossrpc::HttpRpc::new(&rpc_url, READ_TIMEOUT).map_err(|x| anyhow!(x))?,
+        ona_server::crossrpc::HttpRpc::new(&rpc_url, READ_TIMEOUT).map_err(|x| anyhow!(x))?,
+    );
+    let relay_chain =
+        NearRelayChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), relay_reads, relay.clone(), mint.clone());
     let config = Config {
         mint: mint.clone(),
         relay: relay.clone(),
@@ -364,20 +392,28 @@ async fn main() -> Result<()> {
         credit_key: e.pks[0],
         tokens_per_credit: 2,
         max_tokens_per_request: 100,
+        max_prompt_bytes: 100,
     };
     let mut relay_node = Relay::new(MemoryStore::default(), relay_chain, MockModel, config, keygen(&mut OsRng));
     let request_dst = relay_node.request_dst().to_vec();
     let mut wallet = Vec::new();
+    let mut points: Vec<[u8; G1_LEN]> = Vec::new();
     for _ in 0..2 {
         let mut x = [0u8; 32];
         OsRng.fill_bytes(&mut x);
         let (r, point) = blind(&x, &request_dst, &mut OsRng);
+        points.push(point);
         wallet.push((x, r, hex(&point)));
     }
-    let digest = claim_digest(&mint, &relay, &credit.nullifier());
+    // The relay checks expiry against this machine's clock, the contract against block time.
+    let expires_at = system_time_ns().saturating_add(24 * HOUR_NS);
+    let digest = claim_digest_until(&mint, &relay, &credit.nullifier(), expires_at);
+    let exchange = exchange_digest(&mint, &relay, &credit.nullifier(), &points);
     let body = json!({
         "token": hex(&credit.to_bytes()),
         "owner_sig": hex(&sign_digest(&credit_owner, &digest)),
+        "expires_at": expires_at.to_string(),
+        "exchange_sig": hex(&sign_digest(&credit_owner, &exchange)),
         "blinded": wallet.iter().map(|w| w.2.clone()).collect::<Vec<_>>(),
     });
     let (status, reply) = relay_node.exchange(&body);

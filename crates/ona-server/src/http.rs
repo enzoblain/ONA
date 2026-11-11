@@ -1,10 +1,16 @@
 //! Minimal HTTP/1.1 front for the relay: one request per connection, bodies bounded, no keep-alive.
 //! It has no TLS because the relay is meant to be reached through an onion service.
 //!
-//! A connection has one deadline for reading the whole request and one for writing the whole
-//! response, so a client sending a byte at a time cannot hold a thread for long. `Pool` keeps
-//! connections off the accepting thread, with a bounded number of threads and of waiting connections.
+//! A connection has a short deadline for its request line and headers, one for reading the whole
+//! request and one for writing the whole response, so a client sending a byte at a time cannot hold
+//! a thread for long. `Pool` keeps connections off the accepting thread, with a bounded number of
+//! threads and of waiting connections. As many slow clients as there are threads still fill the pool
+//! for the length of a deadline: limiting them per client is left to the onion service in front.
+//!
+//! Parsing is strict, so that a proxy in front cannot read a request differently: `HTTP/1.1` only,
+//! one `Content-Length` made of digits, no `Transfer-Encoding`, every header line with a colon.
 
+use std::cell::Cell;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -19,16 +25,18 @@ const MAX_HEADER_LINES: usize = 64;
 const MAX_HEADER_BYTES: u64 = 16 * 1024;
 const BUSY_DRAIN_READS: usize = 4;
 
-/// How long a connection may take, as a whole, in each direction.
+/// How long a connection may take, as a whole, in each direction. `headers` bounds the request line
+/// and headers, within `read`.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    pub headers: Duration,
     pub read: Duration,
     pub write: Duration,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { read: Duration::from_secs(30), write: Duration::from_secs(30) }
+        Self { headers: Duration::from_secs(5), read: Duration::from_secs(30), write: Duration::from_secs(30) }
     }
 }
 
@@ -96,15 +104,16 @@ fn write_before(stream: &mut TcpStream, until: Instant, mut bytes: &[u8]) -> std
     Ok(())
 }
 
-/// Each read gets only the time left, so slow data cannot extend the deadline.
+/// Each read gets only the time left, so slow data cannot extend the deadline. The deadline can be
+/// moved once the headers are in.
 struct DeadlineReader<'a> {
     stream: &'a TcpStream,
-    until: Instant,
+    until: &'a Cell<Instant>,
 }
 
 impl Read for DeadlineReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.set_read_timeout(Some(time_left(self.until)?))?;
+        self.stream.set_read_timeout(Some(time_left(self.until.get())?))?;
         let mut stream = self.stream;
         stream.read(buf)
     }
@@ -117,14 +126,17 @@ fn read_failure(error: std::io::Error, message: &'static str) -> (u16, &'static 
     }
 }
 
-fn read_request(stream: &TcpStream, limit: Duration) -> Result<Request, (u16, &'static str)> {
-    let source = DeadlineReader { stream, until: Instant::now() + limit };
+fn read_request(stream: &TcpStream, limits: Limits) -> Result<Request, (u16, &'static str)> {
+    let started = Instant::now();
+    let until = Cell::new(started + limits.headers.min(limits.read));
+    let source = DeadlineReader { stream, until: &until };
     let mut reader = BufReader::new(source.take(MAX_BODY as u64 + MAX_HEADER_BYTES));
     let mut first = String::new();
     reader.read_line(&mut first).map_err(|e| read_failure(e, "cannot read request"))?;
-    let mut parts = first.split_whitespace();
-    let method = parts.next().ok_or((400, "malformed request"))?.to_string();
-    let target = parts.next().ok_or((400, "malformed request"))?.to_string();
+    let (method, target) = match first.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [method, target, "HTTP/1.1"] => (method.to_string(), target.to_string()),
+        _ => return Err((400, "malformed request")),
+    };
 
     let mut headers = Vec::new();
     let mut length: Option<usize> = None;
@@ -136,6 +148,7 @@ fn read_request(stream: &TcpStream, limit: Duration) -> Result<Request, (u16, &'
         }
         let line = line.trim_end();
         if line.is_empty() {
+            until.set(started + limits.read);
             let mut body = Vec::new();
             match (method.as_str(), length) {
                 ("POST", None) => return Err((400, "missing content length")),
@@ -148,13 +161,21 @@ fn read_request(stream: &TcpStream, limit: Duration) -> Result<Request, (u16, &'
             }
             return Ok(Request { method, target, headers, body });
         }
-        if let Some((name, value)) = line.split_once(':') {
-            let value = value.trim().to_string();
-            if name.eq_ignore_ascii_case("content-length") {
-                length = Some(value.parse().map_err(|_| (400, "bad content length"))?);
-            }
-            headers.push((name.to_string(), value));
+        let (name, value) = line.split_once(':').ok_or((400, "malformed header"))?;
+        let value = value.trim().to_string();
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err((400, "transfer-encoding is not supported"));
         }
+        if name.eq_ignore_ascii_case("content-length") {
+            if length.is_some() {
+                return Err((400, "duplicated content length"));
+            }
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err((400, "bad content length"));
+            }
+            length = Some(value.parse().map_err(|_| (400, "bad content length"))?);
+        }
+        headers.push((name.to_string(), value));
     }
     Err((400, "too many headers"))
 }
@@ -165,7 +186,7 @@ pub fn serve_request_with(
     limits: Limits,
     handler: &mut dyn FnMut(&Request) -> (u16, Vec<u8>),
 ) {
-    let (status, body) = match read_request(&stream, limits.read) {
+    let (status, body) = match read_request(&stream, limits) {
         Ok(request) => handler(&request),
         Err((status, message)) => (status, json!({"error": message}).to_string().into_bytes()),
     };

@@ -65,6 +65,8 @@ struct Enclave {
     prompts: Vec<String>,
     bodies: Vec<Value>,
     tokens: Vec<String>,
+    /// The `X-Ona-Token` of each attestation and signature request, in order.
+    free_route_tokens: Vec<String>,
     chats: usize,
     last_request: Vec<u8>,
     last_raw: Vec<u8>,
@@ -87,6 +89,7 @@ impl Fake {
             prompts: vec![],
             bodies: vec![],
             tokens: vec![],
+            free_route_tokens: vec![],
             chats: 0,
             last_request: vec![],
             last_raw: vec![],
@@ -103,8 +106,9 @@ impl Fake {
 }
 
 impl Transport for Fake {
-    fn get(&mut self, path: &str, _: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
+    fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
         let mut e = self.0.borrow_mut();
+        e.free_route_tokens.push(header(headers, "X-Ona-Token").to_string());
         if path.starts_with("/v1/attestation/report") {
             e.attestations += 1;
             if e.fail_attestation {
@@ -567,6 +571,17 @@ fn each_call_spends_one_request_token_and_stops_when_none_are_left() {
     assert_eq!(fake.0.borrow().tokens, vec!["token-a", "token-b"]);
     assert_eq!(m.read("h2").unwrap_err(), "no request token left");
     assert_eq!(fake.chats(), 2);
+}
+
+#[test]
+fn attestation_and_signature_requests_show_the_token_of_their_chat() {
+    let fake = Fake::new(honest);
+    let mut cfg = config(100, 1000);
+    cfg.request_tokens = vec!["token-a".into(), "token-b".into()];
+    let mut m = running(&fake, cfg, MockWeb::demo());
+    m.read("h1").unwrap();
+    // Each chat: one attestation before it, one signature after it, with the same token.
+    assert_eq!(fake.0.borrow().free_route_tokens, vec!["token-a", "token-a", "token-b", "token-b"]);
 }
 
 fn tokens_file(name: &str, content: &str) -> std::path::PathBuf {

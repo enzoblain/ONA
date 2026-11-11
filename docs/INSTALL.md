@@ -48,8 +48,8 @@ Its startup output gives the request key and domain tag. Routes, all `POST` with
 
 | Route | Body | Reply |
 |---|---|---|
-| `/dev/credit` | `{}` | a free test credit: `token`, `owner_sig`. Exists only in this binary |
-| `/exchange` | `token`, `owner_sig`, `blinded` (8 hex points) | 202 while pending, then 200 with `signatures` when the same request is repeated |
+| `/dev/credit` | `{}` | a free test credit: `token`, `owner_sig`, `expires_at` (the claim signature's expiry, valid a day), and `owner_key`, the credit's owner key, so that the front end can sign `exchange_sig`. Exists only in this binary |
+| `/exchange` | `token`, `owner_sig`, `expires_at`, `exchange_sig`, `blinded` (8 points), all hexadecimal in lowercase except `expires_at` (nanoseconds, as a decimal string) | 202 while pending, then 200 with `signatures` when the same request is repeated; 410 if the claim expired before it reached the chain (send it again with a later `expires_at` and the same blinded points: the first claim may still land, and then only those points are signed) |
 | `/chat` | `token` (hex, 80 bytes), `prompt` | `reply`, `tokens_used`, `mode` |
 
 ## Use the real model
@@ -93,13 +93,17 @@ NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox cargo run -p ona-sandbox
 `NEAR_SANDBOX_BIN_PATH` is required and must name a `near-sandbox` binary you obtained and checked yourself: without it the
 `near-sandbox` crate would download one and run it without checking a checksum, so `ona-sandbox` stops instead. This deploys the contract
 on a local node, calls every method, prints the gas burnt, then runs the real signer loop and a real relay exchange against the node.
-The node crashes when started inside a macOS Seatbelt sandbox, so run it from a normal terminal.
+The signer and the relay read that one node as both of their endpoints, which their programs refuse: only this test run does it. The
+owner signatures it sends expire one hour after the node's latest final block. It has not been run since the contract and the relay
+changed, so the gas table in SPEC still holds the earlier measurements. The node crashes when started inside a macOS Seatbelt sandbox,
+so run it from a normal terminal.
 
 ## The NEAR RPC endpoint
 
 Every program here talks to NEAR through `ona-near`, and **trusts the RPC node it is given**: the deposits the signer signs for, the
 claims the relay accepts and the checks of `ona-deploy` all rest on what the node answers, and no proof is checked. Use a node you run
-yourself, or one you trust as much as the keys it serves. One account key should be used by one program at a time: two programs sending
+yourself, or one you trust as much as the keys it serves. The signer and the relay read through two endpoints and stop when they
+disagree (see below), which removes the need to trust one of them, not both. One account key should be used by one program at a time: two programs sending
 with the same key read the same nonce, and one of them is refused.
 
 - `ONA_RPC_URL` must start with `https://`. Plain `http://` is accepted only to `127.0.0.1`, `localhost` or `[::1]` (a local node);
@@ -163,49 +167,73 @@ needs its own keys. To issue tokens:
 
 | Variable | Value |
 |---|---|
-| `ONA_RPC_URL` | NEAR RPC endpoint |
+| `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only); transactions are sent here |
+| `ONA_RPC_URL_2` | a second NEAR RPC endpoint, run by another operator; every read must agree with the first |
+| `ONA_CHAIN_ID` | the chain id both endpoints must report (for example `testnet`); mainnet is refused |
 | `ONA_MINT` | account of the deployed contract |
 | `ONA_SIGNER_ACCOUNT` | account named as signer in the contract |
 | `ONA_SIGNER_ACCOUNT_KEY_FILE` | file holding `ed25519:<base58>`, readable by its owner only |
 | `ONA_SIGNER_KEYS_FILE` | the file from `init-keys` |
-| `ONA_SIGNER_STATE_FILE` | where the signer records its progress; must survive restarts |
+| `ONA_SIGNER_STATE_FILE` | where the signer records its progress, readable by its owner only; must survive restarts |
 
 ```
 cargo run -p ona-signer -- run
 ```
 
-It refuses to start if its keys are not the ones the contract verifies against.
+It refuses to start if its keys are not the ones the contract verifies against, if the two RPC URLs name the same endpoint, if an
+endpoint reports another chain, if the state file belongs to another contract or keys or other users can read it, if another signer
+holds it, or if the state file is new while the contract holds locked deposits (restore the old file instead: it remembers which
+signatures were already published). Each pass reads at one final block known to both endpoints, at most 20 blocks apart, and never
+below the highest block already used, which the state file keeps; any difference stops the pass. Two endpoints that lie together are
+not detected. A pass looks at most 512 deposits and 2048 record ids ahead of its cursor; what lies beyond waits for the next pass. A
+locked deposit it never published and cannot sign is unlocked, so it refunds at its deadline. Key files written by an earlier version,
+without a type line, are refused.
 
 ## Run the relay
 
 ```
-cargo run -p ona-server --bin ona-relay -- init-key relay-request-keys.bin
+cargo run -p ona-server --bin ona-relay -- init-key relay-request-key.bin relay-store.log
 ```
+
+This creates the request key and the store bound to it, both readable by their owner only; if the store cannot be created, the key file
+is removed again. The relay never creates a store by itself: a lost or replaced store would make every used request token valid again,
+so it refuses to start instead. Run one relay process per store; a second one is refused, and deleting `relay-store.log.lock` while the
+relay runs stops its store until a restart.
 
 To serve, on `127.0.0.1` only:
 
 | Variable | Value |
 |---|---|
-| `ONA_RPC_URL` | NEAR RPC endpoint |
+| `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only); transactions are sent here |
+| `ONA_RPC_URL_2` | a second NEAR RPC endpoint, run by another operator; every read must agree with the first |
 | `ONA_MINT` | account of the deployed contract |
 | `ONA_NETWORK` | network name used when the contract was created |
+| `ONA_CHAIN_ID` | optional, the chain id both endpoints must report, default the value of `ONA_NETWORK`; mainnet is refused |
 | `ONA_RELAY_ACCOUNT` | account named as relay in the contract |
 | `ONA_RELAY_ACCOUNT_KEY_FILE` | file holding `ed25519:<base58>`, readable by its owner only |
-| `ONA_RELAY_REQUEST_KEY_FILE` | the file from `init-key` |
-| `ONA_RELAY_STORE_FILE` | where the relay records exchanges; must survive restarts |
-| `ONA_MODELS` | allowed models, separated by commas |
-| `NEAR_AI_CLOUD_API_KEY` | NEAR AI key. Set it with `read -s`, never in a file |
+| `ONA_RELAY_REQUEST_KEY_FILE` | the key file from `init-key` |
+| `ONA_RELAY_STORE_FILE` | the store file from `init-key`; must survive restarts |
+| `ONA_MODELS` | allowed models, separated by commas, none empty |
+| `NEAR_AI_CLOUD_API_KEY` | NEAR AI key. Set it with `read -s`, never in a file. Removed from the environment once read |
 | `ONA_RELAY_PORT` | optional, default 8787 |
 | `ONA_FLUSH_SECS` | optional, seconds between batches of claims, default 60 |
 | `ONA_TOKENS_PER_CREDIT` | optional, default 100 |
 | `ONA_MAX_TOKENS` | optional, most tokens per reply, default 512 |
+| `ONA_MAX_PROMPT_BYTES` | optional, most bytes of text in a chat message, default 4096. A reply is withheld above `ONA_MAX_TOKENS` + this + 64 tokens, so price a request token for that much |
 
 ```
 cargo run -p ona-server --bin ona-relay -- run
 ```
 
-It serves 8 connections at a time and keeps 32 waiting; beyond that it answers 503. Attestation and signature routes are limited to 600 calls per
-minute across all clients. If the store reports a write error, every further write is refused until the relay is restarted.
+It serves 32 connections at a time and keeps 256 waiting; beyond that it answers 503. A connection has 5 seconds for its request
+line and headers and 30 for the whole request, so 32 slow clients can still keep it busy: put it behind an onion service with its
+denial-of-service protection. An exchange (`POST /exchange`) carries the credit, its claim signature with `expires_at` (between 30
+minutes and 7 days ahead), and `exchange_sig`, the owner's signature of the blinded points; a claim that could not reach the chain
+before its expiry is given up and answers 410. An attestation needs an unused request token (`X-Ona-Token`), which it does not spend:
+4 per token, and 600 per minute across all clients. A signature needs the request token spent on the chat it signs, for that reply's
+`id`: 4 per chat for 10 minutes, a fetch the service does not answer is not counted, and the global limit never refuses it. The same
+token on the attestation, the chat and the signature lets the relay link these three requests, as it already could from their timing.
+If the store reports a write error, every further write is refused until the relay is restarted.
 
 ## Journal anchoring
 

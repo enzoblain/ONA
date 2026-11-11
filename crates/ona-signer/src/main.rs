@@ -4,11 +4,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ona_near::{load_account_key, Client};
+use ona_near::{check_chain_id, check_network, load_account_key, Client};
+use ona_signer::crossrpc::{check_rpc_pair, CrossRpc, HttpRpc, Rpc};
 use ona_signer::near::NearChain;
-use ona_signer::{FileDurable, KeyStore, Signer};
+use ona_signer::{refuse_new_state_with_locked_deposits, state_binding, FileDurable, KeyStore, Signer};
 
 const TICK: Duration = Duration::from_secs(5);
+/// Shorter than the generic client's: a pass must not stall on one slow call.
+const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -32,22 +35,40 @@ fn init_keys(path: &Path, count: usize) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let rpc = env("ONA_RPC_URL")?;
+    let rpc_2 = env("ONA_RPC_URL_2")?;
+    check_rpc_pair(&rpc, &rpc_2)?;
+    let chain_id = env("ONA_CHAIN_ID")?;
     let mint = env("ONA_MINT")?;
     let account = env("ONA_SIGNER_ACCOUNT")?;
     let account_key =
         load_account_key(&PathBuf::from(env("ONA_SIGNER_ACCOUNT_KEY_FILE")?)).map_err(|e| e.to_string())?;
     let keys = KeyStore::load(&PathBuf::from(env("ONA_SIGNER_KEYS_FILE")?))?;
-    let state = FileDurable::open(&PathBuf::from(env("ONA_SIGNER_STATE_FILE")?))?;
+    let state = FileDurable::open(&PathBuf::from(env("ONA_SIGNER_STATE_FILE")?), &state_binding(&mint, &keys))?;
+    let is_new = state.is_new();
 
-    let mut chain = NearChain::new(Client::new(&rpc, account_key), account, mint);
+    let reads = CrossRpc::new(HttpRpc::new(&rpc, RPC_TIMEOUT)?, HttpRpc::new(&rpc_2, RPC_TIMEOUT)?);
+    let client = Client::connect(&rpc, account_key).map_err(|e| e.to_string())?;
+    // Both endpoints must serve the expected chain, never mainnet.
+    check_network(&client, &chain_id).map_err(|e| e.to_string())?;
+    let second_status = reads.second.post("status", serde_json::json!([]))?;
+    check_chain_id(&chain_id, second_status["chain_id"].as_str().unwrap_or_default()).map_err(|e| e.to_string())?;
+    let mut chain = NearChain::new(client, reads, account, mint);
     let mut signer = Signer::new(keys, state);
     signer.check_keys(&mut chain)?;
+    refuse_new_state_with_locked_deposits(&mut chain, is_new)?;
     println!("keys match the contract, running");
     loop {
         match signer.tick(&mut chain) {
             Ok(report) => {
-                if !report.locked.is_empty() || !report.issued.is_empty() || !report.skipped.is_empty() {
-                    println!("locked {:?}, issued {:?}, skipped {:?}", report.locked, report.issued, report.skipped);
+                if !report.locked.is_empty()
+                    || !report.issued.is_empty()
+                    || !report.unlocked.is_empty()
+                    || !report.skipped.is_empty()
+                {
+                    println!(
+                        "locked {:?}, issued {:?}, unlocked {:?}, skipped {:?}",
+                        report.locked, report.issued, report.unlocked, report.skipped
+                    );
                 }
             }
             Err(e) => eprintln!("tick failed: {e}"),

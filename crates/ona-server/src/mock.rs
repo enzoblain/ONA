@@ -22,6 +22,11 @@ impl Chain for MockChain {
     fn claimed_by_relay(&mut self, nf: &[u8; 32]) -> Result<bool, String> {
         Ok(self.spent.contains(nf))
     }
+
+    /// The fake chain's time is this machine's.
+    fn final_timestamp(&mut self) -> Result<u64, String> {
+        Ok(crate::system_time_ns())
+    }
 }
 
 pub struct MockModel;

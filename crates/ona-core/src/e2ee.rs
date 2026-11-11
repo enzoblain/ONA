@@ -327,6 +327,15 @@ fn base_headers() -> Vec<(String, String)> {
     ]
 }
 
+/// The base headers, plus the request token when the call goes through the relay.
+fn token_headers(token: Option<&str>) -> Vec<(String, String)> {
+    let mut headers = base_headers();
+    if let Some(token) = token {
+        headers.push(("X-Ona-Token".to_string(), token.to_string()));
+    }
+    headers
+}
+
 impl<T: Transport> E2eeClient<T> {
     /// `token_budget` is a hard stop on the tokens this client may spend, across all its calls.
     pub fn new(transport: T, model: &str, max_tokens: u32, token_budget: u64) -> Self {
@@ -351,7 +360,9 @@ impl<T: Transport> E2eeClient<T> {
         self.spent
     }
 
-    fn fetch_model_key(&mut self) -> Result<[u8; 32], String> {
+    /// Through the relay, an attestation needs the request token about to be spent: the relay checks
+    /// it is unused, without spending it.
+    fn fetch_model_key(&mut self, token: Option<&str>) -> Result<[u8; 32], String> {
         let mut bytes = [0u8; 32];
         OsRng.fill_bytes(&mut bytes);
         let nonce = to_hex(&bytes);
@@ -359,7 +370,7 @@ impl<T: Transport> E2eeClient<T> {
             "/v1/attestation/report?model={}&provider=near&signing_algo=ed25519&include_tls_fingerprint=false&nonce={nonce}",
             self.model
         );
-        let (status, body) = self.transport.get(&path, &base_headers())?;
+        let (status, body) = self.transport.get(&path, &token_headers(token))?;
         if status != 200 {
             return Err(format!("attestation request failed with status {status}"));
         }
@@ -377,8 +388,8 @@ impl<T: Transport> E2eeClient<T> {
     }
 
     /// Retries anything but a usable signature. It may not be ready at once, and a paid reply is
-    /// lost without it.
-    fn fetch_signature(&mut self, id: &str) -> Result<Value, String> {
+    /// lost without it. Through the relay, it needs the request token spent on the chat.
+    fn fetch_signature(&mut self, id: &str, token: Option<&str>) -> Result<Value, String> {
         let path = format!("/v1/signature/{id}?signing_algo=ed25519");
         let mut last_error = String::new();
         let mut delay = self.signature_retry_delay;
@@ -387,7 +398,7 @@ impl<T: Transport> E2eeClient<T> {
                 std::thread::sleep(delay);
                 delay = (delay * 2).min(MAX_SIGNATURE_RETRY_DELAY);
             }
-            match self.transport.get(&path, &base_headers()) {
+            match self.transport.get(&path, &token_headers(token)) {
                 Ok((200, body)) => match serde_json::from_slice::<Value>(&body) {
                     Ok(value) if value["signature"].is_string() => return Ok(value),
                     Ok(_) => last_error = "signature is not ready".to_string(),
@@ -409,7 +420,7 @@ impl<T: Transport> E2eeClient<T> {
         if self.spent.saturating_add(reserved) > self.token_budget {
             return Err("token budget exhausted".into());
         }
-        let model_key = self.fetch_model_key()?;
+        let model_key = self.fetch_model_key(token)?;
         let client = ClientKey::generate();
         let aad = match self.version {
             EncryptionVersion::V2 => Vec::new(),
@@ -446,7 +457,7 @@ impl<T: Transport> E2eeClient<T> {
         if !reply_id_is_acceptable(id) {
             return Err("reply id is malformed".into());
         }
-        let signature = self.fetch_signature(id)?;
+        let signature = self.fetch_signature(id, token)?;
         verify_reply_signature(&signature, &self.model, &body, &raw, &model_key)?;
 
         // A missing or zero count says nothing about the cost, so the reservation stands.

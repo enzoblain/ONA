@@ -66,6 +66,8 @@ it, so no signature can be made valid for ever.
 - `redeem_digest_until = H("ONA-REDEEM-V2" || H(contract) || H(submitter) || nf || expires_at_le)`
 - `spend_digest_until = H("ONA-SPEND-V3" || H(contract) || H(submitter) || denom || nf || H(to) || amount_le || fee_le || count_le || (denom || B)* || expires_at_le)`
 - `claim_digest_until = H("ONA-CLAIM-V2" || H(mint) || H(relay) || nf || expires_at_le)`
+- `exchange_digest = H("ONA-EXCHANGE-V1" || H(mint) || H(relay) || nf || H(B_1 || ... || B_n))`, with the raw 48-byte blinded points in
+  request order. Checked by the relay only (`exchange_sig`), never by the contract: it fixes the points an exchange pays for.
 
 The earlier formats (`ONA-REDEEM-V1`, `ONA-SPEND-V2`, `ONA-CLAIM-V1`, functions without `_until`) remain in `ona-token` for
 existing callers but are no longer accepted by `ona-mint`. Owner keys of small order are refused by the contract (the host's
@@ -121,6 +123,28 @@ sending. It may `unlock` only a record it never broadcast (for example one it ca
 live tokens than the record removes. Remaining trust: a signer that broadcasts and then calls `unlock` anyway brings back the old
 risk (refund plus public signatures); a signer that locks and never issues nor unlocks leaves the deposit in the contract for good,
 counted as issued tokens. Both cost the depositor or rest on the signer, never on other holders as long as the signer is honest.
+
+**The signer (`crates/ona-signer`).** It retries `issue` of a broadcast record without time limit, unlocks a locked record it never
+broadcast and cannot sign, and stops if a broadcast record can no longer be signed. Its state file names the mint and its keys, is
+readable by its owner only and held by one process; a new state file is refused while the contract holds locked deposits (every
+record id is scanned), and a file left empty by a crash counts as new. Before an `issue` whose earlier attempt had an unknown outcome,
+it asks the node for that transaction's status and sends nothing if it landed.
+
+**Trust in the RPC.** The signer signs what the chain shows, so a lying RPC could obtain signatures without a deposit. Each pass reads
+deposits and keys on two endpoints (`ONA_RPC_URL`, `ONA_RPC_URL_2`) at one final block pinned for the whole pass, the lower of the two
+final blocks, checked by height on the other endpoint. The two final heights may differ by at most 20 blocks, and the block may not be
+below the highest one already used, which the state file keeps (written every 600 blocks and before each broadcast or unlock), so one
+endpoint cannot impose an older view of the chain. Any difference stops the pass. Both endpoints must report the expected chain id.
+URLs must be `https`, or `http` to the machine itself; redirects and proxy variables are refused. Two endpoints that lie together are
+not detected; a light client or an own node would be needed for that. The RPC formats used are from the NEAR RPC documentation and
+**not verified** against a live node here.
+
+**Order.** Each pass reads up to 8 `pending_scan` pages from its cursor (at most 512 deposits and 2048 ids; what lies beyond waits for
+the next pass), locks first, going round the depositors so that a flood from one account delays the others by one turn each, then
+issues. Several accounts get several turns, so a flood spread over many accounts can still delay locks past the one-hour deadline;
+those deposits are then refunded, nothing is lost. A pass starts no new record after 10 minutes. The cursor moves to the first record
+still to retry, or to where the scan stopped, so runs of finished ids do not stop issuance. `lock` and `unlock` get 10 + 2 Tgas per
+token and `issue` 10 + 8 Tgas per token (266 for 32); the `lock` budget is not measured.
 
 ### What links a deposit to a spend
 Blinding hides which deposit a token came from, and BLS signatures are unique, so the signer cannot tag a token. Everything else is
@@ -435,23 +459,54 @@ needs a spend mark. Key storage in the operating system's keychain is not implem
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit
-route that exists only in that binary). `NearRelayChain` connects it to the contract. `gateway.rs` passes encrypted NEAR AI calls byte for byte: it forwards an allowlist of headers and
-requires a one-use request token per chat. Before the token is spent, a chat must have exactly `model`, `messages`, `stream` and `max_tokens`, no duplicated
-JSON key, one user message in hexadecimal, the encryption headers, a listed model and a body of at most 64 KiB. Attestation and signature routes accept only
-the exact forms used by the client, under one limit per minute for all clients. Service errors keep their status and lose their text. A reply over
-budget is withheld, as a last resort since the call is already paid. `ona-relay` is the program that runs all this. It has not run yet. No padded batches or enclave yet.
+route that exists only in that binary and also returns the credit's owner key, so a front end can sign `exchange_sig`). `NearRelayChain` connects it to the
+contract. `gateway.rs` passes encrypted NEAR AI calls byte for byte and requires a one-use request token per chat. It forwards only the encryption headers and
+`x-no-aliasing` (a short plain word), and sets `Content-Type: application/json` and `Accept-Encoding: identity` itself; free routes pass on no client header.
+It follows no redirect and reads at most 4 MiB of reply. Before the token is spent, a chat must have exactly `model`, `messages`, `stream` and `max_tokens`,
+no duplicated JSON key, one user message in lowercase hexadecimal, the encryption headers with `X-Encryption-Version` 2 or 3, a listed model, a body of at
+most 64 KiB, and a message of at most `ONA_MAX_PROMPT_BYTES` bytes of text plus the 72 bytes of encryption. A reply is withheld above `ONA_MAX_TOKENS` +
+`ONA_MAX_PROMPT_BYTES` + 64 tokens: the largest prompt at one token per byte (an assumption about the tokenizer, not measured) plus an estimate of the chat
+template (not measured). It is a last resort, since the call is already paid, so a request token must be priced for that much. Service errors keep their
+status and lose their text. `ona-relay` is the program that runs all this; it uses no local model (`NoModel`), and only `Relay::chat`, used by tests and the
+mock relay, labels its replies `mode: mock`. It has not run yet. No padded batches or enclave yet.
+
+**Free routes.** An attestation needs an unused request token in `X-Ona-Token`, which it does not spend: 4 per token, counted until the token is spent
+(never reset while the relay runs, and kept when an unbilled chat returns the token), plus 600 per minute across all clients. At most 65 536 unused tokens are followed: filling that table costs 655 credits
+at 100 tokens per credit, and then new tokens get no attestation until some are spent. A signature needs the token spent on the chat it signs, for that
+reply's `id` (a reply without `id` gives none): 4 fetches per chat for 10 minutes, a fetch the service does not answer with 200 is not counted, and the
+global limit never refuses it, so a paid chat can always collect its signature. These counts live in memory: a restart gives unused tokens their
+attestations back and drops the tickets. Showing the same token on the attestation, the chat and the signature lets the relay link these three requests,
+as their timing already does.
 
 The relay is not trusted with content: with encryption version 2 a dishonest relay can replace the client key and read the reply. Version 3 closes this
 only if the NEAR AI gateway accepts it, which is not verified.
 
-Each connection has one deadline to send its whole request and one to receive the whole reply. Connections are served by a fixed pool with a bounded queue,
-and a full queue answers 503. Chain and model calls run without holding the relay state.
+Parsing is strict (`HTTP/1.1` only, one `Content-Length` of digits, no `Transfer-Encoding`). Each connection has 5 seconds for its request line and headers,
+30 for the whole request and 30 to receive the reply. Connections are served by 32 threads with a queue of 256, and a full queue answers 503: 32 slow clients
+still fill the pool, so the onion service in front must limit them. Chain and model calls run without holding the relay state, and so do the checks that
+need only the configuration: credit, signatures, blinded points, chat policy and request token signature. After a panic while the state was held, every
+request answers 503 and the log asks for a restart. Signing a batch of claims still runs under the lock.
 
-Credit exchange checks the credit and its owner signature before anything else, writes state durably before each irreversible step and signs only after
-the chain confirms. A `false` from `relay_claim` is read again in a final block: claimed by this relay gives the tokens, spent by someone else refuses, and
-anything else, such as the hourly limit, stays pending. Request tokens are recorded as used before the model call, and returned durably only when the
-service refused the connection or answered 401, 402 or 429. The journal cuts a last line without a newline at startup, stops after a failed write until
-restarted, and is rewritten with one line per credit and per used token.
+**Credit exchange.** The body carries the credit, its claim signature (`claim_digest_until`) with `expires_at`, and `exchange_sig`. All are checked before
+anything else. A new exchange needs `expires_at` between 30 minutes and 7 days ahead of the relay's clock (checked before any chain read; a client
+collecting a finished exchange may hold an expired one by then). The expiry is stored with the claim and sent unchanged after a restart. A pending claim
+within 5 minutes of its expiry by this machine's clock is not sent. A sent claim is given up only when a final block, read through both endpoints before the
+view that still shows the credit open, is past its expiry: the contract judges by block time, and a sent transaction can land hours later. Both answer
+410 and the credit may be exchanged again with a later expiry. A new request for a given-up credit always reads the chain: if the earlier claim landed
+after all, the relay signs the points of that claim; if someone else spent the credit, it refuses. Batches hold at most 28 claims. State is written durably before each irreversible step. The relay signs only what a final block, read through
+two RPC endpoints that must agree (as for the signer), shows as claimed by this relay: `relay_claim` results come from one endpoint and decide nothing
+alone. `is_spent` is read before `spent_by_relay`, so a claim landing between the two reads stays open instead of reading as spent by someone else.
+Spent elsewhere refuses, and anything else, such as the hourly limit, stays pending. A credit found spent is remembered, so replaying it costs no further
+chain read. Before a claim whose earlier one had an unknown outcome, the relay asks for that transaction's status; if it landed, the batch is not sent
+and the next flush reads the chain. Pending credits are sent in nullifier order, without a retry count. Both endpoints must report the expected chain id.
+
+**Store.** Request tokens are recorded as used before the model call, and returned durably only when the service refused the connection or answered 401,
+402 or 429. The store is created once with the request key (`init-key`, which removes the key file again if the store cannot be made), names that key on
+its first line, is readable by its owner only and held by one process through `<store>.lock`; if that lock file is removed or replaced, the store stops.
+The relay refuses to start without its store, so a lost store cannot silently make used tokens valid again. Restoring an old copy of the store still does:
+detecting that needs a monotonic counter, for example in an enclave. Two relays with separate stores and the same key could each sign for one credit; run
+one. The store cuts a last line without a newline at startup, stops after a failed write until restarted, is rewritten with one line per credit and per
+used token, and keeps them forever: with no key epoch, nothing can be purged.
 
 ## NEAR RPC client (`crates/ona-near`)
 
