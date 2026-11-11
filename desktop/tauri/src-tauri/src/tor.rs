@@ -1,16 +1,29 @@
 //! Publishes the phone server as an onion service with the `tor` program installed on this computer, like docs/TOR.md
 //! does for the relay. The onion key stays in the app's data folder.
 
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{Duration, Instant};
+
+/// How long tor may take to publish the onion service before the app gives up.
+const PUBLISH_LIMIT: Duration = Duration::from_secs(300);
+/// Pause between two attempts to reach our own onion address.
+const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+/// One attempt: Tor may need a while to find the descriptor and build the circuits.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TorState {
     Off,
     /// No `tor` program found.
     Missing,
+    /// tor runs; the onion service is not reachable yet (the QR code is not shown).
     Starting,
+    /// The onion address answered through Tor: the phone can reach it.
     Published(String),
     Failed(String),
 }
@@ -20,6 +33,11 @@ pub struct TorService {
     root: PathBuf,
     child: Option<Child>,
     started: Option<Instant>,
+    /// tor's SOCKS port on 127.0.0.1, used only to check that our own onion address answers.
+    socks_port: u16,
+    /// An attempt to reach the onion address, running on its own thread.
+    probe: Option<Receiver<Result<(), String>>>,
+    last_probe: Option<Instant>,
 }
 
 /// Where `tor` is installed by the system's packages. Searched before PATH: a folder put early in PATH (by another
@@ -45,7 +63,7 @@ fn find_binary(candidates: impl Iterator<Item = PathBuf>, path: &[PathBuf], name
 
 impl TorService {
     pub fn new(root: PathBuf) -> Self {
-        Self { state: TorState::Off, root, child: None, started: None }
+        Self { state: TorState::Off, root, child: None, started: None, socks_port: 0, probe: None, last_probe: None }
     }
 
     pub fn onion(&self) -> Option<&str> {
@@ -61,6 +79,13 @@ impl TorService {
         let Some(binary) = binary() else {
             self.state = TorState::Missing;
             return;
+        };
+        self.socks_port = match free_local_port() {
+            Ok(p) => p,
+            Err(e) => {
+                self.state = TorState::Failed(e.to_string());
+                return;
+            }
         };
         match self.spawn(&binary, port) {
             Ok(child) => {
@@ -79,11 +104,12 @@ impl TorService {
         }
         let torrc = self.root.join("torrc");
         // Paths quoted: they may contain spaces (Windows user folders). __OwningControllerProcess makes tor exit when
-        // this app exits, even after a crash, so no orphan keeps the data folder locked.
+        // this app exits, even after a crash, so no orphan keeps the data folder locked. The SOCKS port listens on
+        // 127.0.0.1 only: the app uses it to check that its onion address answers before showing the QR code.
         std::fs::write(&torrc, format!(
-            "SocksPort 0\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
+            "SocksPort 127.0.0.1:{}\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
              __OwningControllerProcess {}\nLog notice stdout\n",
-            escape(&data), escape(&hs), std::process::id()
+            self.socks_port, escape(&data), escape(&hs), std::process::id()
         ))?;
         let mut command = Command::new(binary);
         command.arg("-f").arg(&torrc).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -108,17 +134,43 @@ impl TorService {
                 return;
             }
         }
-        let hostname = self.root.join("hs").join("hostname");
-        if let Ok(host) = std::fs::read_to_string(hostname) {
-            let host = host.trim();
-            if host.ends_with(".onion") {
-                self.state = TorState::Published(host.to_owned());
-                return;
+        // The `hostname` file stays from one launch to the next: it does not mean the service is published. The QR code
+        // waits until the onion address answers through Tor.
+        if let Some(probe) = &self.probe {
+            match probe.try_recv() {
+                Ok(Ok(())) => {
+                    self.probe = None;
+                    if let Some(host) = self.hostname() {
+                        self.state = TorState::Published(host);
+                        return;
+                    }
+                }
+                Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => self.probe = None,
+                Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        if self.started.is_some_and(|t| t.elapsed() > Duration::from_secs(120)) {
-            self.state = TorState::Failed("l'adresse .onion n'est pas apparue".into());
+        if self.started.is_some_and(|t| t.elapsed() > PUBLISH_LIMIT) {
+            self.state = TorState::Failed("le service .onion ne répond pas par Tor".into());
+            return;
         }
+        let due = self.last_probe.is_none_or(|t| t.elapsed() >= PROBE_INTERVAL);
+        if self.probe.is_none() && due {
+            if let Some(host) = self.hostname() {
+                let (send, receive) = mpsc::channel();
+                let socks = SocketAddr::from((Ipv4Addr::LOCALHOST, self.socks_port));
+                thread::spawn(move || {
+                    let _ = send.send(reach_through_socks(socks, &host, 80, PROBE_TIMEOUT));
+                });
+                self.probe = Some(receive);
+                self.last_probe = Some(Instant::now());
+            }
+        }
+    }
+
+    fn hostname(&self) -> Option<String> {
+        let host = std::fs::read_to_string(self.root.join("hs").join("hostname")).ok()?;
+        let host = host.trim();
+        host.ends_with(".onion").then(|| host.to_owned())
     }
 
     pub fn stop(&mut self) {
@@ -127,8 +179,44 @@ impl TorService {
             let _ = child.wait();
         }
         self.started = None;
+        self.probe = None;
+        self.last_probe = None;
         self.state = TorState::Off;
     }
+}
+
+/// A port free on 127.0.0.1 right now, for tor's SOCKS port.
+fn free_local_port() -> std::io::Result<u16> {
+    Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?.port())
+}
+
+/// Opens a stream to `host:port` through the SOCKS5 proxy at `socks` (RFC 1928, no authentication, name resolved by
+/// the proxy), then closes it. Ok once the proxy reports the stream as connected: for an onion address, the service is
+/// published and answers.
+fn reach_through_socks(socks: SocketAddr, host: &str, port: u16, timeout: Duration) -> Result<(), String> {
+    let name = host.as_bytes();
+    if name.is_empty() || name.len() > 255 {
+        return Err("bad host".into());
+    }
+    let mut stream = TcpStream::connect_timeout(&socks, timeout).map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    stream.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    stream.write_all(&[5, 1, 0]).map_err(|e| e.to_string())?;
+    let mut choice = [0u8; 2];
+    stream.read_exact(&mut choice).map_err(|e| e.to_string())?;
+    if choice != [5, 0] {
+        return Err("SOCKS proxy refused".into());
+    }
+    let mut request = vec![5, 1, 0, 3, name.len() as u8];
+    request.extend_from_slice(name);
+    request.extend_from_slice(&port.to_be_bytes());
+    stream.write_all(&request).map_err(|e| e.to_string())?;
+    let mut reply = [0u8; 4];
+    stream.read_exact(&mut reply).map_err(|e| e.to_string())?;
+    if reply[0] != 5 || reply[1] != 0 {
+        return Err(format!("SOCKS reply {}", reply[1]));
+    }
+    Ok(())
 }
 
 impl Drop for TorService {
@@ -170,6 +258,54 @@ mod tests {
         assert_eq!(found, Some(system.join("tor")));
         let fallback = find_binary(std::iter::once(root.join("absent/tor")), std::slice::from_ref(&early), "tor");
         assert_eq!(fallback, Some(early.join("tor")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A minimal SOCKS5 proxy answering `reply` to one CONNECT; returns its address and the host it was asked for.
+    fn fake_socks(reply: u8) -> (SocketAddr, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            stream.write_all(&[5, 0]).unwrap();
+            let mut head = [0u8; 5];
+            stream.read_exact(&mut head).unwrap();
+            assert_eq!(&head[..4], &[5, 1, 0, 3]);
+            let mut rest = vec![0u8; head[4] as usize + 2];
+            stream.read_exact(&mut rest).unwrap();
+            assert_eq!(&rest[rest.len() - 2..], &[0, 80]);
+            stream.write_all(&[5, reply, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+            String::from_utf8(rest[..rest.len() - 2].to_vec()).unwrap()
+        });
+        (address, handle)
+    }
+
+    #[test]
+    fn the_onion_counts_as_published_only_when_it_answers() {
+        let onion = format!("{}.onion", "a".repeat(56));
+        let (proxy, asked) = fake_socks(0);
+        assert_eq!(reach_through_socks(proxy, &onion, 80, Duration::from_secs(5)), Ok(()));
+        assert_eq!(asked.join().unwrap(), onion);
+        // Tor answers 4 (host unreachable) while the descriptor is not published.
+        let (proxy, _) = fake_socks(4);
+        assert_eq!(reach_through_socks(proxy, &onion, 80, Duration::from_secs(5)), Err("SOCKS reply 4".into()));
+    }
+
+    #[test]
+    fn a_hostname_file_alone_does_not_publish() {
+        let root = std::env::temp_dir().join(format!("ona-tor-hostname-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("hs")).unwrap();
+        std::fs::write(root.join("hs").join("hostname"), format!("{}.onion\n", "b".repeat(56))).unwrap();
+        let mut service = TorService::new(root.clone());
+        service.state = TorState::Starting;
+        service.started = Some(Instant::now());
+        service.socks_port = free_local_port().unwrap(); // nothing listens there
+        service.poll();
+        assert_eq!(service.state, TorState::Starting);
+        assert!(service.onion().is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

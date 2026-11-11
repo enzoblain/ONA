@@ -586,9 +586,53 @@ struct SettingsTests {
     /// Tor exits with the app.
     @MainActor
     @Test func torExitsWithTheApp() {
-        let torrc = TorService.torrc(data: "/a b/data", hs: "/a\"b/hs", port: 49152, owner: 4242)
+        let torrc = TorService.torrc(data: "/a b/data", hs: "/a\"b/hs", port: 49152, owner: 4242, socksPort: 50123)
         #expect(torrc.contains("__OwningControllerProcess 4242"))
+        #expect(torrc.contains("SocksPort 127.0.0.1:50123"))
         #expect(torrc.contains("HiddenServicePort 80 127.0.0.1:49152"))
         #expect(torrc.contains(#"HiddenServiceDir "/a\"b/hs""#))
     }
 }
+
+/// A minimal SOCKS5 proxy on 127.0.0.1 that answers `reply` to one CONNECT and reports the host it was asked for.
+private func fakeSocks(reply: UInt8) -> (port: UInt16, asked: Task<String, Never>) {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    var address = SocksProbe.loopback(port: 0)
+    _ = SocksProbe.withSockaddr(&address) { bind(fd, $0, $1) }
+    listen(fd, 1)
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    _ = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+    }
+    let port = UInt16(bigEndian: address.sin_port)
+    let asked = Task.detached { () -> String in
+        let client = accept(fd, nil, nil)
+        defer { close(client); close(fd) }
+        guard (try? SocksProbe.receive(client, 3)) == [5, 1, 0] else { return "bad greeting" }
+        try? SocksProbe.send(client, [5, 0])
+        guard let head = try? SocksProbe.receive(client, 5), head[3] == 3,
+              let rest = try? SocksProbe.receive(client, Int(head[4]) + 2) else { return "bad request" }
+        try? SocksProbe.send(client, [5, reply, 0, 1, 0, 0, 0, 0, 0, 0])
+        return String(decoding: rest.dropLast(2), as: UTF8.self)
+    }
+    return (port, asked)
+}
+
+@Suite("Onion published")
+struct OnionPublishedTests {
+    /// The QR code waits until the onion address answers through Tor, not just until the hostname file exists.
+    @Test func reachesTheOnionThroughSocks() async throws {
+        let onion = String(repeating: "a", count: 56) + ".onion"
+        let ok = fakeSocks(reply: 0)
+        try SocksProbe.reach(socksPort: ok.port, host: onion, timeout: 5)
+        #expect(await ok.asked.value == onion)
+        // Tor answers 4 (host unreachable) while the descriptor is not published.
+        let notYet = fakeSocks(reply: 4)
+        #expect(throws: SocksProbe.Failure.reply(4)) { try SocksProbe.reach(socksPort: notYet.port, host: onion, timeout: 5) }
+        _ = await notYet.asked.value
+        // Nothing listening: not published either.
+        let free = try #require(SocksProbe.freeLocalPort())
+        #expect(throws: SocksProbe.Failure.socket("connect")) { try SocksProbe.reach(socksPort: free, host: onion, timeout: 2) }
+    }
+}
+

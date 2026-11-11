@@ -9,7 +9,9 @@ public final class TorService {
     public enum State: Equatable {
         case off
         case missing
+        /// tor runs; the onion service is not reachable yet (no QR code).
         case starting
+        /// The onion address answered through Tor: the phone can reach this Mac.
         case published(String)
         case failed(String)
     }
@@ -34,12 +36,14 @@ public final class TorService {
 
     /// The torrc. Paths quoted (escaped); `__OwningControllerProcess` makes tor exit when this app exits, even after a
     /// crash, so no orphan tor keeps publishing the onion address towards a port another program could take.
-    static func torrc(data: String, hs: String, port: UInt16, owner: Int32) -> String {
+    /// The SOCKS port listens on 127.0.0.1 only: the app uses it to check that its onion address answers before
+    /// showing the QR code.
+    static func torrc(data: String, hs: String, port: UInt16, owner: Int32, socksPort: UInt16) -> String {
         func quoted(_ path: String) -> String {
             "\"" + path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
         }
         return """
-        SocksPort 0
+        SocksPort 127.0.0.1:\(socksPort)
         DataDirectory \(quoted(data))
         HiddenServiceDir \(quoted(hs))
         HiddenServicePort 80 127.0.0.1:\(port)
@@ -64,7 +68,12 @@ public final class TorService {
                 try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
             }
             let torrc = Self.root.appending(path: "torrc")
-            try Self.torrc(data: data.path, hs: hs.path, port: port, owner: ProcessInfo.processInfo.processIdentifier)
+            guard let socksPort = SocksProbe.freeLocalPort() else {
+                state = .failed("aucun port local libre pour tor")
+                return
+            }
+            try Self.torrc(data: data.path, hs: hs.path, port: port, owner: ProcessInfo.processInfo.processIdentifier,
+                           socksPort: socksPort)
                 .write(to: torrc, atomically: true, encoding: .utf8)
 
             let process = Process()
@@ -81,16 +90,24 @@ public final class TorService {
             self.process = process
             state = .starting
             let hostname = hs.appending(path: "hostname")
+            // The `hostname` file stays from one launch to the next: it does not mean the service is published. The QR
+            // code waits until the onion address answers through Tor (at most 5 minutes).
             watch = Task { [weak self] in
-                for _ in 0..<120 {
+                let deadline = Date.now.addingTimeInterval(300)
+                while Date.now < deadline, !Task.isCancelled {
                     if let host = try? String(contentsOf: hostname, encoding: .utf8)
                         .trimmingCharacters(in: .whitespacesAndNewlines), host.hasSuffix(".onion") {
-                        self?.state = .published(host)
-                        return
+                        let reached = await Task.detached {
+                            (try? SocksProbe.reach(socksPort: socksPort, host: host)) != nil
+                        }.value
+                        if reached, !Task.isCancelled {
+                            self?.state = .published(host)
+                            return
+                        }
                     }
-                    try? await Task.sleep(for: .seconds(1))
+                    try? await Task.sleep(for: .seconds(5))
                 }
-                self?.state = .failed("l'adresse .onion n'est pas apparue")
+                if !Task.isCancelled { self?.state = .failed("le service .onion ne répond pas par Tor") }
             }
         } catch {
             state = .failed(error.localizedDescription)
