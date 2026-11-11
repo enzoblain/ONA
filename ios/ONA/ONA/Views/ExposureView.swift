@@ -19,7 +19,7 @@ struct ExposureView: View {
         }
         ForEach(Array(exposure.payments.enumerated()), id: \.offset) { _, payment in
             LabeledContent("Paiement") {
-                Text("\(amount(payment.amount)) NEAR → \(payment.to)")
+                Text("\(amount(payment.amount)) NEAR → \(SignedFields.isNearAccount(payment.to) ? payment.to : "compte illisible")")
                     .font(.callout.monospaced())
                     .multilineTextAlignment(.trailing)
             }

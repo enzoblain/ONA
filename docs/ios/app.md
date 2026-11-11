@@ -74,7 +74,8 @@ Les journaux d'Arti ne sont activés qu'en Debug.
 - Les mêmes tests dans Xcode sur simulateur iOS 27 : le lanceur de tests ne se connecte pas (« test runner hung »,
   « unable to connect … service hub »), sur deux simulateurs. Problème de Xcode 27 bêta, l'app elle-même tourne.
 - Tests du faux ordinateur : 6/6 (Python 3.14.7). L'empreinte du paiement de démonstration est identique à celle
-  imprimée par `ona demo` (branche `main`) : `a43ba249…fa31`. Le relevé d'exposition a les mêmes valeurs que celui
+  imprimée par `ona demo` (branche `main`) : `a43ba249…fa31`. (Ce condensé v0 n'existe plus depuis le protocole v1 :
+  voir « Protocole v1 » plus bas.) Le relevé d'exposition a les mêmes valeurs que celui
   d'`ona demo` (`search` 1, `fetch` 2, `contact` 1, 3 appels au modèle, 1 paiement).
 - Simulateur iPhone 17 (iOS 27.0, Xcode 27.0 bêta) contre le faux ordinateur : une mission complète déroulée à la main
   (plan validé → cabinet-b choisi → paiement vérifié puis confirmé → relevé affiché).
@@ -116,6 +117,44 @@ Les journaux d'Arti ne sont activés qu'en Debug.
   affichée, elle est corrigée.
 - Pas encore fait : autorisation client Tor (restricted discovery) pour que seul le téléphone appairé puisse joindre
   le `.onion` ; côté ordinateur réel dans `ona-core`.
+
+## Protocole v1, 2026-11-11
+
+Passage de l'app et du faux ordinateur au protocole v1 (`docs/ios/protocol-draft.md`), après l'inspection de sécurité
+des apps bureau (constats F-01 à F-17). Ce qui change sur le téléphone :
+
+- **Réponses signées (F-04).** Toutes les requêtes en `POST /v1/…` avec un aléa ; chaque réponse est vérifiée avec la
+  clé de l'ordinateur du QR **avant** d'être lue (`ComputerClient`). Sinon : « Ordinateur non authentifié ».
+- **Appairage avec engagement (F-02).** Engagement sur la clé, puis révélation ; code à 6 chiffres sur les deux aléas.
+  QR `v: 1` avec `expires_at`. L'appairage n'est enregistré qu'après « Les codes sont identiques » (F-17) ; ensuite le
+  téléphone attend la confirmation sur l'ordinateur (403 `not paired` affiché comme une attente, pas une erreur).
+- **Lectures avec jeton (F-03), écritures avec compteur (F-01).** Jeton et compteur dans le Trousseau ; le compteur est
+  pris et enregistré avant la signature, jamais réutilisé ; écritures une par une. Signatures toujours low-s (F-16).
+- **Signer ce qui est affiché (F-05).** Le téléphone recalcule le condensé du plan, des offres ou du paiement à partir
+  de ce qu'il montre et le signe ; il ne reprend jamais `content`.
+- **Paiement v2 (F-01, F-14).** Condensé `ona/pay/v2` (réseau, contrat, mission, aléa, destinataire, montant),
+  `digest_version` 2 obligatoire ; le destinataire n'est affiché que s'il a la forme d'un compte NEAR.
+- **F-07.** Adresse `http://` du QR acceptée seulement en Debug ; `NSAllowsLocalNetworking` seulement dans
+  l'`Info.plist` de Debug (`Config/Info-Release.plist` en Release, vérifié sur le binaire Release).
+- **F-17.** Clé logicielle refusée sur un iPhone (simulateur et tests seulement) ; état de Tor (Arti) sous
+  Application Support, exclu des sauvegardes (le cache réseau reste dans Library/Caches) ; un appairage v0 enregistré
+  est oublié (refaire l'appairage).
+
+Limites (F-15) : un ordinateur compromis fait ce qu'il veut, la signature du téléphone est vérifiée par l'app bureau,
+pas par `ona-core` ni par la chaîne. Un téléphone volé déverrouillé lit les conversations ; chaque écriture demande
+encore Face ID ou le code de l'appareil (pas encore vérifié sur un vrai iPhone).
+
+Vérifié le 2026-11-11 (macOS, Xcode 27.0 bêta, simulateur iPhone 17 iOS 27.0) :
+
+- `swift test` : 47 tests passés, dont tous les vecteurs v1 communs avec les apps bureau, la signature Rust de
+  référence vérifiée par CryptoKit, le refus des signatures high-s, le refus d'une réponse falsifiée ou signée pour une
+  autre requête, et un faux ordinateur v1 en Swift (engagement, jeton, compteurs, signatures).
+- Faux ordinateur : 24 tests Python passés (mêmes vecteurs, mission complète par HTTP avec vérification de chaque
+  réponse, rejeu refusé, confirmation sur un autre plan refusée).
+- Bout en bout, réseau local : app iPhone (simulateur) ↔ app Tauri (branche `fix/inspection`) ↔ `ona-core`. Appairage
+  v1, conversation, plan, cabinet-b, paiement de 0,6 NEAR vérifié en v2 puis confirmé, relevé reçu. Un appairage v0
+  restant dans le Trousseau du simulateur a été oublié comme prévu.
+- Pas vérifié : par Tor en v1, avec l'app Mac, sur un vrai iPhone (Secure Enclave, Face ID).
 
 ## Pas encore fait
 

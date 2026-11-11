@@ -49,7 +49,8 @@ le téléphone : à réserver aux tests. La fenêtre ne reçoit que l'image du Q
 - Les crates `tauri` et `qrcode` ne sont pas dans le cache hors ligne : `cargo test` dans `src-tauri` n'a pas pu
   tourner. Les modules (tout sauf `main.rs`) ont été compilés et testés hors ligne dans un banc d'essai externe avec les
   mêmes versions épinglées (`qrcode` remplacé par un bouchon) : 45 tests passés. `main.rs` et la fenêtre n'ont pas été
-  compilés. Pas de nouvel essai de bout en bout : l'app iPhone parle encore le protocole v0.
+  compilés. Bout en bout en protocole v1 le 2026-11-11, sur macOS, réseau local : app iPhone (simulateur) ↔ app Tauri ↔
+  `ona-core`, de l'appairage (engagement puis révélation) au relevé, paiement de 0,6 NEAR vérifié en v2 sur le téléphone.
 
 ## Vérifié le 2026-11-10, sur macOS (protocole v0, avant les correctifs)
 

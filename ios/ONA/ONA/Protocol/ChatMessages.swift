@@ -1,6 +1,6 @@
 import Foundation
 
-// Conversations with the agent (docs/ios/protocol-draft.md, "Conversations"). Chats live on the computer; the phone
+// Conversations with the agent (docs/ios/protocol-draft.md, "Lectures" and "Écritures"). Chats live on the computer; the phone
 // only shows them and keeps nothing on disk.
 
 /// One line of the chat list.
@@ -99,26 +99,4 @@ struct ChatItem: Decodable, Sendable, Identifiable {
         default: .unknown(kind)
         }
     }
-}
-
-/// Body of `POST /v0/chats` (new chat) and `POST /v0/chats/{id}/messages`.
-struct ChatMessageRequest: Encodable, Sendable, Equatable {
-    let text: String
-    let pairingId: String
-    /// base64 DER signature over `SignedFields.chatMessage`.
-    let signature: String
-}
-
-/// Body of `POST /v0/chats/{id}/delete`.
-struct ChatDeleteRequest: Encodable, Sendable, Equatable {
-    let pairingId: String
-    let signature: String
-}
-
-/// Reply of `POST /v0/chats`.
-struct NewChatAck: Decodable, Sendable {
-    let ok: Bool
-    let error: String?
-    let mode: Mode?
-    let chatId: String?
 }
