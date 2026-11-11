@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use arti_client::config::TorClientConfigBuilder;
-use arti_client::{DormantMode, HasKind, TorClient};
+use arti_client::{DataStream, DormantMode, HasKind, TorClient};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tor_rtcompat::PreferredRuntime;
@@ -194,6 +194,25 @@ pub extern "C" fn arti_bridge_status() -> *mut c_char {
 /// Largest HTTP response read by `arti_bridge_http_request`, in bytes.
 const MAX_RESPONSE: u64 = 1 << 20;
 
+/// How long one attempt to open a stream may take before a new one starts. Measured on 2026-11-11 (docs/ios/app.md):
+/// the first circuit to an onion service sometimes stalled for more than 60 s while a new attempt connected in about
+/// 2 s.
+const CONNECT_ATTEMPT: Duration = Duration::from_secs(20);
+
+/// Opens the stream, starting over when an attempt takes longer than `CONNECT_ATTEMPT`. Safe to repeat: nothing has
+/// been sent before the stream is open. The caller's overall timeout still bounds the whole exchange.
+async fn connect_with_retries(client: &Client, host: &str, port: u16) -> Result<DataStream, String> {
+    loop {
+        match tokio::time::timeout(CONNECT_ATTEMPT, client.connect((host, port))).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            // Tor answered: the onion is unknown, the service refused… Another attempt would not help.
+            Ok(Err(e)) => return Err(arti_error("connect", &e)),
+            // Too slow: a new attempt (new circuit) usually connects in a few seconds.
+            Err(_) => continue,
+        }
+    }
+}
+
 /// Opens a Tor stream to `host:port`, writes `request`, reads the response until the server closes the stream
 /// (at most `max_response` bytes). Returns (connect_ms, response bytes).
 async fn exchange(
@@ -205,9 +224,12 @@ async fn exchange(
     max_response: u64,
 ) -> Result<(u64, Vec<u8>), String> {
     let started = Instant::now();
+    // When the stream opened, to tell in the error which phase was too slow.
+    let connected_at = std::cell::Cell::new(None::<u64>);
     let work = async {
-        let mut stream = client.connect((host, port)).await.map_err(|e| arti_error("connect", &e))?;
+        let mut stream = connect_with_retries(client, host, port).await?;
         let connect_ms = millis(started.elapsed());
+        connected_at.set(Some(connect_ms));
         stream.write_all(request).await.map_err(|e| format!("write: {e}"))?;
         stream.flush().await.map_err(|e| format!("flush: {e}"))?;
         let mut response = Vec::new();
@@ -221,9 +243,11 @@ async fn exchange(
         }
         Ok::<_, String>((connect_ms, response))
     };
-    tokio::time::timeout(Duration::from_millis(timeout_ms), work)
-        .await
-        .map_err(|_| format!("timed out after {timeout_ms} ms"))?
+    let result = tokio::time::timeout(Duration::from_millis(timeout_ms), work).await;
+    result.map_err(|_| match connected_at.get() {
+        Some(ms) => format!("timed out after {timeout_ms} ms (stream open after {ms} ms, no complete reply)"),
+        None => format!("timed out after {timeout_ms} ms (stream not open)"),
+    })?
 }
 
 fn check_target(host: &str, path: &str) -> Result<(), String> {

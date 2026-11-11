@@ -166,7 +166,18 @@ Vérifié le 2026-11-11 (macOS, Xcode 27.0 bêta, simulateur iPhone 17 iOS 27.0)
     encore publié sur Tor : un client Tor du Mac obtenait « No more HSDir available » pendant au moins 5 minutes. L'app
     considère l'adresse publiée dès que le fichier `hostname` existe, et ce fichier reste d'une session à l'autre.
     Relancé, le service répondait en moins de 20 s.
-- Pas vérifié : avec l'app Mac, sur un vrai iPhone (Secure Enclave, Face ID).
+- **Avec l'app Mac, le 2026-11-11** (réseau local) : même mission complète, signatures CryptoKit des deux côtés.
+- **Nouvel essai par Tor (même jour).** Le pont Arti donne 20 s à chaque tentative d'ouverture du flux et en relance une
+  autre, dans la limite de 60 s ; si le flux ne s'est toujours pas ouvert (rien n'a été envoyé), l'app renvoie la
+  requête une fois. Mesure sur le Mac avec le pont seul, première requête d'un Arti neuf vers le `.onion` de l'app
+  Tauri : 19 réussites sur 21 (dont deux à environ 32 s, sauvées par une nouvelle tentative), deux échecs après 60 s
+  (dont un « flux non ouvert »). Sans ces tentatives, le même jour : 3 premières requêtes sur 5 avaient expiré (2 dans
+  l'app, 1 avec le pont seul). Peu d'essais, un seul réseau. Le renvoi côté app n'a pas été observé en vrai.
+- **Rescanner.** Quand l'ordinateur ne reconnaît plus ce téléphone (`not paired` après le délai, `unknown pairing`,
+  `missing or wrong token`), l'accueil propose « Rescanner le code de l'ordinateur ». Testé par les tests unitaires,
+  pas à l'écran.
+- **Limites (F-15)** dans Réglages : ordinateur compromis, téléphone volé déverrouillé.
+- Pas vérifié : sur un vrai iPhone (Secure Enclave, Face ID).
 
 ## Pas encore fait
 

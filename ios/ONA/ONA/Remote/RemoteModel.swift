@@ -36,6 +36,12 @@ final class RemoteModel {
     private(set) var verification: PendingVerification?
     /// Set once any reply said `mode: mock`, so the simulation label never disappears in a session.
     private(set) var sawSimulation = false
+    /// The computer no longer knows this phone (codes not confirmed in time, phone forgotten, new pairing elsewhere):
+    /// the only way out is to scan a new code.
+    private(set) var pairingLost = false
+
+    /// Error codes that mean the computer no longer knows this pairing.
+    static let lostPairingCodes: Set<String> = ["not paired", "unknown pairing", "missing or wrong token"]
 
     static let pollInterval: Duration = .seconds(2)
     /// The computer waits this long for the person to confirm the codes, then shows a new QR.
@@ -180,6 +186,7 @@ final class RemoteModel {
         key = nil
         client = nil
         cancelPairing()
+        pairingLost = false
         chats = []
         chatsLoaded = false
         openChat = nil
@@ -221,13 +228,21 @@ final class RemoteModel {
                 }
             }
             connection = .connected(.now)
+            pairingLost = false
         } catch LinkError.refused(403, .some("not paired"))
             where Date.now.timeIntervalSince(pairing.pairedAt) < Self.computerConfirmationWindow + 60 {
             // Paired here, not yet confirmed on the computer: wait, this is not a failure.
             connection = .awaitingComputer
         } catch {
             connection = .failed(error.localizedDescription)
+            if let code = (error as? LinkError)?.code, Self.lostPairingCodes.contains(code) { pairingLost = true }
         }
+    }
+
+    /// Forgets the lost pairing and goes back to the pairing screen, to scan the computer's new code.
+    func rescan() {
+        unpair()
+        pairingLost = false
     }
 
     // MARK: - Conversations

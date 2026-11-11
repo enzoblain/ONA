@@ -10,12 +10,27 @@ struct SettingsView: View {
             Form {
                 computerSection
                 Section {
-                    Text("Ce téléphone garde l'appairage (nom et adresse de l'ordinateur, sa clé publique, la clé de ce téléphone) et, si Tor sert, l'annuaire du réseau Tor (voir l'onglet Tor). Rien n'est sauvegardé dans iCloud.")
+                    Text("Ce téléphone garde l'appairage (nom et adresse de l'ordinateur, sa clé publique, la clé de ce téléphone, le jeton de lecture et le compteur des demandes) et, si Tor sert, les données du réseau Tor (voir l'onglet Tor). Rien n'est sauvegardé dans iCloud.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } header: {
                     Text("Données sur ce téléphone")
                 }
+                Section {
+                    Label {
+                        Text("Un ordinateur compromis peut faire ce qu'il veut : ce téléphone confirme les actions, il ne peut pas surveiller l'ordinateur.")
+                    } icon: {
+                        Image(systemName: "desktopcomputer.trianglebadge.exclamationmark")
+                    }
+                    Label {
+                        Text("Un téléphone volé et déverrouillé peut lire les conversations. Chaque action (message, confirmation, paiement) demande encore Face ID ou le code de l'appareil.")
+                    } icon: {
+                        Image(systemName: "iphone.slash")
+                    }
+                } header: {
+                    Text("Limites")
+                }
+                .font(.callout)
                 Section {
                     LabeledContent("Version", value: Self.appVersion)
                 } header: {

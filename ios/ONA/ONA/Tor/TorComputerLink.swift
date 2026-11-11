@@ -7,12 +7,22 @@ struct TorComputerLink: ComputerLink {
     var tor: ArtiTor = .shared
 
     /// Arti's bridge sends `Host: <onion>`, which the computer requires, and no `Origin`.
+    ///
+    /// The first circuit to an onion service sometimes stays stuck (docs/ios/app.md, 2026-11-11). The bridge already
+    /// starts a new attempt every 20 s; if the stream still did not open, nothing reached the computer, so the request
+    /// is sent once more.
     func post(_ path: String, body: Data) async throws -> RawReply {
-        do {
-            let response = try await tor.request(host: onion, method: "POST", path: path, body: body)
-            return RawReply(status: response.status, body: response.body)
-        } catch let error as TorError {
-            throw LinkError.unreachable(error.localizedDescription)
+        var attempts = 0
+        while true {
+            attempts += 1
+            do {
+                let response = try await tor.request(host: onion, method: "POST", path: path, body: body)
+                return RawReply(status: response.status, body: response.body)
+            } catch let error as TorError where error.nothingSent && attempts < 2 {
+                continue
+            } catch let error as TorError {
+                throw LinkError.unreachable(error.localizedDescription)
+            }
         }
     }
 }
