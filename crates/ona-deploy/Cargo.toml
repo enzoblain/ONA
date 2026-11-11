@@ -9,6 +9,8 @@ license = "MIT"
 ona-near = { path = "../ona-near" }
 ona-signer = { path = "../ona-signer" }
 ona-token = { path = "../ona-token" }
-anyhow = "1"
-base64 = "0.22"
-serde_json = "1"
+anyhow = "=1.0.104"
+base64 = "=0.22.1"
+bs58 = "=0.5.1"
+serde_json = "=1.0.154"
+sha2 = "=0.10.9"

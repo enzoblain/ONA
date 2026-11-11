@@ -40,6 +40,11 @@ final class ArtiTor: Sendable {
         try await bootstrap.run { [self] in
             try FileManager.default.createDirectory(at: Self.stateDir, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: Self.cacheDir, withIntermediateDirectories: true)
+            // Tor's state stays on this phone: never in a backup.
+            var stateRoot = Self.stateRoot
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try stateRoot.setResourceValues(values)
             let _: Empty = try await call {
                 Self.stateDir.path.withCString { state in
                     Self.cacheDir.path.withCString { cache in arti_bridge_bootstrap(state, cache) }
@@ -92,26 +97,31 @@ final class ArtiTor: Sendable {
 
     // MARK: - Data kept on the phone
 
-    /// Arti's state (guards) and cache (network directory), under Library/Caches: not backed up, purgeable by iOS.
-    /// Keeping them makes the next start faster.
-    static let root = URL.cachesDirectory.appending(path: "arti", directoryHint: .isDirectory)
-    static var stateDir: URL { root.appending(path: "state", directoryHint: .isDirectory) }
-    static var cacheDir: URL { root.appending(path: "cache", directoryHint: .isDirectory) }
+    /// Arti's state (guards, keys) under Application Support, excluded from backups: iOS does not purge it, so the
+    /// guards stay stable. Its cache (network directory) under Library/Caches: iOS may purge it, Arti downloads it again.
+    /// Keeping both makes the next start faster.
+    static let stateRoot = URL.applicationSupportDirectory.appending(path: "arti", directoryHint: .isDirectory)
+    static let cacheRoot = URL.cachesDirectory.appending(path: "arti", directoryHint: .isDirectory)
+    static var stateDir: URL { stateRoot.appending(path: "state", directoryHint: .isDirectory) }
+    static var cacheDir: URL { cacheRoot.appending(path: "cache", directoryHint: .isDirectory) }
 
     /// Bytes Tor keeps on this phone.
     static func dataSize() -> Int64 {
-        guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.totalFileAllocatedSizeKey])
-        else { return 0 }
         var total: Int64 = 0
-        for case let url as URL in files {
-            total += Int64((try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0)
+        for root in [stateRoot, cacheRoot] {
+            guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.totalFileAllocatedSizeKey])
+            else { continue }
+            for case let url as URL in files {
+                total += Int64((try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0)
+            }
         }
         return total
     }
 
     /// Deletes Tor's data. Call only while Tor is stopped.
     static func eraseData() throws {
-        if FileManager.default.fileExists(atPath: root.path) {
+        // The cache folder also held Tor's state in earlier versions of the app.
+        for root in [stateRoot, cacheRoot] where FileManager.default.fileExists(atPath: root.path) {
             try FileManager.default.removeItem(at: root)
         }
     }

@@ -1980,6 +1980,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "unicode-normalization",
  "ureq",
  "x25519-dalek",
  "zeroize",
@@ -2000,6 +2001,7 @@ dependencies = [
  "rand_chacha",
  "serde",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -2008,10 +2010,12 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bs58 0.5.1",
  "ona-near",
  "ona-signer",
  "ona-token",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2033,9 +2037,11 @@ dependencies = [
  "base64 0.22.1",
  "bs58 0.5.1",
  "ed25519-dalek",
+ "libc",
  "serde_json",
  "sha2 0.10.9",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]
@@ -2046,6 +2052,7 @@ dependencies = [
  "near-sdk",
  "ona-token",
  "rand",
+ "serde_json",
  "sha2 0.10.9",
 ]
 
@@ -2088,6 +2095,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]
@@ -2101,6 +2109,8 @@ dependencies = [
  "ona-token",
  "rand",
  "serde_json",
+ "ureq",
+ "zeroize",
 ]
 
 [[package]]
@@ -2120,6 +2130,7 @@ dependencies = [
  "ed25519-dalek",
  "ona-core",
  "ona-near",
+ "rand",
  "serde_json",
  "ureq",
 ]
@@ -2132,6 +2143,7 @@ dependencies = [
  "ed25519-dalek",
  "ona-token",
  "rand",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -3136,6 +3148,15 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"

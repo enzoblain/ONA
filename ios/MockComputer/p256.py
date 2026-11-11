@@ -1,4 +1,5 @@
-"""Minimal P-256 (secp256r1) for the MOCK computer only: key generation and ECDSA-SHA256 verification.
+"""Minimal P-256 (secp256r1) for the MOCK computer only: key generation, ECDSA-SHA256 verification, and
+signing of the mock's replies (protocol v1).
 
 Pure Python, standard library only, so the mock keeps no dependency. Not constant-time and not reviewed: never use it
 for anything but this test server. The real computer (ona-core) will use an audited library.
@@ -94,7 +95,7 @@ def decode_der_signature(der: bytes) -> tuple[int, int]:
     return r, s
 
 
-def verify(public_key_x963: bytes, message: bytes, der_signature: bytes) -> bool:
+def verify(public_key_x963: bytes, message: bytes, der_signature: bytes, low_s: bool = False) -> bool:
     """ECDSA P-256 with SHA-256, as produced by CryptoKit's `P256.Signing` / `SecureEnclave.P256.Signing`."""
     try:
         q = decode_x963(public_key_x963)
@@ -103,6 +104,8 @@ def verify(public_key_x963: bytes, message: bytes, der_signature: bytes) -> bool
         return False
     if not (1 <= r < N and 1 <= s < N):
         return False
+    if low_s and s > N // 2:  # protocol v1 refuses the high form
+        return False
     e = int.from_bytes(hashlib.sha256(message).digest(), "big")
     w = pow(s, -1, N)
     point = add(mul(e * w % N, G), mul(r * w % N, q))
@@ -110,7 +113,8 @@ def verify(public_key_x963: bytes, message: bytes, der_signature: bytes) -> bool
 
 
 def sign(d: int, message: bytes) -> bytes:
-    """Test helper only (random nonce from `secrets`). Returns a DER signature."""
+    """Signs for the mock only (random nonce from `secrets`, not constant time). Returns a DER signature in the
+    low-s form (s ≤ n/2) that protocol v1 requires."""
     e = int.from_bytes(hashlib.sha256(message).digest(), "big")
     while True:
         k = secrets.randbelow(N - 1) + 1
@@ -118,6 +122,8 @@ def sign(d: int, message: bytes) -> bytes:
         s = pow(k, -1, N) * (e + r * d) % N
         if r and s:
             break
+    if s > N // 2:
+        s = N - s
 
     def der_int(v: int) -> bytes:
         raw = v.to_bytes((v.bit_length() + 8) // 8, "big")  # leading 0x00 when the top bit is set

@@ -60,28 +60,20 @@ async fn confirm(worker: State<'_, Worker>, id: String, decision: String, firm: 
 /// The person saw the same 6-digit code on both screens.
 #[tauri::command]
 async fn confirm_code(worker: State<'_, Worker>) -> Reply {
-    call(&worker, |app| {
-        app.pairing.confirm_code();
-        Ok(Value::Null)
-    })
+    call(&worker, |app| app.pairing.confirm_code().map(|_| Value::Null))
 }
 
-/// The codes differ, or the person no longer trusts the phone: a new QR code is issued.
+/// The codes differ, or the person no longer trusts the phone: a new QR code is issued. An error means the change
+/// could not be written: the window shows it (the phone would be trusted again after a restart).
 #[tauri::command]
 async fn forget_phone(worker: State<'_, Worker>) -> Reply {
-    call(&worker, |app| {
-        app.pairing.forget_phone();
-        Ok(Value::Null)
-    })
+    call(&worker, |app| app.pairing.forget_phone().map(|_| Value::Null))
 }
 
 #[tauri::command]
 async fn set_mode(worker: State<'_, Worker>, mode: String) -> Reply {
-    let mode = Mode::parse(&mode).ok_or("mode inconnu")?;
-    call(&worker, move |app| {
-        app.set_mode(mode);
-        Ok(Value::Null)
-    })
+    let mode = Mode::parse(&mode, worker::LOCAL_MODE_ALLOWED).ok_or("mode inconnu")?;
+    call(&worker, move |app| app.set_mode(mode).map(|_| Value::Null))
 }
 
 /// The computer's name, shown on the phone after pairing.
@@ -112,7 +104,7 @@ fn debug_hooks(worker: Worker) {
                 printed = payload;
             }
             if auto_confirm && awaiting {
-                worker.call(|app| app.pairing.confirm_code());
+                worker.call(|app| app.pairing.confirm_code().is_ok());
             }
         }
     });
@@ -123,7 +115,8 @@ fn main() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let worker = Worker::start(computer_name(), data_dir, server::PORT);
+            // Port 0: chosen by the system at each start (Tor mode), so another program cannot take it in advance.
+            let worker = Worker::start(computer_name(), data_dir, 0);
             #[cfg(debug_assertions)]
             debug_hooks(worker.clone());
             app.manage(worker);

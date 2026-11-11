@@ -113,7 +113,7 @@ struct VerificationView: View {
                 .controlSize(.large)
                 .accessibilityIdentifier("codes-match")
                 Button(role: .destructive) {
-                    model.unpair()
+                    model.cancelPairing()
                 } label: {
                     Text("Ils diffèrent : annuler l'appairage").frame(maxWidth: .infinity)
                 }

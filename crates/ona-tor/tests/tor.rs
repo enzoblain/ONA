@@ -20,8 +20,6 @@ enum Mode {
     Serve(&'static str),
     /// Answers the SOCKS request with this failure code.
     Refuse(u8),
-    /// Answers the greeting with bytes that are not SOCKS.
-    Garbage,
 }
 
 #[derive(Debug, Clone)]
@@ -89,10 +87,6 @@ fn read_http(stream: &TcpStream) -> (String, Vec<u8>) {
 }
 
 fn handle(mut stream: TcpStream, mode: Mode, log: &Mutex<Vec<Seen>>) {
-    if let Mode::Garbage = mode {
-        let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
-        return;
-    }
     let Some((atyp, host, port)) = read_connect(&mut stream) else { return };
     let record = |request_head: String, body: Vec<u8>| {
         log.lock().unwrap().push(Seen { atyp, host: host.clone(), port, request_head, body });
@@ -108,7 +102,6 @@ fn handle(mut stream: TcpStream, mode: Mode, log: &Mutex<Vec<Seen>>) {
             record(head, body);
             let _ = stream.write_all(response.as_bytes());
         }
-        Mode::Garbage => unreachable!(),
     }
 }
 
@@ -138,10 +131,8 @@ fn assert_untouched(listener: &TcpListener) {
     assert!(listener.accept().is_err(), "a connection bypassed the proxy");
 }
 
-fn dead_proxy() -> TorProxy {
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    TorProxy::new(&format!("127.0.0.1:{port}")).unwrap()
-}
+// The fail-closed tests with a local canary are unit tests in `src/lib.rs`: the destination check
+// now refuses `localhost`.
 
 const OK_REPLY: &str = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
 
@@ -173,6 +164,7 @@ fn get_reaches_the_onion_through_socks() {
     let seen = log.lock().unwrap().clone();
     assert_eq!((seen[0].atyp, seen[0].port), (ATYP_DOMAIN, 80));
     assert!(seen[0].request_head.starts_with("GET /v1/signature/1 HTTP/1.1"));
+    assert!(!seen[0].request_head.to_ascii_lowercase().contains("user-agent"), "{}", seen[0].request_head);
 }
 
 /// `.invalid` never resolves, so reaching the proxy with the name proves no local lookup decided it.
@@ -186,37 +178,6 @@ fn name_resolution_is_left_to_the_proxy() {
     let seen = log.lock().unwrap().clone();
     assert_eq!(seen.len(), 1);
     assert_eq!((seen[0].atyp, seen[0].host.as_str(), seen[0].port), (ATYP_DOMAIN, "ona-canary.invalid", 443));
-}
-
-#[test]
-fn fails_closed_when_tor_is_not_running() {
-    let (listener, addr) = canary();
-    let mut transport = TorTransport::new(&format!("https://localhost:{}", addr.port()), &dead_proxy()).unwrap();
-
-    assert!(transport.get("/", &[]).is_err());
-    assert!(transport.post("/", &[], b"secret").is_err());
-    assert_untouched(&listener);
-}
-
-#[test]
-fn fails_closed_when_tor_refuses_the_connection() {
-    let (listener, addr) = canary();
-    let (proxy, log) = fake_socks(Mode::Refuse(5));
-    let mut transport = TorTransport::new(&format!("https://localhost:{}", addr.port()), &proxy).unwrap();
-
-    assert!(transport.post("/", &[], b"secret").is_err());
-    assert_eq!(log.lock().unwrap().len(), 1, "a refusal must not be retried another way");
-    assert_untouched(&listener);
-}
-
-#[test]
-fn fails_closed_when_the_proxy_does_not_speak_socks() {
-    let (listener, addr) = canary();
-    let (proxy, _) = fake_socks(Mode::Garbage);
-    let mut transport = TorTransport::new(&format!("https://localhost:{}", addr.port()), &proxy).unwrap();
-
-    assert!(transport.get("/", &[]).is_err());
-    assert_untouched(&listener);
 }
 
 #[test]
@@ -250,16 +211,6 @@ fn near_rpc_goes_through_socks() {
     assert_eq!((seen[0].atyp, seen[0].host.as_str()), (ATYP_DOMAIN, ONION));
     let sent: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
     assert_eq!(sent["method"], "status");
-}
-
-#[test]
-fn near_rpc_fails_closed_when_tor_is_not_running() {
-    let (listener, addr) = canary();
-    let url = format!("https://localhost:{}", addr.port());
-    let client = near_client(&url, SigningKey::from_bytes(&[7; 32]), &dead_proxy()).unwrap();
-
-    assert!(client.post("status", json!([])).is_err());
-    assert_untouched(&listener);
 }
 
 #[test]

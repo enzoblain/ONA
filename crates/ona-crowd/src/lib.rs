@@ -13,6 +13,7 @@
 //!
 //! Yield is off unless configured; an account's exits are capped by its deposits plus its gains.
 //! Times are seconds from the start of the run, amounts are whole units of the asset.
+#![forbid(unsafe_code)]
 
 pub mod chain;
 mod measure;
@@ -1090,10 +1091,20 @@ pub fn create_private(path: &Path) -> Result<File> {
         .with_context(|| format!("cannot create {} (it must not exist yet)", path.display()))
 }
 
+/// Writes a new file readable by its owner only. An existing file is never replaced.
+pub fn write_private(path: &Path, text: &str) -> Result<()> {
+    let mut file = create_private(path)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn account_key_text(key: &SigningKey) -> String {
-    let mut bytes = key.to_bytes().to_vec();
+    // Sized up front, so no copy of the secret is left behind by a reallocation.
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(64));
+    bytes.extend_from_slice(zeroize::Zeroizing::new(key.to_bytes()).as_slice());
     bytes.extend_from_slice(key.verifying_key().as_bytes());
-    format!("ed25519:{}", bs58::encode(bytes).into_string())
+    format!("ed25519:{}", bs58::encode(bytes.as_slice()).into_string())
 }
 
 /// Writes every user's key, in the `ed25519:<base58>` form NEAR tools read, to a new file readable

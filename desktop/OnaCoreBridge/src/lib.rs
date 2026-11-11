@@ -10,12 +10,39 @@
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use ona_core::Core;
+use ona_core::Core as OnaCore;
+
+/// What the C side holds (`OnaCore *`, opaque): the core, and whether a panic left it unusable.
+pub struct Core {
+    core: OnaCore,
+    /// Set after a panic inside ona-core: its state (gate, journal) may be half changed, so it is not used again.
+    poisoned: bool,
+}
+
+const POISONED: &str = r#"{"ok":false,"error":"ona-core stopped after an internal error: start a new mission","mode":"mock"}"#;
+const PANIC: &str = r#"{"ok":false,"error":"panic inside ona-core","mode":"mock"}"#;
+
+impl Core {
+    /// Runs `run` on the core unless it is poisoned; a panic poisons it.
+    fn guarded(&mut self, run: impl FnOnce(&mut OnaCore) -> String) -> String {
+        if self.poisoned {
+            return POISONED.to_owned();
+        }
+        let core = &mut self.core;
+        match catch_unwind(AssertUnwindSafe(|| run(core))) {
+            Ok(reply) => reply,
+            Err(_) => {
+                self.poisoned = true;
+                PANIC.to_owned()
+            }
+        }
+    }
+}
 
 /// Creates a core. Never null.
 #[unsafe(no_mangle)]
 pub extern "C" fn ona_core_new() -> *mut Core {
-    Box::into_raw(Box::new(Core::new()))
+    Box::into_raw(Box::new(Core { core: OnaCore::new(), poisoned: false }))
 }
 
 /// Releases a core created by `ona_core_new`. Null is accepted.
@@ -43,8 +70,7 @@ pub unsafe extern "C" fn ona_core_dispatch(core: *mut Core, request: *const c_ch
         let request = unsafe { CStr::from_ptr(request) }.to_string_lossy().into_owned();
         // SAFETY: see function contract; no other thread uses this handle meanwhile.
         let core = unsafe { &mut *core };
-        catch_unwind(AssertUnwindSafe(|| core.dispatch(&request)))
-            .unwrap_or_else(|_| r#"{"ok":false,"error":"panic inside ona-core","mode":"mock"}"#.to_owned())
+        core.guarded(|core| core.dispatch(&request))
     };
     // JSON escapes U+0000, so the reply holds no interior NUL.
     CString::new(reply).unwrap_or_else(|_| CString::from(c"{\"ok\":false,\"error\":\"encoding\"}")).into_raw()
@@ -89,11 +115,29 @@ mod tests {
             call(core, r#"{"cmd":"compare"}"#);
             call(core, r#"{"cmd":"confirm_recipient","firm":"cabinet-b"}"#);
             call(core, r#"{"cmd":"contact","message":"Bonjour"}"#);
-            call(core, r#"{"cmd":"prepare_payment","amount":"1000000000000000000000000"}"#)
+            // No amount: ona-core takes the chosen offer's price × the policy's rate.
+            call(core, r#"{"cmd":"prepare_payment"}"#)
         };
-        assert_eq!(prepared["digest"], "a43ba249fbdd55a64a0647282b6dff66d660a1d8a8d75a8fbf3533bfa450fa31");
+        // Payment digest v2: bound to the mission and to a fresh nonce, so it changes at every payment.
+        let digest = prepared["digest"].as_str().unwrap();
+        assert!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()), "{prepared}");
+        assert_eq!(prepared["payment"]["to"], "cabinet-b.testnet");
+        assert_eq!(prepared["payment"]["nonce"].as_str().map(str::len), Some(32));
+        assert!(prepared["payment"]["mission_id"].is_string());
         // The gate refuses a confirmation that does not match the payment screen.
         assert_eq!(call(core, r#"{"cmd":"confirm_payment","digest":"00"}"#)["ok"], false);
+        unsafe { ona_core_free(core) };
+    }
+
+    /// After a panic, the same core is not used again.
+    #[test]
+    fn a_core_that_panicked_is_not_used_again() {
+        let core = ona_core_new();
+        // SAFETY: pointer from ona_core_new, not shared.
+        let handle = unsafe { &mut *core };
+        let reply = handle.guarded(|_| panic!("inside ona-core"));
+        assert!(reply.contains("panic inside ona-core"));
+        assert!(call(core, r#"{"cmd":"open","mission":"Trouver un avocat"}"#)["error"].as_str().unwrap().contains("stopped"));
         unsafe { ona_core_free(core) };
     }
 

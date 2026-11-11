@@ -1,142 +1,183 @@
-# Protocole téléphone ↔ ordinateur — brouillon v0
+# Protocole téléphone ↔ ordinateur — version 1
 
-Document interne, 2026-11-10. **Brouillon côté iOS, pas encore validé par Hugo.** Il calque les trois confirmations
-humaines d'`ona-core` (branche `main`, `crates/ona-core/src/lib.rs`) : `accept_plan`, `confirm_recipient`,
-`confirm_payment`. Le faux ordinateur `ios/MockComputer/mock_computer.py` le suit.
+Document interne. Version 1 du 2026-11-11 : remplace la version 0 (2026-11-10), après l'inspection de sécurité
+(rejeu, code à 6 chiffres sans engagement, lectures ouvertes, ordinateur non authentifié, signatures incomplètes).
+Implémentée par les apps bureau (`desktop/tauri/src-tauri/src/{protocol,pairing,router}.rs`,
+`desktop/ONADesktop/Core/`), par l'app iPhone (`ios/ONA/ONA/Pairing/SignedFields.swift`, `Protocol/ComputerLink.swift`)
+et par le faux ordinateur (`ios/MockComputer`), le 2026-11-11.
+
+Elle calque les trois confirmations humaines d'`ona-core` : `accept_plan`, `confirm_recipient`, `confirm_payment`.
 
 ## Principes
 
-- Le téléphone **interroge** l'ordinateur (pas de push). Il ne garde rien sur le disque.
-- Le téléphone ne voit que ce qu'il doit afficher : l'avancement, les offres à départager, l'écran de paiement. Pas de
-  jetons, pas de table de pseudonymes, pas de clé.
-- Chaque réponse porte `"mode"` : `"mock"` pour le faux ordinateur (et pour `ona-core` tant que le modèle est faux),
-  `"real"` sinon. L'app affiche « Simulation » dès qu'une réponse dit `"mock"`.
-- Transport : HTTP/1.1 + JSON. Sur le réseau local pour l'étape 2 ; via Tor (`.onion` de l'ordinateur) à l'étape 4.
-- Étape 3 : chaque confirmation est signée par la clé P-256 du Secure Enclave du téléphone appairé.
+- Le téléphone **interroge** l'ordinateur (pas de push). Il ne garde rien sur le disque hors du Trousseau.
+- Le téléphone ne voit que ce qu'il doit afficher : l'avancement, les offres à départager, l'écran de paiement.
+- Chaque réponse porte `"mode"` : `"mock"` tant que modèle et paiements sont faux, `"real"` sinon.
+- Transport : HTTP/1.0 + JSON, **toutes les requêtes en `POST`** avec un corps JSON (le pont Tor de l'app ne sait
+  envoyer ni en-têtes ni `DELETE`). Par Tor (`.onion` de l'ordinateur). Le mode « réseau local » (HTTP en clair)
+  n'existe que dans les versions de développement des apps bureau.
+- L'ordinateur refuse : un en-tête `Host` absent, vide, répété ou autre que son adresse `.onion` (ou
+  `127.0.0.1:port`, ou son adresse locale en mode réseau local) ; toute requête qui porte `Origin`, `Sec-Fetch-Site`,
+  `Sec-Fetch-Mode` ou `Sec-Fetch-Dest`, même avec une valeur vide (navigateur) ; toute méthode autre que `POST` ; les
+  routes `/v0/…`.
+- Limites côté ordinateur : 16 connexions simultanées, 10 s pour envoyer une requête et recevoir sa réponse, en-têtes
+  et corps de 16 Kio au plus.
 
-## `GET /v0/state`
+## Encodage `champs(…)`
+
+Pour chaque champ : sa longueur en u32 petit-boutiste, puis ses octets (texte en UTF-8, clés en octets bruts, champ
+absent = longueur 0). Les nombres (compteur, statut HTTP, prix…) sont écrits en texte décimal ASCII. Les aléas
+(`nonce`) sont 16 octets aléatoires écrits en 32 caractères hexadécimaux minuscules. Les condensés sont SHA-256 en
+64 caractères hexadécimaux minuscules.
+
+Signatures : ECDSA P-256 avec SHA-256, encodage DER, en base64 standard. **Forme « low-s » obligatoire** (s ≤ n/2) :
+une signature dont s > n/2 est refusée, des deux côtés. CryptoKit en produit une fois sur deux : remplacer s par n − s
+avant l'envoi. Clés publiques : X9.63 non compressée, 65 octets commençant par `04`.
+
+## Réponses signées par l'ordinateur
+
+Chaque requête porte un champ `"nonce"` (32 hex, nouveau à chaque requête). Chaque réponse de l'ordinateur a ce
+corps :
 
 ```json
-{
-  "mode": "mock",
-  "computer": { "name": "Ordinateur simulé" },
-  "mission": {
-    "id": "m-1",
-    "title": "Trouver un avocat en droit du travail",
-    "phase": "plan_proposed | running | waiting | closed | cancelled",
-    "steps": [ { "step": "search", "status": "done | current | pending" } ],
-    "events": [ { "at": 1762790000, "text": "Recherche : 2 résultats" } ],
-    "pending": null,
-    "exposure": null
-  }
-}
+{ "reply": "<le JSON de la réponse, sous forme de texte>", "signature": "<base64, ECDSA DER>" }
 ```
 
-`mission` vaut `null` s'il n'y a pas de mission. `steps[].step` reprend les noms d'`ona-core` (`search`, `read`,
-`compare`, `confirm_recipient`, `contact`, `prepare_payment`, `confirm_payment`, `pay`).
+`signature` porte sur `champs("ona/reply/v1", nonce, méthode, chemin, statut_http, reply)` (méthode et chemin de la
+requête, par exemple `POST` et `/v1/chats/list`) et se vérifie avec `computer_key` du QR. Le téléphone vérifie la
+signature **sur la valeur exacte de `reply` obtenue après décodage du JSON** (ne jamais ré-encoder : l'app Mac échappe
+`/` en `\/`), avec son propre `nonce`, sa méthode et son chemin, **avant** de lire `reply`. Il rejette toute réponse
+non signée ou mal signée : un programme qui aurait pris le port de l'ordinateur, ou un relais, ne peut ni fabriquer
+une réponse, ni rejouer une ancienne (le `nonce` change), ni faire passer la réponse d'une requête pour celle d'une
+autre.
 
-`pending` (une confirmation attendue, au plus une à la fois) :
+Seules réponses **sans signature** : 400, 413 et 431 quand la requête HTTP elle-même est illisible ou trop grande
+(avant toute lecture du JSON), et 503 (ordinateur en train de s'arrêter). Une réponse non signée est toujours un échec ;
+le téléphone ne lit pas son corps et ne la montre pas comme venant de l'ordinateur. Toutes les autres réponses,
+erreurs comprises (y compris un 400 « body is not a JSON object »), sont signées.
+
+## Appairage
+
+1. L'ordinateur affiche un QR : `ona-pair:` suivi de base64url (sans `=`) d'un JSON :
+
+   ```json
+   { "v": 1, "name": "Mon ordinateur", "address": null, "onion": "<adresse v3>.onion",
+     "computer_key": "<base64, X9.63, 65 octets>", "code": "<base64url, 16 octets aléatoires>",
+     "expires_at": 1762790600 }
+   ```
+
+   Le code ne sert qu'une fois et expire au bout de 10 minutes (un nouveau QR s'affiche). Après 5 codes faux, il est
+   remplacé. Le téléphone refuse un QR dont `v` n'est pas 1.
+2. Le téléphone crée sa clé P-256 (Secure Enclave) et un aléa `phone_nonce`, puis **s'engage** :
+
+   ```json
+   POST /v1/pair
+   { "code": "<code du QR>", "commitment": "<hex>", "nonce": "<hex>" }
+   ```
+
+   `commitment = SHA-256(champs("ona/pair-commit/v1", phone_key, phone_nonce))`. Le code est consommé ici, quoi qu'il
+   arrive ensuite. Réponse : `{"ok": true, "pairing_id": "p-<32 hex>", "computer_nonce": "<32 hex>", "mode": …}`.
+3. Le téléphone **révèle** sa clé :
+
+   ```json
+   POST /v1/pair/reveal
+   { "pairing_id": "p-…", "phone_key": "<base64, X9.63>", "phone_nonce": "<hex>", "signature": "<base64>",
+     "nonce": "<hex>" }
+   ```
+
+   `signature` (clé du téléphone) porte sur
+   `champs("ona/pair/v1", pairing_id, code, phone_key, computer_key, phone_nonce, computer_nonce)`. L'ordinateur
+   vérifie l'engagement et la signature : une seule tentative ; en cas d'échec, nouveau QR. L'engagement doit arriver
+   au plus 2 minutes avant la révélation. Réponse : `{"ok": true, "pairing_id": "p-…", "token": "<base64url, 32 octets>"}`.
+4. Les deux côtés affichent le **code de vérification** à 6 chiffres :
+   `SHA-256(champs("ona/sas/v1", computer_key, phone_key, code, phone_nonce, computer_nonce))`, 4 premiers octets en
+   entier gros-boutiste, modulo 1 000 000, sur 6 chiffres. La clé du téléphone est fixée (engagement) avant que
+   `computer_nonce` existe : un intermédiaire ne peut plus chercher une clé qui donne le même code (une chance sur un
+   million par QR). L'ordinateur n'enregistre le téléphone qu'après la confirmation de la personne, qui a 5 minutes
+   (au-delà, nouveau QR). Entre la révélation et ce clic, toute requête reçoit 403 `not paired` : le téléphone
+   affiche le code et attend. L'écran de l'ordinateur dit de refuser si le téléphone n'affiche aucun code.
+5. Le téléphone garde dans le Trousseau (cet appareil seulement) : `pairing_id`, `onion`, `computer_key`, `name`,
+   `token`, son compteur, la référence de sa clé Secure Enclave.
+
+## Lectures (jeton)
+
+- `POST /v1/chats/list` `{"token", "nonce"}` → `{"mode", "chats": [{"id", "title", "updated_at", "preview",
+  "status": "idle | working | waiting"}]}`, la plus récente d'abord.
+- `POST /v1/chats/{id}/view` `{"token", "nonce"}` → `{"mode", "chat": {"id", "title", "status",
+  "working": {"tool", "text"} | null, "items": [...]}}`. Éléments : `user` / `agent` (`text`), `activity` (`tool`,
+  `text`), `confirmation` (`pending`, `state` : `pending | accepted | rejected | expired`), `exposure`. Un `kind`
+  inconnu est ignoré.
+
+Sans le bon jeton : 403 `missing or wrong token`. Le jeton ne voyage que dans le flux Tor chiffré.
+
+## Écritures (jeton + signature du téléphone + compteur)
+
+Chaque écriture porte `token`, `pairing_id`, `counter` (entier JSON sans partie décimale, de 1 à 2^53 − 1 =
+9007199254740991, strictement croissant pour cet appairage ; `1.0`, `"1"` ou `true` sont refusés) et `signature` (clé du téléphone, donc Face ID ou code de l'appareil). L'ordinateur enregistre le dernier compteur
+accepté **avant** d'exécuter la requête, y compris après redémarrage : une requête rejouée, ou un compteur qui ne
+monte pas, est refusée (`replayed request`). Le téléphone envoie ses écritures une par une.
+
+- `POST /v1/chats` `{"text", …}` → `{"ok", "chat_id": "chat-<32 hex>"}`.
+  Signature : `champs("ona/message/v1", pairing_id, counter, "", text)`.
+- `POST /v1/chats/{id}/messages` `{"text", …}`. Signature : `champs("ona/message/v1", pairing_id, counter, chat_id, text)`.
+- `POST /v1/chats/{id}/delete` `{…}`. Signature : `champs("ona/delete/v1", pairing_id, counter, chat_id)`.
+- Texte : 1 à 2 000 caractères. Identifiants de conversation aléatoires, jamais réutilisés.
+
+## Confirmations
+
+`pending` (au plus une par conversation) porte `id` (`c-<32 hex>`, aléatoire, émis par l'ordinateur, jamais réutilisé)
+et `content`, le condensé de ce qui est montré :
 
 ```json
-{ "id": "c-1", "kind": "plan", "plan": ["search", "read", "…"] }
-{ "id": "c-2", "kind": "recipient",
+{ "id": "c-…", "kind": "plan", "plan": ["search", "read", "…"], "content": "<hex>" }
+{ "id": "c-…", "kind": "recipient", "content": "<hex>",
   "offers": [ { "firm_id": "cabinet-b", "price_cents": 60000, "delay_days": 10,
                 "source_spans": ["Forfait 600 euros, sous 10 jours"] } ] }
-{ "id": "c-3", "kind": "payment",
+{ "id": "c-…", "kind": "payment", "content": "<hex>",
   "payment": { "to": "cabinet-b.testnet", "amount": "1000000000000000000000000",
                "screen": "Pay 1000000000000000000000000 yoctoNEAR to cabinet-b.testnet",
-               "digest": "<sha256 hex>" } }
+               "digest": "<hex>", "digest_version": 2, "network": "testnet", "contract": "…",
+               "mission_id": "…", "nonce": "<32 hex>" } }
 ```
 
-`exposure` (mission terminée) : même forme que `exposure_report` d'`ona-core` (`outputs`, `refused_by_gate`,
-`firms_contacted`, `payments`, `model_calls`, `mode`).
+Condensés, **recalculés par le téléphone à partir de ce qu'il affiche** (jamais repris de `content`) :
 
-## Appairage (étape 3)
-
-1. L'ordinateur affiche un QR qui contient le texte `ona-pair:` suivi de base64url (sans `=`) d'un JSON :
-
-   ```json
-   { "v": 0, "name": "Ordinateur simulé", "address": "http://192.168.1.20:8790", "onion": null,
-     "computer_key": "<base64, clé publique P-256, X9.63 non compressée, 65 octets>",
-     "code": "<base64url, 16 octets aléatoires, usage unique>" }
-   ```
-
-   `address` sert à l'étape 2 (réseau local). À l'étape 4, `onion` (adresse v3 en `.onion`) la remplace : le téléphone
-   parle alors HTTP/1.0 au port 80 du service onion, par Tor. Quand les deux sont présents, `onion` l'emporte.
-2. Le téléphone crée une clé P-256 dans le Secure Enclave (utilisation protégée par Face ID ou le code) et envoie :
-
-   ```json
-   POST /v0/pair
-   { "code": "<code du QR>", "phone_key": "<base64, X9.63, 65 octets>", "signature": "<base64, ECDSA DER>" }
-   ```
-
-   `signature` porte sur `champs("ona/pair/v0", code, phone_key, computer_key)` (voir plus bas) : elle prouve que le
-   téléphone détient la clé. Réponse : `{"ok": true, "pairing_id": "p-…", "mode": "mock"}`. Le code ne sert qu'une
-   fois.
-3. Les deux côtés affichent un **code de vérification** à 6 chiffres, à comparer à l'œil :
-   `SHA-256(champs("ona/sas/v0", computer_key, phone_key, code))`, 4 premiers octets en entier gros-boutiste,
-   modulo 1 000 000, sur 6 chiffres. Sur un vrai ordinateur, l'appairage n'est accepté qu'après cette comparaison ;
-   le faux ordinateur l'écrit dans son terminal et accepte tout seul.
-4. Le téléphone garde dans le Trousseau (cet appareil seulement, pas de synchronisation iCloud) : `pairing_id`,
-   `address` / `onion`, `computer_key`, `name`, et la référence chiffrée de sa clé Secure Enclave. Rien d'autre.
-
-**Encodage `champs(…)`** : pour chaque champ, sa longueur en u32 petit-boutiste puis ses octets (texte en UTF-8, clés
-en octets bruts, champ absent = longueur 0). Signature ECDSA P-256 avec SHA-256, encodage DER, en base64.
-
-## `POST /v0/confirm`
+- plan : `SHA-256(champs("ona/plan/v1", id, nombre_d_étapes, étape_1, …, étape_n))` ;
+- offres : `SHA-256(champs("ona/offers/v1", id, nombre_d_offres, puis pour chaque offre : firm_id, price_cents,
+  delay_days, nombre_d_extraits, extrait_1, …))` ;
+- paiement (v2, commun avec `ona-core`) :
+  `digest = SHA-256(champs("ona/pay/v2", network, contract, mission_id, nonce, to, amount))`, et `content = digest`.
+  Ce sont les octets du garde-fou d'`ona-core` : l'app bureau reprend les six champs de la réponse de
+  `prepare_payment`, vérifie le condensé et les transmet tels quels avec `screen`. `to` et `amount` doivent être ceux
+  de `screen`. Le montant est calculé par `ona-core` (prix de l'offre choisie × taux de la politique), pas par l'app.
+  L'ancien condensé (`to` et `amount` seuls, version 0) n'existe plus : `digest_version` vaut toujours 2, le téléphone
+  refuse toute autre valeur. `to` doit avoir la forme d'un compte NEAR (2 à 64 caractères `a-z 0-9 . _ -`).
 
 ```json
-{ "id": "c-3", "decision": "accept | reject", "firm": "cabinet-b", "digest": "<sha256 hex>",
-  "pairing_id": "p-…", "signature": "<base64, ECDSA DER>" }
+POST /v1/confirm
+{ "id": "c-…", "decision": "accept | reject", "firm": "cabinet-b", "digest": "<hex>",
+  "token": "…", "pairing_id": "p-…", "counter": 12, "signature": "<base64>", "nonce": "<hex>" }
 ```
 
-- `firm` : obligatoire pour `recipient` accepté.
-- `digest` : obligatoire pour `payment` accepté. **Le téléphone recalcule le condensé** à partir de `to` et `amount`
-  (même octets qu'`ona-core` : longueur de `to` en u32 petit-boutiste, `to` en UTF-8, `amount` en u128
-  petit-boutiste, puis SHA-256) et refuse d'afficher un paiement dont le condensé ne correspond pas.
-- `signature` (étape 3) : sur `champs("ona/confirm/v0", pairing_id, id, decision, firm, digest)`, avec la clé du
-  téléphone appairé. L'ordinateur refuse une confirmation non signée, mal signée, ou d'un appairage inconnu.
-  Chaque signature demande Face ID (ou le code) sur le téléphone.
-- Réponse : `{"ok": true, "mode": "mock"}` ou `{"ok": false, "error": "…", "mode": "mock"}`. Une confirmation dont
-  `id` n'est plus celle attendue est refusée (`"stale confirmation"`) : une signature ne peut pas être rejouée sur
-  une autre confirmation.
+- `firm` : obligatoire pour `recipient` accepté ; `digest` : obligatoire pour `payment` accepté.
+- `signature` : `champs("ona/confirm/v1", pairing_id, counter, id, decision, firm, digest, content)`, où `content`
+  est le condensé recalculé par le téléphone. L'ordinateur met à sa place le condensé de ce qu'il a demandé : si le
+  téléphone a affiché autre chose (autre plan, autres prix), la signature ne vérifie pas.
+- L'ordinateur refuse une confirmation dont `id` n'est plus attendue (`stale confirmation`), un `id` déjà exécuté
+  (`replayed request`, même après redémarrage) et un compteur qui ne monte pas. Une réponse refusée par l'agent (par
+  exemple une empreinte fausse) ne bloque pas la confirmation : le téléphone peut répondre à nouveau, avec un
+  nouveau compteur.
 
-## Conversations (branche `ios-chat`)
+**Correction de la version 0** : le brouillon v0 affirmait qu'une signature ne pouvait pas être rejouée. C'était faux :
+les identifiants `chat-N-c-M` repartaient de 1 à chaque mission et à chaque redémarrage, aucune requête n'avait de
+compteur, et l'empreinte du paiement ne dépendait que du destinataire et du montant. Une mission entière, paiement
+compris, pouvait être rejouée.
 
-Le téléphone peut aussi **demander** quelque chose à l'agent, sous forme de conversation. Les conversations vivent
-sur l'ordinateur ; le téléphone les affiche et n'en garde rien sur son disque.
+## Limites connues
 
-- `GET /v0/chats` → `{"mode", "chats": [{"id", "title", "updated_at", "preview", "status": "idle | working | waiting"}]}`,
-  la plus récente d'abord.
-- `GET /v0/chats/{id}` → `{"mode", "chat": {"id", "title", "status", "working": {"tool", "text"} | null, "items": [...]}}`.
-  Chaque élément a `id`, `at`, `kind` :
-  `user` / `agent` (`text`), `activity` (`tool` : `think`, `search`, `read`, `compare`, `contact`, `prepare_payment`,
-  `pay` ; `text`), `confirmation` (`pending` comme plus haut, `state` : `pending | accepted | rejected | expired`),
-  `exposure` (`exposure` comme plus haut). Un `kind` inconnu est ignoré par l'app.
-- `POST /v0/chats` `{"text", "pairing_id", "signature"}` → `{"ok", "chat_id"}` : nouvelle conversation.
-- `POST /v0/chats/{id}/messages` `{"text", "pairing_id", "signature"}` : message dans une conversation.
-- `POST /v0/chats/{id}/delete` `{"pairing_id", "signature"}` : suppression (POST plutôt que DELETE, pour le pont Tor).
-- Signatures : `champs("ona/message/v0", pairing_id, chat_id, text)` (`chat_id` vide pour une nouvelle conversation) et
-  `champs("ona/delete/v0", pairing_id, chat_id)`. Texte : 1 à 2 000 caractères, sans fichier ni image.
-- Les confirmations d'une conversation passent par `POST /v0/confirm` comme avant ; leurs `id` sont uniques sur
-  toutes les conversations.
-
-Le faux ordinateur rejoue la mission de démonstration (avocat) pour **toute** demande : c'est une simulation de
-l'affichage, pas un agent.
-
-## Routes du faux ordinateur seulement
-
-- `POST /v0/mock/start` : démarre une mission de démonstration.
-- `POST /v0/mock/reset` : efface la mission.
-- `GET /v0/mock/pairing` : le texte du QR d'appairage (pour le coller dans le simulateur, qui n'a pas de caméra).
-
-## Questions pour Hugo
-
-1. Le téléphone parle-t-il à `ona-core` à travers `dispatch(json)` (mêmes commandes) ou à une API dédiée comme
-   celle-ci ? Ici, l'ordinateur garde la main sur l'ordre des étapes et le téléphone ne fait que confirmer.
-2. Qui avance la mission entre deux confirmations : `ona-core` seul, ou faut-il un « continuer » du téléphone ?
-3. Montant en yoctoNEAR (chaîne décimale) : l'app affiche aussi la valeur en NEAR. D'accord ?
-4. Signature et appairage (étape 3) : d'accord avec les octets signés et le code de vérification ci-dessus ?
-   Côté ordinateur, il faut afficher le QR, montrer le code à 6 chiffres et garder la clé du téléphone.
-5. `GET /v0/state` n'est pas encore authentifié : à l'étape 4, l'autorisation client Tor (restricted discovery)
-   limiterait l'accès au `.onion` au téléphone appairé. À confirmer.
+- Un ordinateur compromis fait ce qu'il veut : la signature du téléphone est vérifiée par l'app bureau, pas par
+  `ona-core` ni par la chaîne. Un téléphone volé déverrouillé lit tout ; chaque écriture demande encore Face ID ou le
+  code de l'appareil.
+- En mode réseau local (développement), le jeton et les requêtes passent en clair.
+- Qui copie la clé du service onion peut publier la même adresse ; il ne peut pas signer les réponses (clé de
+  l'ordinateur), mais il voit les requêtes du téléphone (chiffrées par Tor jusqu'à lui).

@@ -2,48 +2,65 @@ import Foundation
 import Testing
 @testable import ONA
 
-// Digest printed by ona-core's `ona demo` (branch main, 2026-11-10) for 1 NEAR to cabinet-b.testnet.
-private let onaCoreDemoDigest = "a43ba249fbdd55a64a0647282b6dff66d660a1d8a8d75a8fbf3533bfa450fa31"
 private let oneNEAR = "1000000000000000000000000"
+/// Payment digest v2 vector from the desktop apps' tests (NOTE-POUR-ENZO §7).
+let paymentV2Digest = "ee00b991ccc819a4b64630c245ae7e281ef98d74f0eb971b1ff4dd9290957950"
 
-private func demoPayment(to: String = "cabinet-b.testnet", amount: String = oneNEAR,
-                         screen: String? = nil, digest: String = onaCoreDemoDigest) -> PaymentRequest {
-    PaymentRequest(to: to, amount: amount, screen: screen ?? "Pay \(amount) yoctoNEAR to \(to)", digest: digest)
+func demoPayment(to: String = "cabinet-b.testnet", amount: String = oneNEAR, screen: String? = nil,
+                 digest: String = paymentV2Digest, version: Int? = 2, nonce: String? = "00112233445566778899aabbccddeeff")
+    -> PaymentRequest {
+    PaymentRequest(to: to, amount: amount, screen: screen ?? "Pay \(amount) yoctoNEAR to \(to)", digest: digest,
+                   digestVersion: version, network: "testnet", contract: "pay.ona.testnet", missionId: "m-1",
+                   nonce: nonce)
 }
 
-@Suite("Payment check")
+@Suite("Payment check (digest v2)")
 struct PaymentCheckTests {
-    @Test func digestMatchesOnaCore() {
-        #expect(PaymentCheck.digest(to: "cabinet-b.testnet", amount: NEARAmount.yoctoPerNEAR) == onaCoreDemoDigest)
-    }
-
-    @Test func byteLayout() {
-        let bytes = PaymentCheck.bytes(to: "ab", amount: 1)
-        #expect(Array(bytes) == [2, 0, 0, 0, 0x61, 0x62, 1] + Array(repeating: 0, count: 15))
+    @Test func digestMatchesTheDesktopVector() {
+        #expect(SignedFields.paymentDigest(network: "testnet", contract: "pay.ona.testnet", missionID: "m-1",
+                                           nonce: "00112233445566778899aabbccddeeff", to: "cabinet-b.testnet",
+                                           amount: oneNEAR) == paymentV2Digest)
     }
 
     @Test func acceptsTheDemoPayment() throws {
         let verified = try PaymentCheck.verify(demoPayment()).get()
-        #expect(verified.digest == onaCoreDemoDigest)
+        #expect(verified.digest == paymentV2Digest)
         #expect(verified.to == "cabinet-b.testnet")
+        #expect(verified.amount == NEARAmount.yoctoPerNEAR)
     }
 
-    @Test func refusesAnotherRecipientWithTheSameDigest() {
+    @Test func refusesAnotherRecipientOrAmountWithTheSameDigest() {
         #expect(PaymentCheck.verify(demoPayment(to: "attacker.testnet")) == .failure(.digestMismatch))
-    }
-
-    @Test func refusesAnotherAmountWithTheSameDigest() {
         #expect(PaymentCheck.verify(demoPayment(amount: "2000000000000000000000000")) == .failure(.digestMismatch))
     }
 
+    @Test func aNewNonceGivesANewDigest() {
+        // The same recipient and amount, another payment: the old digest does not fit.
+        #expect(PaymentCheck.verify(demoPayment(nonce: "ffeeddccbbaa99887766554433221100")) == .failure(.digestMismatch))
+    }
+
+    @Test func refusesTheOldDigestAndOtherVersions() {
+        let old = "a43ba249fbdd55a64a0647282b6dff66d660a1d8a8d75a8fbf3533bfa450fa31"
+        #expect(PaymentCheck.verify(demoPayment(digest: old)) == .failure(.digestMismatch))
+        #expect(PaymentCheck.verify(demoPayment(version: nil)) == .failure(.unsupportedVersion))
+        #expect(PaymentCheck.verify(demoPayment(version: 1)) == .failure(.unsupportedVersion))
+        #expect(PaymentCheck.verify(demoPayment(nonce: nil)) == .failure(.missingField))
+    }
+
     @Test func refusesAScreenThatSaysSomethingElse() {
-        let request = demoPayment(screen: "Pay 1 NEAR to your lawyer")
-        #expect(PaymentCheck.verify(request) == .failure(.screenMismatch))
+        #expect(PaymentCheck.verify(demoPayment(screen: "Pay 1 NEAR to your lawyer")) == .failure(.screenMismatch))
     }
 
     @Test func refusesAnUnreadableAmount() {
         #expect(PaymentCheck.verify(demoPayment(amount: "1e24")) == .failure(.badAmount))
         #expect(PaymentCheck.verify(demoPayment(amount: "-1")) == .failure(.badAmount))
+        #expect(PaymentCheck.verify(demoPayment(amount: "+1")) == .failure(.badAmount))
+    }
+
+    @Test(arguments: ["Cabinet-B.testnet", "cabinet\u{202e}b.testnet", "a", String(repeating: "a", count: 65),
+                      "cabinet b.testnet", "саbinet-b.testnet"])
+    func showsOnlyNearAccounts(to: String) {
+        #expect(PaymentCheck.verify(demoPayment(to: to)) == .failure(.badAccount))
     }
 
     @Test(arguments: [
@@ -61,66 +78,38 @@ struct PaymentCheckTests {
 
 @Suite("Messages")
 struct MessageTests {
-    static let waitingForPayment = Data("""
-    {"mode":"mock","computer":{"name":"Ordinateur simulé"},
-     "mission":{"id":"m-1","title":"Trouver un avocat","phase":"waiting",
-       "steps":[{"step":"search","status":"done"},{"step":"confirm_payment","status":"current"},
-                {"step":"teleport","status":"pending"}],
-       "events":[{"at":1762790000,"text":"En attente"}],
-       "pending":{"id":"c-3","kind":"payment","payment":{"to":"cabinet-b.testnet","amount":"\(oneNEAR)",
-         "screen":"Pay \(oneNEAR) yoctoNEAR to cabinet-b.testnet","digest":"\(onaCoreDemoDigest)"}},
-       "exposure":null}}
-    """.utf8)
-
-    private func decode<T: Decodable>(_ type: T.Type, _ data: Data) throws -> T {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(type, from: data)
-    }
-
-    @Test func decodesAPaymentConfirmation() throws {
-        let state = try decode(ComputerState.self, Self.waitingForPayment)
-        #expect(state.isSimulation)
-        let mission = try #require(state.mission)
-        #expect(mission.phase == .waiting)
-        #expect(mission.steps.map(\.step) == [.search, .confirmPayment, .unknown("teleport")])
-        let pending = try #require(mission.pending)
-        guard case .payment(let payment) = pending.request else {
-            Issue.record("expected a payment")
-            return
-        }
-        #expect(payment.digest == onaCoreDemoDigest)
-    }
-
-    @Test func decodesARecipientChoice() throws {
+    @Test func decodesARecipientChoiceWithItsContent() throws {
         let json = Data("""
-        {"id":"c-2","kind":"recipient","offers":[{"firm_id":"cabinet-b","specialties":["labour"],
+        {"id":"c-2","kind":"recipient","content":"5127","offers":[{"firm_id":"cabinet-b","specialties":["labour"],
           "price_cents":60000,"delay_days":10,"source_spans":["Forfait 600 euros, sous 10 jours"]}]}
         """.utf8)
-        let pending = try decode(Pending.self, json)
+        let pending = try ProtocolCoding.decoder.decode(Pending.self, from: json)
+        #expect(pending.content == "5127")
         #expect(pending.request == .recipient([
             Offer(firmId: "cabinet-b", priceCents: 60000, delayDays: 10, sourceSpans: ["Forfait 600 euros, sous 10 jours"]),
         ]))
     }
 
-    @Test func realModeIsNotASimulation() throws {
-        let state = try decode(ComputerState.self, Data(#"{"mode":"real","computer":{"name":"Mac"},"mission":null}"#.utf8))
-        #expect(!state.isSimulation)
+    @Test func decodesAPaymentV2() throws {
+        let json = Data("""
+        {"id":"c-3","kind":"payment","content":"\(paymentV2Digest)","payment":{"to":"cabinet-b.testnet",
+          "amount":"\(oneNEAR)","screen":"Pay \(oneNEAR) yoctoNEAR to cabinet-b.testnet","digest":"\(paymentV2Digest)",
+          "digest_version":2,"network":"testnet","contract":"pay.ona.testnet","mission_id":"m-1",
+          "nonce":"00112233445566778899aabbccddeeff"}}
+        """.utf8)
+        let pending = try ProtocolCoding.decoder.decode(Pending.self, from: json)
+        guard case .payment(let payment) = pending.request else { Issue.record("payment"); return }
+        #expect(payment == demoPayment())
     }
 
-    @Test func unknownModeCountsAsSimulation() throws {
-        let state = try decode(ComputerState.self, Data(#"{"mode":"test","computer":{"name":"Mac"},"mission":null}"#.utf8))
-        #expect(state.isSimulation)
+    @Test func stepsKeepTheirProtocolNames() throws {
+        let steps = try ProtocolCoding.decoder.decode([Step].self, from: Data(#"["search","confirm_payment","teleport"]"#.utf8))
+        #expect(steps == [.search, .confirmPayment, .unknown("teleport")])
+        #expect(steps.map(\.raw) == ["search", "confirm_payment", "teleport"])
     }
 
-    @Test func confirmationEncodesSnakeCaseFieldsOnly() throws {
-        var body = ConfirmationAnswer(id: "c-3", decision: .accept, digest: "ab")
-        body.pairingId = "p-1"
-        let object = try JSONSerialization.jsonObject(with: ProtocolCoding.encoder.encode(body)) as? [String: Any]
-        #expect(object?["id"] as? String == "c-3")
-        #expect(object?["decision"] as? String == "accept")
-        #expect(object?["digest"] as? String == "ab")
-        #expect(object?["pairing_id"] as? String == "p-1")
-        #expect(object?["firm"] == nil)
+    @Test func modes() throws {
+        #expect(try ProtocolCoding.decoder.decode([Mode].self, from: Data(#"["mock","real","test"]"#.utf8))
+                .map(\.isSimulation) == [true, false, true])
     }
 }

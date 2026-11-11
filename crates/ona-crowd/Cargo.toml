@@ -9,11 +9,15 @@ license = "MIT"
 ona-deploy = { path = "../ona-deploy" }
 ona-near = { path = "../ona-near" }
 ona-token = { path = "../ona-token" }
-anyhow = "1"
-base64 = "0.22"
-bs58 = "0.5"
-ed25519-dalek = "2"
-rand = "0.8"
-rand_chacha = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+anyhow = "=1.0.104"
+base64 = "=0.22.1"
+bs58 = "=0.5.1"
+ed25519-dalek = "=2.2.0"
+rand = "=0.8.8"
+rand_chacha = "=0.3.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+zeroize = "=1.9.1"
+
+[dev-dependencies]
+ona-near = { path = "../ona-near", features = ["testing"] }

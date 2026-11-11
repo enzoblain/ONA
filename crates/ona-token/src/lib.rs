@@ -7,7 +7,7 @@
 //! cannot reach a scalar multiplication or a pairing.
 
 use blst::*;
-use ed25519_dalek::{Signature as EdSignature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature as EdSignature, Signer, SigningKey, VerifyingKey};
 use rand::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 
@@ -44,10 +44,70 @@ impl core::fmt::Display for TokenError {
 }
 impl std::error::Error for TokenError {}
 
-fn zero_scalar(s: &mut blst_scalar) {
-    for byte in s.b.iter_mut() {
+/// Overwrites `bytes` with zeros in a way the compiler cannot remove.
+pub fn wipe(bytes: &mut [u8]) {
+    for byte in bytes.iter_mut() {
         // SAFETY: `byte` is a valid exclusive reference. Volatile so the wipe is not optimized out.
         unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+fn zero_scalar(s: &mut blst_scalar) {
+    wipe(&mut s.b);
+}
+
+/// Fixed-size secret bytes, wiped when dropped. Copies made by the caller are not reached.
+pub struct Secret<const N: usize>([u8; N]);
+
+impl<const N: usize> Secret<N> {
+    pub fn new(bytes: [u8; N]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn wipe(&mut self) {
+        wipe(&mut self.0);
+    }
+}
+
+impl<const N: usize> core::ops::Deref for Secret<N> {
+    type Target = [u8; N];
+    fn deref(&self) -> &[u8; N] {
+        &self.0
+    }
+}
+
+impl<const N: usize> core::ops::DerefMut for Secret<N> {
+    fn deref_mut(&mut self) -> &mut [u8; N] {
+        &mut self.0
+    }
+}
+
+impl<const N: usize> Drop for Secret<N> {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+/// Variable-length secret bytes, wiped when dropped. Never grown, so no stale copy is left behind.
+pub struct SecretVec(Vec<u8>);
+
+impl SecretVec {
+    pub fn wipe(&mut self) {
+        wipe(&mut self.0);
+    }
+}
+
+impl core::ops::Deref for SecretVec {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for SecretVec {
+    fn drop(&mut self) {
+        self.wipe();
     }
 }
 
@@ -61,10 +121,16 @@ impl Drop for SecretKey {
 }
 
 impl SecretKey {
+    /// The caller owns this copy and must wipe it; prefer `to_secret`.
     pub fn to_bytes(&self) -> [u8; 32] {
-        let mut out = [0u8; 32];
+        *self.to_secret()
+    }
+
+    /// The key bytes, big-endian, in a buffer wiped on drop.
+    pub fn to_secret(&self) -> Secret<32> {
+        let mut out = Secret::new([0u8; 32]);
         // SAFETY: `out` holds the 32 bytes written; `self.0` is initialized.
-        unsafe { blst_bendian_from_scalar(out.as_mut_ptr(), &self.0) };
+        unsafe { blst_bendian_from_scalar(out.0.as_mut_ptr(), &self.0) };
         out
     }
 
@@ -193,13 +259,12 @@ fn pairing_eq(sig: &blst_p1_affine, msg_point: &blst_p1_affine, pk: &blst_p2_aff
 
 /// Generates a mint key from 32 bytes of the given CSPRNG.
 pub fn keygen<R: RngCore + CryptoRng>(rng: &mut R) -> SecretKey {
-    let mut ikm = [0u8; 32];
-    rng.fill_bytes(&mut ikm);
-    let mut s = blst_scalar::default();
+    let mut ikm = Secret::new([0u8; 32]);
+    rng.fill_bytes(&mut ikm[..]);
+    let mut key = SecretKey(blst_scalar::default());
     // SAFETY: `ikm` is 32 bytes as declared; the empty `info` is null with length 0.
-    unsafe { blst_keygen(&mut s, ikm.as_ptr(), ikm.len(), core::ptr::null(), 0) };
-    ikm.iter_mut().for_each(|b| *b = 0);
-    SecretKey(s)
+    unsafe { blst_keygen(&mut key.0, ikm.as_ptr(), ikm.len(), core::ptr::null(), 0) };
+    key
 }
 
 /// Domain separation tag for hashing a token message.
@@ -226,21 +291,22 @@ pub fn blind<R: RngCore + CryptoRng>(
     dst: &[u8],
     rng: &mut R,
 ) -> (BlindingFactor, [u8; G1_LEN]) {
-    let mut wide = [0u8; 64];
-    let mut r = blst_scalar::default();
+    let mut wide = Secret::new([0u8; 64]);
+    // Built in place, so no copy of the scalar is left on the stack.
+    let mut r = BlindingFactor(blst_scalar::default());
     loop {
-        rng.fill_bytes(&mut wide);
+        rng.fill_bytes(&mut wide[..]);
         // SAFETY: `wide` is 64 bytes as declared. Reduces mod the group order, false when zero.
-        if unsafe { blst_scalar_from_be_bytes(&mut r, wide.as_ptr(), wide.len()) } {
+        if unsafe { blst_scalar_from_be_bytes(&mut r.0, wide.as_ptr(), wide.len()) } {
             break;
         }
     }
-    wide.iter_mut().for_each(|b| *b = 0);
+    drop(wide);
     let h = hash_jacobian(m, dst);
     let mut b = blst_p1::default();
     // SAFETY: the scalar buffer holds 255 bits in little-endian form.
-    unsafe { blst_p1_mult(&mut b, &h, r.b.as_ptr(), 255) };
-    (BlindingFactor(r), compress_g1(&b))
+    unsafe { blst_p1_mult(&mut b, &h, r.0.b.as_ptr(), 255) };
+    (r, compress_g1(&b))
 }
 
 /// Signer side: `S' = sk * B`. Refuses anything but a valid subgroup point.
@@ -407,9 +473,8 @@ pub struct ChangeOut {
     pub blinded: [u8; G1_LEN],
 }
 
-/// What the token owner signs to authorize a `spend`. Every variable-length field is hashed or
-/// counted, so two different requests cannot share an encoding. The submitter is bound so that
-/// nobody can replay the arguments from another account and take the fee.
+/// Legacy `ONA-SPEND-V2` digest, without expiry. `ona-mint` no longer accepts it: use
+/// `spend_digest_until`.
 #[allow(clippy::too_many_arguments)]
 pub fn spend_digest(
     contract: &str,
@@ -441,8 +506,46 @@ pub fn spend_digest(
     h.finalize().into()
 }
 
-/// What the token owner signs to redeem. Without it, anyone who sees a token could force its exit
-/// and collect the fee, cancelling a payment in flight.
+/// What the token owner signs to authorize a `spend` (`ONA-SPEND-V3`). Every variable-length
+/// field is hashed or counted, so two different requests cannot share an encoding. The submitter
+/// is bound so that nobody can replay the arguments from another account and take the fee.
+/// `expires_at` is the last NEAR block timestamp (nanoseconds) at which the contract accepts it,
+/// so a submitter cannot hold a signed payment and run it days later.
+#[allow(clippy::too_many_arguments)]
+pub fn spend_digest_until(
+    contract: &str,
+    submitter: &str,
+    denom_id: u8,
+    nf: &[u8; 32],
+    to: &str,
+    amount: u128,
+    fee: u128,
+    change: &[ChangeOut],
+    expires_at: u64,
+) -> [u8; 32] {
+    let contract_hash = sha256(&[contract.as_bytes()]);
+    let submitter_hash = sha256(&[submitter.as_bytes()]);
+    let to_hash = sha256(&[to.as_bytes()]);
+    let mut h = Sha256::new();
+    h.update(b"ONA-SPEND-V3");
+    h.update(contract_hash);
+    h.update(submitter_hash);
+    h.update([denom_id]);
+    h.update(nf);
+    h.update(to_hash);
+    h.update(amount.to_le_bytes());
+    h.update(fee.to_le_bytes());
+    h.update((change.len() as u32).to_le_bytes());
+    for out in change {
+        h.update([out.denom_id]);
+        h.update(out.blinded);
+    }
+    h.update(expires_at.to_le_bytes());
+    h.finalize().into()
+}
+
+/// Legacy `ONA-REDEEM-V1` digest, without expiry. `ona-mint` no longer accepts it: use
+/// `redeem_digest_until`.
 pub fn redeem_digest(contract: &str, submitter: &str, nf: &[u8; 32]) -> [u8; 32] {
     sha256(&[
         b"ONA-REDEEM-V1",
@@ -452,7 +555,20 @@ pub fn redeem_digest(contract: &str, submitter: &str, nf: &[u8; 32]) -> [u8; 32]
     ])
 }
 
-/// What the token owner signs to let the named relay collect the token.
+/// What the token owner signs to redeem (`ONA-REDEEM-V2`). Without it, anyone who sees a token
+/// could force its exit and collect the fee, cancelling a payment in flight.
+pub fn redeem_digest_until(contract: &str, submitter: &str, nf: &[u8; 32], expires_at: u64) -> [u8; 32] {
+    sha256(&[
+        b"ONA-REDEEM-V2",
+        &sha256(&[contract.as_bytes()]),
+        &sha256(&[submitter.as_bytes()]),
+        nf,
+        &expires_at.to_le_bytes(),
+    ])
+}
+
+/// Legacy `ONA-CLAIM-V1` digest, without expiry. `ona-mint` no longer accepts it: use
+/// `claim_digest_until`.
 pub fn claim_digest(mint: &str, relay: &str, nf: &[u8; 32]) -> [u8; 32] {
     sha256(&[
         b"ONA-CLAIM-V1",
@@ -462,15 +578,33 @@ pub fn claim_digest(mint: &str, relay: &str, nf: &[u8; 32]) -> [u8; 32] {
     ])
 }
 
+/// What the token owner signs to let the named relay collect the token (`ONA-CLAIM-V2`).
+pub fn claim_digest_until(mint: &str, relay: &str, nf: &[u8; 32], expires_at: u64) -> [u8; 32] {
+    sha256(&[
+        b"ONA-CLAIM-V2",
+        &sha256(&[mint.as_bytes()]),
+        &sha256(&[relay.as_bytes()]),
+        nf,
+        &expires_at.to_le_bytes(),
+    ])
+}
+
 pub fn sign_digest(owner: &SigningKey, digest: &[u8; 32]) -> [u8; 64] {
     owner.sign(digest).to_bytes()
 }
 
+/// True if `pk` is not a usable owner key: not a valid encoding, or a point of small order, for
+/// which a trivial signature verifies on any message under a non-strict verifier.
+pub fn is_weak_owner_key(pk: &[u8; 32]) -> bool {
+    VerifyingKey::from_bytes(pk).map_or(true, |key| key.is_weak())
+}
+
+/// Strict ed25519 check (`verify_strict`): refuses small-order keys and non-canonical signatures.
 pub fn verify_digest(pk: &[u8; 32], digest: &[u8; 32], sig: &[u8; 64]) -> bool {
     let Ok(key) = VerifyingKey::from_bytes(pk) else {
         return false;
     };
-    key.verify(digest, &EdSignature::from_bytes(sig)).is_ok()
+    key.verify_strict(digest, &EdSignature::from_bytes(sig)).is_ok()
 }
 
 /// A token waiting for the signer's blinded answer. Holds the owner key and the blinding factor.
@@ -478,7 +612,7 @@ pub struct PendingToken {
     pub denom_id: u8,
     pub blinded: [u8; G1_LEN],
     owner: SigningKey,
-    nonce: [u8; 32],
+    nonce: Secret<32>,
     r: BlindingFactor,
     dst: Vec<u8>,
 }
@@ -486,14 +620,20 @@ pub struct PendingToken {
 impl PendingToken {
     /// Everything needed to finish this token after a restart. Secret: holds the owner key and
     /// the blinding factor. It must be written, encrypted, before the deposit is sent.
+    /// The caller owns this copy and must wipe it; prefer `to_secret_vec`.
     pub fn to_secret_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(98 + self.dst.len());
-        out.push(self.denom_id);
-        out.extend_from_slice(&self.owner.to_bytes());
-        out.extend_from_slice(&self.nonce);
-        out.extend_from_slice(&self.r.0.b);
-        out.push(self.dst.len() as u8);
-        out.extend_from_slice(&self.dst);
+        self.to_secret_vec().to_vec()
+    }
+
+    /// As `to_secret_bytes`, in a buffer wiped on drop.
+    pub fn to_secret_vec(&self) -> SecretVec {
+        let mut out = SecretVec(Vec::with_capacity(98 + self.dst.len()));
+        out.0.push(self.denom_id);
+        out.0.extend_from_slice(Secret::new(self.owner.to_bytes()).as_slice());
+        out.0.extend_from_slice(&self.nonce[..]);
+        out.0.extend_from_slice(&self.r.0.b);
+        out.0.push(self.dst.len() as u8);
+        out.0.extend_from_slice(&self.dst);
         out
     }
 
@@ -505,15 +645,16 @@ impl PendingToken {
         if bytes[0] > MAX_DENOM_ID {
             return Err(TokenError::BadDenom);
         }
-        let seed: [u8; 32] = bytes[1..33].try_into().map_err(|_| TokenError::BadLength)?;
-        let nonce: [u8; 32] = bytes[33..65].try_into().map_err(|_| TokenError::BadLength)?;
-        let mut r = blst_scalar::default();
-        r.b.copy_from_slice(&bytes[65..97]);
+        let mut seed = Secret::new([0u8; 32]);
+        seed.copy_from_slice(&bytes[1..33]);
+        let mut nonce = Secret::new([0u8; 32]);
+        nonce.copy_from_slice(&bytes[33..65]);
+        let mut r = BlindingFactor(blst_scalar::default());
+        r.0.b.copy_from_slice(&bytes[65..97]);
         // SAFETY: `r` is initialized. Rejects zero and values >= the group order.
-        if !unsafe { blst_sk_check(&r) } {
+        if !unsafe { blst_sk_check(&r.0) } {
             return Err(TokenError::BadSecretKey);
         }
-        let r = BlindingFactor(r);
         let owner = SigningKey::from_bytes(&seed);
         let dst = bytes[98..].to_vec();
         let m = message(bytes[0], owner.verifying_key().as_bytes(), &nonce);
@@ -533,8 +674,8 @@ impl PendingToken {
             return Err(TokenError::BadDenom);
         }
         let owner = SigningKey::generate(rng);
-        let mut nonce = [0u8; 32];
-        rng.fill_bytes(&mut nonce);
+        let mut nonce = Secret::new([0u8; 32]);
+        rng.fill_bytes(&mut nonce[..]);
         let m = message(denom_id, owner.verifying_key().as_bytes(), &nonce);
         let (r, blinded) = blind(&m, dst, rng);
         Ok(Self {
@@ -558,7 +699,7 @@ impl PendingToken {
         let token = Token {
             denom_id: self.denom_id,
             pk: self.owner.verifying_key().to_bytes(),
-            nonce: self.nonce,
+            nonce: *self.nonce,
             sig,
         };
         if !verify_token(denom_pk, &token, &self.dst) {

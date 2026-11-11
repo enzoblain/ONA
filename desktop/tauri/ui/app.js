@@ -112,9 +112,9 @@ function drawPhone(state) {
       el("h3", {}, "Code à vérifier"),
       el("p", { class: "help" }, "Le téléphone doit afficher le même code :"),
       el("div", { class: "code" }, `${code.slice(0, 3)} ${code.slice(3)}`),
-      el("p", { class: "help" }, "Si les codes diffèrent, quelqu'un s'est peut-être interposé : refusez."),
+      el("p", { class: "help" }, "Si les codes diffèrent, ou si le téléphone n'affiche aucun code, quelqu'un s'est peut-être interposé : refusez. Ce code expire au bout de 5 minutes."),
       el("div", { class: "card-actions actions" },
-        el("button", { class: "secondary", onclick: () => run("forget_phone").then(refresh) }, "Ils diffèrent"),
+        el("button", { class: "secondary", onclick: () => run("forget_phone").then(refresh) }, "Refuser"),
         el("button", { class: "primary", onclick: () => run("confirm_code").then(refresh) }, "Les codes sont identiques")),
     );
   } else if (state.phone) {
@@ -133,12 +133,14 @@ function drawPhone(state) {
     body.replaceChildren(el("p", { class: "help" }, waitingReason(state)));
   }
 
+  // The local-network mode exists in development builds only.
+  document.querySelector(".segmented").hidden = !state.local_mode_available;
   for (const button of document.querySelectorAll(".segmented button")) {
     button.classList.toggle("on", button.dataset.mode === state.mode);
   }
   $("mode-help").textContent = state.mode === "tor"
     ? "Le serveur écoute seulement sur cet ordinateur (127.0.0.1) et est publié en service .onion par Tor."
-    : "Le serveur écoute sur le réseau local. À réserver aux tests : l'adresse est visible sur ce réseau.";
+    : "Version de développement : le serveur écoute sur le réseau local, en clair. Tout appareil de ce réseau voit les échanges.";
   $("reachable").textContent = state.reachable ? `Adresse : ${state.reachable}` : "";
   $("server-error").hidden = !state.server_error;
   $("server-error").textContent = state.server_error || "";

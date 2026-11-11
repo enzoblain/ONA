@@ -65,6 +65,46 @@ fn malformed_requests_are_refused() {
 }
 
 #[test]
+fn requests_a_proxy_could_read_differently_are_refused() {
+    let raws: [&[u8]; 8] = [
+        b"POST /x HTTP/1.1\r\nContent-Length: +2\r\n\r\nhi",
+        b"POST /x HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 2\r\n\r\nhi",
+        b"POST /x HTTP/1.1\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\nhi",
+        b"POST /x HTTP/1.1\r\nContent-Length: 2 \r\nContent-Length:2\r\n\r\nhi",
+        b"POST /x HTTP/1.0\r\nContent-Length: 2\r\n\r\nhi",
+        b"POST /x HTTP/1.1 extra\r\nContent-Length: 2\r\n\r\nhi",
+        b"POST /x\r\nContent-Length: 2\r\n\r\nhi",
+        b"POST /x HTTP/1.1\r\nno colon here\r\nContent-Length: 2\r\n\r\nhi",
+    ];
+    let port = start(raws.len());
+    for raw in raws {
+        assert_eq!(send(port, raw).0, 400, "{}", String::from_utf8_lossy(raw));
+    }
+}
+
+#[test]
+fn slow_headers_are_cut_by_their_own_deadline() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (done, finished) = channel();
+    thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let limits = Limits { headers: Duration::from_millis(200), read: Duration::from_secs(5), write: Duration::from_secs(1) };
+        let started = Instant::now();
+        serve_request_with(stream, limits, &mut ok_handler);
+        done.send(started.elapsed()).unwrap();
+    });
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    client.write_all(b"GET /x HTTP/1.1\r\n").unwrap();
+    let elapsed = finished.recv_timeout(Duration::from_secs(3)).expect("cut before the whole-request deadline");
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    let mut out = String::new();
+    let _ = client.read_to_string(&mut out);
+    assert_eq!(out.split_whitespace().nth(1), Some("408"));
+}
+
+#[test]
 fn too_many_headers_are_refused() {
     let port = start(1);
     let mut raw = b"POST /chat HTTP/1.1\r\n".to_vec();
@@ -110,12 +150,15 @@ fn a_client_sending_a_byte_at_a_time_is_cut_by_the_global_deadline() {
     let (done, finished) = channel();
     thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        let limits = Limits { read: Duration::from_millis(300), write: Duration::from_secs(1) };
+        let limits =
+            Limits { headers: Duration::from_millis(300), read: Duration::from_millis(300), write: Duration::from_secs(1) };
         serve_request_with(stream, limits, &mut ok_handler);
         done.send(()).unwrap();
     });
 
     let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    // Set before the server closes: on macOS, setting it on a closed socket fails with EINVAL.
+    client.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
     let started = Instant::now();
     let mut outcome = Err(RecvTimeoutError::Timeout);
     // Each byte arrives well within the time of a single read, so only a global deadline stops this.
@@ -125,7 +168,6 @@ fn a_client_sending_a_byte_at_a_time_is_cut_by_the_global_deadline() {
     }
     assert!(outcome.is_ok(), "the connection was still being served after 3 s");
 
-    client.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
     let mut out = String::new();
     let _ = client.read_to_string(&mut out);
     assert_eq!(out.split_whitespace().nth(1), Some("408"));

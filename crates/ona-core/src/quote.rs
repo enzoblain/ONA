@@ -9,7 +9,12 @@
 //! - the event log replays to the quote's RTMR3, and its `os-image-hash` and `compose-hash` events
 //!   name a listed OS image and the hash of the reported `app_compose`;
 //! - `report_data` is `signing_address || nonce` and `mr_config_id` is `0x01 || compose hash || zeros`;
-//! - the enclave is not in debug mode.
+//! - the enclave is not in debug mode;
+//! - the Intel verifier's TCB status is one the caller accepts, and its collateral is not older than
+//!   the caller allows. The report fields are read from the body the verifier returns.
+//!
+//! `dcap-qvl` was not available offline when this was written, so `IntelQuoteVerifier` still has no
+//! implementation and this module is not called by the client.
 //!
 //! **The GPU evidence is not bound to the TDX quote.** Its nonce only shows it is fresh. A relay can
 //! copy a genuine payload from another machine next to its own quote, so NVIDIA's verdict says nothing
@@ -36,10 +41,37 @@ const MR_CONFIG_TAG: u8 = 0x01;
 const COMPOSE_EVENT: &str = "compose-hash";
 const OS_IMAGE_EVENT: &str = "os-image-hash";
 
-/// Verifies a TDX quote's signature chain up to Intel's root and its TCB status, with Intel's
-/// collateral. Must return `Ok` only for a quote it fully verified. Meant for `dcap-qvl`.
+/// The TCB levels an Intel verifier reports, named as in Intel's DCAP documentation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TcbStatus {
+    UpToDate,
+    SwHardeningNeeded,
+    ConfigurationNeeded,
+    ConfigurationAndSwHardeningNeeded,
+    OutOfDate,
+    OutOfDateConfigurationNeeded,
+    Revoked,
+    /// Any other value, kept as written by the verifier. Never accepted unless listed.
+    Other(String),
+}
+
+/// What a full Intel verification returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntelVerdict {
+    pub tcb_status: TcbStatus,
+    /// Intel security advisory ids that apply to this platform, as reported.
+    pub advisory_ids: Vec<String>,
+    /// When the collateral used (TCB info, QE identity) was issued, in Unix seconds.
+    pub collateral_issued_at: u64,
+    /// The TD report body (584 bytes) the verifier checked the signature over.
+    pub report_body: Vec<u8>,
+}
+
+/// Verifies a TDX quote's signature chain up to Intel's root, with Intel's collateral, and returns
+/// what it found. Must return `Ok` only for a quote whose signature chain it fully verified; the
+/// TCB status and the collateral date are then judged by `Policy`. Meant for `dcap-qvl`.
 pub trait IntelQuoteVerifier {
-    fn verify(&self, quote: &[u8]) -> Result<(), String>;
+    fn verify(&self, quote: &[u8]) -> Result<IntelVerdict, String>;
 }
 
 /// Sends the GPU evidence to NVIDIA's attestation service (NRAS). Must return `Ok` only when the
@@ -60,7 +92,16 @@ pub struct Measurements {
 pub struct Policy<'a> {
     pub systems: &'a [Measurements],
     pub compose_hashes: &'a [[u8; 32]],
+    /// TCB statuses accepted from the Intel verifier.
+    pub accepted_tcb: &'a [TcbStatus],
+    /// Oldest collateral accepted, in seconds before `now_unix`.
+    pub max_collateral_age_secs: u64,
+    /// The time the collateral age is judged at, in Unix seconds.
+    pub now_unix: u64,
 }
+
+/// Collateral dated more than this after `now_unix` is refused: the clocks disagree too much.
+const MAX_CLOCK_SKEW_SECS: u64 = 300;
 
 fn unhex<const N: usize>(s: &str) -> [u8; N] {
     decode_hex(s).and_then(|b| b.try_into().ok()).expect("constant is valid hex of the right length")
@@ -110,14 +151,21 @@ struct TdReport<'a> {
     report_data: &'a [u8],
 }
 
-fn parse_quote(quote: &[u8]) -> Result<TdReport<'_>, String> {
+fn check_quote_header(quote: &[u8]) -> Result<(), String> {
     if quote.len() < HEADER_LEN + BODY_LEN {
         return Err("quote is too short".into());
     }
     if u16::from_le_bytes([quote[0], quote[1]]) != TDX_QUOTE_VERSION || quote[4..8] != TEE_TYPE_TDX {
         return Err("not a TDX version 4 quote".into());
     }
-    let body = &quote[HEADER_LEN..HEADER_LEN + BODY_LEN];
+    Ok(())
+}
+
+/// Reads the fields from a TD report body, the one the Intel verifier returned.
+fn parse_body(body: &[u8]) -> Result<TdReport<'_>, String> {
+    if body.len() != BODY_LEN {
+        return Err("the verified report body has the wrong length".into());
+    }
     let field = |offset: usize, len: usize| &body[offset..offset + len];
     Ok(TdReport {
         td_attributes: field(TD_ATTRIBUTES, 8),
@@ -212,8 +260,21 @@ pub fn verify_model_attestation(
     }
 
     let quote = attestation["intel_quote"].as_str().and_then(decode_hex).ok_or("intel_quote is missing or not hex")?;
-    intel.verify(&quote)?;
-    let report = parse_quote(&quote)?;
+    let verdict = intel.verify(&quote)?;
+    check_quote_header(&quote)?;
+    if !policy.accepted_tcb.contains(&verdict.tcb_status) {
+        return Err(format!("TCB status {:?} is not accepted", verdict.tcb_status));
+    }
+    if verdict.collateral_issued_at > policy.now_unix.saturating_add(MAX_CLOCK_SKEW_SECS) {
+        return Err("Intel collateral is dated in the future".into());
+    }
+    if policy.now_unix.saturating_sub(verdict.collateral_issued_at) > policy.max_collateral_age_secs {
+        return Err("Intel collateral is too old".into());
+    }
+    if verdict.report_body[..] != quote[HEADER_LEN..HEADER_LEN + BODY_LEN] {
+        return Err("the verifier returned another report than the quote's".into());
+    }
+    let report = parse_body(&verdict.report_body)?;
     if report.td_attributes[0] & 1 != 0 {
         return Err("enclave runs in debug mode".into());
     }

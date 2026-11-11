@@ -4,7 +4,7 @@
 <dict>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- Step 2 talks plain HTTP to the mock computer on the local network only. -->
+		<!-- Debug only: plain HTTP to a computer on the local network (development). Release uses Info-Release.plist. -->
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>

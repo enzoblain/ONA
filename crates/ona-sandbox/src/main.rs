@@ -1,6 +1,13 @@
 //! Deploys `ona-mint` on a local `near-sandbox` node, runs every method with real transactions,
 //! prints the gas burnt and checks the reserve after each step. It then runs the real signer loop
 //! and the real relay exchange against the same node.
+//!
+//! `NEAR_SANDBOX_BIN_PATH` must name a `near-sandbox` binary: without it the `near-sandbox` library
+//! downloads one and runs it without checking a checksum, which this program refuses.
+#![forbid(unsafe_code)]
+
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
@@ -9,12 +16,12 @@ use ed25519_dalek::SigningKey;
 use ona_near::{Action, Client, Outcome};
 use ona_server::mock::MockModel;
 use ona_server::near::NearRelayChain;
-use ona_server::{Config, MemoryStore, Relay};
+use ona_server::{exchange_digest, system_time_ns, Config, MemoryStore, Relay};
 use ona_signer::near::NearChain;
 use ona_signer::{KeyStore, MemoryDurable, Signer};
 use ona_token::{
-    blind, claim_digest, keygen, redeem_digest, sign_blinded, sign_digest, spend_digest, token_dst, unblind,
-    ChangeOut, PendingToken, SecretKey, Token, G1_LEN, G2_LEN,
+    blind, claim_digest_until, keygen, redeem_digest_until, sign_blinded, sign_digest, spend_digest_until, token_dst,
+    unblind, ChangeOut, PendingToken, SecretKey, Token, G1_LEN, G2_LEN,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -25,6 +32,12 @@ const MILLI: u128 = NEAR / 1000;
 const UNIT: u128 = 100 * MILLI;
 const STORAGE_PER_TOKEN: u128 = MILLI;
 const ISSUE_FEE_PER_TOKEN: u128 = 2 * MILLI;
+const HOUR_NS: u64 = 3_600_000_000_000;
+/// The most tokens one deposit may hold, and claims one `relay_claim` may carry (`ona-mint`).
+const MAX_ISSUE: usize = 32;
+const MAX_CLAIM: usize = 28;
+/// Read timeout of the two-endpoint reader. Both endpoints are the same local node here.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const WASM: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/wasm32-unknown-unknown/contract/ona_mint.wasm"
@@ -114,14 +127,22 @@ impl Env {
             .collect()
     }
 
+    /// An owner signature valid for one hour of block time.
+    fn expiry(&self) -> Result<u64> {
+        Ok(self.chain.final_timestamp()?.saturating_add(HOUR_NS))
+    }
+
     fn redeem(&mut self, t: &Token, owner: &SigningKey) -> Result<Outcome> {
         let (bob, mint) = (self.bob.clone(), self.mint.clone());
-        let d = redeem_digest(&mint, &bob, &t.nullifier());
-        self.chain.call(&bob, &mint, "redeem", json!({"token":token_json(t),"owner_sig":b64(&sign_digest(owner, &d))}), 0)
+        let expires_at = self.expiry()?;
+        let d = redeem_digest_until(&mint, &bob, &t.nullifier(), expires_at);
+        let args = json!({"token":token_json(t),"owner_sig":b64(&sign_digest(owner, &d)),"expires_at":expires_at.to_string()});
+        self.chain.call(&bob, &mint, "redeem", args, 0)
     }
 
     fn spend_call(&mut self, t: &Token, owner: &SigningKey, to: &str, amount: u128, fee: u128, change: &[ChangeOut]) -> Result<Outcome> {
-        let d = spend_digest(&self.mint, &self.relay, t.denom_id, &t.nullifier(), to, amount, fee, change);
+        let expires_at = self.expiry()?;
+        let d = spend_digest_until(&self.mint, &self.relay, t.denom_id, &t.nullifier(), to, amount, fee, change, expires_at);
         let change_json: Vec<Value> = change.iter().map(|c| json!({"denom_id":c.denom_id,"blinded":b64(&c.blinded)})).collect();
         let (relay, mint) = (self.relay.clone(), self.mint.clone());
         self.chain.call(
@@ -131,14 +152,45 @@ impl Env {
             json!({
                 "token":token_json(t),"owner_sig":b64(&sign_digest(owner, &d)),"to":to,
                 "amount":amount.to_string(),"fee":fee.to_string(),"change":change_json,
+                "expires_at":expires_at.to_string(),
             }),
             0,
         )
     }
 }
 
+/// The local node binary to run. Refuses to go on without one, so the library never downloads and runs an
+/// unchecked binary.
+fn sandbox_binary(value: Option<OsString>) -> Result<PathBuf> {
+    let path = PathBuf::from(value.filter(|v| !v.is_empty()).ok_or_else(|| {
+        anyhow!("set NEAR_SANDBOX_BIN_PATH to a near-sandbox binary you have checked (docs/INSTALL.md)")
+    })?);
+    if !path.is_file() {
+        bail!("NEAR_SANDBOX_BIN_PATH does not name a file: {}", path.display());
+    }
+    Ok(path)
+}
+
+/// Decodes lowercase or uppercase hexadecimal, refusing an odd length or another character.
+fn from_hex(text: &str) -> Result<Vec<u8>> {
+    if text.len() % 2 != 0 || !text.is_ascii() {
+        bail!("not hexadecimal: {text}");
+    }
+    (0..text.len()).step_by(2).map(|i| Ok(u8::from_str_radix(&text[i..i + 2], 16)?)).collect()
+}
+
+/// The 32-byte seed of an `ed25519:<base58>` key in the 64-byte form.
+fn key_seed(secret: &str) -> Result<[u8; 32]> {
+    let raw = bs58::decode(secret.trim_start_matches("ed25519:")).into_vec()?;
+    if raw.len() != 64 {
+        bail!("the genesis key is not a 64-byte ed25519 key");
+    }
+    Ok(raw[..32].try_into()?)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    sandbox_binary(std::env::var_os("NEAR_SANDBOX_BIN_PATH"))?;
     let config = near_sandbox::SandboxConfig {
         additional_config: Some(json!({"telemetry": {"endpoints": []}})),
         ..Default::default()
@@ -151,8 +203,7 @@ async fn main() -> Result<()> {
     let genesis = near_sandbox::GenesisAccount::default();
     let root = genesis.account_id.to_string();
     let secret = genesis.private_key.to_string();
-    let raw = bs58::decode(secret.trim_start_matches("ed25519:")).into_vec()?;
-    let seed: [u8; 32] = raw[..32].try_into()?;
+    let seed = key_seed(&secret)?;
     let chain = Client::new(&rpc_url, SigningKey::from_bytes(&seed));
 
     let sub = |name: &str| format!("{name}.{root}");
@@ -196,13 +247,13 @@ async fn main() -> Result<()> {
     e.rows.push(("deploy + new (4 denominations)".into(), o.tgas));
     e.check_reserve("deploy")?;
 
-    for n in [1usize, 2, 8, 64] {
+    for n in [1usize, 2, 8, MAX_ISSUE] {
         e.issue(0, n)?;
     }
 
     // redeem pays the owner's implicit account, which did not exist before.
     let mut batch = e.issue(1, 8)?;
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let implicit = hex(&t.pk);
     if e.chain.balance(&implicit)?.is_some() {
         bail!("implicit account unexpectedly exists");
@@ -216,7 +267,7 @@ async fn main() -> Result<()> {
     println!("double redeem refused: {}", o.failure.is_some());
     e.check_reserve("double redeem")?;
 
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let mut forged = t.clone();
     forged.nonce[0] ^= 1;
     let o = e.redeem(&forged, &owner)?;
@@ -228,7 +279,7 @@ async fn main() -> Result<()> {
     e.check_reserve("outside callback")?;
 
     // spend without change
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let fee = 20 * MILLI;
     let before = e.chain.balance(&bob)?.unwrap_or(0);
     let o = e.spend_call(&t, &owner, &bob, (UNIT << 1) - fee, fee, &[])?;
@@ -236,7 +287,7 @@ async fn main() -> Result<()> {
     println!("spend paid the recipient: {} yocto", e.chain.balance(&bob)?.unwrap_or(0) - before);
 
     // spend with change, then the change is issued and redeemed
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let pending = PendingToken::new(&mut OsRng, 0, &e.dst).map_err(|x| anyhow!("{x}"))?;
     let change = [ChangeOut { denom_id: 0, blinded: pending.blinded }];
     let fee = 50 * MILLI;
@@ -256,7 +307,7 @@ async fn main() -> Result<()> {
     e.record("redeem the change", &o)?;
 
     // spend to an account that does not exist
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let ghost = format!("ghost-does-not-exist.{root}");
     let before = e.chain.balance(&mint)?.unwrap_or(0);
     let fee = 20 * MILLI;
@@ -272,13 +323,14 @@ async fn main() -> Result<()> {
     e.check_reserve("spend to missing account")?;
 
     // relay batches
-    for n in [1usize, 8, 32] {
-        let tokens = e.issue(2, if n == 1 { 1 } else { n })?;
+    for n in [1usize, 8, MAX_CLAIM] {
+        let tokens = e.issue(2, n)?;
+        let expires_at = e.expiry()?;
         let items: Vec<Value> = tokens
             .iter()
             .map(|(t, o)| {
-                let d = claim_digest(&mint, &relay, &t.nullifier());
-                json!({"token":token_json(t),"owner_sig":b64(&sign_digest(o, &d))})
+                let d = claim_digest_until(&mint, &relay, &t.nullifier(), expires_at);
+                json!({"token":token_json(t),"owner_sig":b64(&sign_digest(o, &d)),"expires_at":expires_at.to_string()})
             })
             .collect();
         let o = e.chain.call(&relay, &mint, "relay_claim", json!({"items":items}), 0)?;
@@ -296,7 +348,14 @@ async fn main() -> Result<()> {
         .map(|k| SecretKey::from_bytes(&k.to_bytes()))
         .collect::<Result<_, _>>()
         .map_err(|x| anyhow!("{x}"))?;
-    let mut near_chain = NearChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), e.signer.clone(), mint.clone());
+    // One local node read twice: the agreement check passes trivially here; the programs refuse this.
+    let reads = || -> Result<_> {
+        Ok(ona_signer::crossrpc::CrossRpc::new(
+            ona_signer::crossrpc::HttpRpc::new(&rpc_url, READ_TIMEOUT).map_err(|x| anyhow!(x))?,
+            ona_signer::crossrpc::HttpRpc::new(&rpc_url, READ_TIMEOUT).map_err(|x| anyhow!(x))?,
+        ))
+    };
+    let mut near_chain = NearChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), reads()?, e.signer.clone(), mint.clone());
     let mut signer_loop = Signer::new(KeyStore::from_keys(keys), MemoryDurable::default());
     signer_loop.check_keys(&mut near_chain).map_err(|x| anyhow!(x))?;
     let mut issued = false;
@@ -320,7 +379,12 @@ async fn main() -> Result<()> {
 
     // The real relay: credit claimed on chain, request tokens signed, then one model call.
     let (credit, credit_owner) = e.issue(0, 1)?.pop().ok_or_else(|| anyhow!("no credit"))?;
-    let relay_chain = NearRelayChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), relay.clone(), mint.clone());
+    let relay_reads = ona_server::crossrpc::CrossRpc::new(
+        ona_server::crossrpc::HttpRpc::new(&rpc_url, READ_TIMEOUT).map_err(|x| anyhow!(x))?,
+        ona_server::crossrpc::HttpRpc::new(&rpc_url, READ_TIMEOUT).map_err(|x| anyhow!(x))?,
+    );
+    let relay_chain =
+        NearRelayChain::new(Client::new(&rpc_url, SigningKey::from_bytes(&seed)), relay_reads, relay.clone(), mint.clone());
     let config = Config {
         mint: mint.clone(),
         relay: relay.clone(),
@@ -328,20 +392,28 @@ async fn main() -> Result<()> {
         credit_key: e.pks[0],
         tokens_per_credit: 2,
         max_tokens_per_request: 100,
+        max_prompt_bytes: 100,
     };
     let mut relay_node = Relay::new(MemoryStore::default(), relay_chain, MockModel, config, keygen(&mut OsRng));
     let request_dst = relay_node.request_dst().to_vec();
     let mut wallet = Vec::new();
+    let mut points: Vec<[u8; G1_LEN]> = Vec::new();
     for _ in 0..2 {
         let mut x = [0u8; 32];
         OsRng.fill_bytes(&mut x);
         let (r, point) = blind(&x, &request_dst, &mut OsRng);
+        points.push(point);
         wallet.push((x, r, hex(&point)));
     }
-    let digest = claim_digest(&mint, &relay, &credit.nullifier());
+    // The relay checks expiry against this machine's clock, the contract against block time.
+    let expires_at = system_time_ns().saturating_add(24 * HOUR_NS);
+    let digest = claim_digest_until(&mint, &relay, &credit.nullifier(), expires_at);
+    let exchange = exchange_digest(&mint, &relay, &credit.nullifier(), &points);
     let body = json!({
         "token": hex(&credit.to_bytes()),
         "owner_sig": hex(&sign_digest(&credit_owner, &digest)),
+        "expires_at": expires_at.to_string(),
+        "exchange_sig": hex(&sign_digest(&credit_owner, &exchange)),
         "blinded": wallet.iter().map(|w| w.2.clone()).collect::<Vec<_>>(),
     });
     let (status, reply) = relay_node.exchange(&body);
@@ -359,10 +431,7 @@ async fn main() -> Result<()> {
     println!("nullifier recorded as claimed by the relay: {spent_by_relay}");
 
     let sig_hex = reply["signatures"][0].as_str().ok_or_else(|| anyhow!("no signature"))?;
-    let sig_bytes: Vec<u8> = (0..sig_hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&sig_hex[i..i + 2], 16))
-        .collect::<Result<_, _>>()?;
+    let sig_bytes = from_hex(sig_hex)?;
     let blind_sig: [u8; G1_LEN] = sig_bytes.try_into().map_err(|_| anyhow!("bad signature length"))?;
     let unblinded = unblind(&blind_sig, &wallet[0].1).map_err(|x| anyhow!("{x}"))?;
     let mut request_token = wallet[0].0.to_vec();
@@ -391,4 +460,32 @@ async fn main() -> Result<()> {
     let s = e.chain.view(&mint, "reserve_status", json!({}))?;
     println!("\nfinal reserve: {s}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Without a binary of its own, the program stops before the library can download one.
+    #[test]
+    fn a_local_binary_is_required() {
+        assert!(sandbox_binary(None).is_err());
+        assert!(sandbox_binary(Some(OsString::new())).is_err());
+        assert!(sandbox_binary(Some(OsString::from("/nonexistent/near-sandbox"))).is_err());
+        let file = std::env::temp_dir().join(format!("ona-sandbox-bin-{}", std::process::id()));
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(sandbox_binary(Some(file.clone().into_os_string())).unwrap(), file);
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn malformed_inputs_are_errors_not_panics() {
+        assert_eq!(from_hex("0aFf").unwrap(), [0x0a, 0xff]);
+        assert!(from_hex("abc").is_err());
+        assert!(from_hex("zz").is_err());
+        assert!(from_hex("é1").is_err());
+        assert!(key_seed("ed25519:abc").is_err());
+        let key = bs58::encode([7u8; 64]).into_string();
+        assert_eq!(key_seed(&format!("ed25519:{key}")).unwrap(), [7u8; 32]);
+    }
 }

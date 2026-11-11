@@ -16,12 +16,51 @@ contact a professional, make a payment), and asks for your explicit confirmation
 
 The difference is who sees what. ONA is designed so that no single party gets both who you are and what you asked:
 
-- **the model** reads your request with names replaced by pseudonyms, inside an enclave (NEAR AI Cloud);
+- **the model** reads your request with the names and identifiers you declare replaced by pseudonyms, inside an enclave (NEAR AI
+  Cloud). Until this client verifies the enclave's quotes, the relay in front of the model can read the request and make up replies;
 - **websites and the people the agent contacts** see Tor traffic and a generic message, not you;
 - **payments** use blind tokens: the mint that holds your deposit cannot link it to what you pay for;
 - **your phone** talks to your own computer over Tor, and the agent runs on that computer, not on our servers.
 
-After each mission, ONA shows an **exposure report**: every party that received something, and exactly what it received.
+After each mission, ONA shows an **exposure report**: every party that received something, how many requests and how many bytes
+it received (not the content itself).
+
+### What pseudonyms cover
+
+Before any text goes to the model (the planner and the page reader), `ona-core` replaces every occurrence of each protected term
+(the terms of the policy and those declared when the mission is opened: names, case numbers, company names) with a random 12-letter
+pseudonym such as `KQXMZBTRWLDN` (letters only, so it can never be read as a price). The model's reply is put back locally, whatever
+the case of the pseudonym. The table stays on the computer and is forgotten when the mission closes. A text that still contains a
+protected term after replacement is refused, not sent.
+
+Texts and terms are compared on a normalized view:
+
+- HTML tags and comments are removed (`<br>`, `<p>`, `<div>`, `<li>`, `<tr>` count as a line break). Pages reach the reader exactly as
+  the web layer returns them: today the web is a fake that returns plain text, and a real one may return HTML, so tags are handled
+  either way.
+- One level of decoding: numeric HTML references (with or without `;`, any number of leading zeros, `&#128;` to `&#159;` read as
+  Windows-1252 like browsers do); named references of Latin-1 (also without `;`), Latin Extended-A, common punctuation and invisible
+  characters (`&ZeroWidthSpace;`, `&NoBreak;`, `&it;`...); URL escapes (`%70`), bytes that are not valid UTF-8 being dropped.
+- Unicode default-ignorable characters (soft hyphens, zero-width spaces and joiners, direction marks, variation selectors...) and the
+  line separators U+2028, U+2029, U+0085 are removed.
+- A dash or a soft hyphen at the end of a line, between letters, may be there or not: `Du-` / `pont` matches "Dupont", and `Jean-` /
+  `Luc` matches "Jean-Luc".
+- These dashes become `-`: U+002D, U+058A, U+05BE, U+1400, U+1806, U+2010 to U+2015, U+2043, U+2053, U+207B, U+208B, U+2212, U+2E17,
+  U+2E1A, U+2E3A, U+2E3B, U+2E40, U+2E5D, U+301C, U+3030, U+30A0, U+FE31, U+FE32, U+FE58, U+FE63, U+FF0D, U+10EAD, U+02D7, U+2796.
+  These apostrophes become `'`: U+0027, U+0060, U+00B4, U+02B9, U+02BB to U+02BE, U+0384, U+055A, U+05F3, U+1FBD, U+1FBF, U+1FEF,
+  U+1FFD, U+2018, U+2019, U+201B, U+2032, U+2035, U+A78B, U+A78C, U+FF07, U+FF40.
+- Unicode NFKD (full-width and mathematical letters, ligatures), every combining mark removed (accents never matter: "ELODIE" matches
+  "Élodie"; stray underline or strike-through marks are ignored), lowercase, `ß` read as `ss`.
+- Every run of white space (spaces, tabs, line breaks, no-break spaces) is one space: "Jean\nDupont" matches "Jean Dupont".
+
+A term matches as a whole word ("Ali" is not replaced in "alibi"); a term written `*between asterisks*` matches inside words too.
+
+**Not covered:** a term you did not declare; a term written another way (misspelled, abbreviated, inflected, initials, nickname,
+transliterated, a rephrasing); a name split by a line break without a hyphen (`Du` / `pont`); look-alike letters from another script
+(Cyrillic `у` in "Dupont"); small capitals and other letters that NFKD does not fold; escapes nested twice or more (`%2570`,
+`&amp;#112;`, `%26%23112%3B`); `+` written for a space in a URL; HTML named references outside the sets above (such as `&Dopf;`); a
+numeric reference whose digits run into the next letters (`&#x2019Brien` reads `&#x2019B`, as a browser does); and the context around
+a name (job, city, dates, a rare situation), which can be enough to identify someone.
 
 This is the design. Today the model, the web and the payments in the app are still fakes; see
 [what works today](#what-works-today) and the [known limitations](#known-limitations).
@@ -38,7 +77,7 @@ with the content, but the account, the network address, the payment and the agen
 
 | Component | Role | Language |
 |---|---|---|
-| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Reaches the network through a local `tor` over SOCKS5 (`ona-tor`) | Rust |
+| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Planned to reach the network through a local `tor` over SOCKS5 (`ona-tor`); today `ona real` connects to the relay directly | Rust |
 | Desktop app | Connects a NEAR wallet for deposits, starts missions, asks for confirmations, shows the exposure report | Swift (SwiftUI) on macOS; Rust + Tauri with HTML/JavaScript on Windows and Linux; both on `ona-core` (to be confirmed) |
 | iOS app | Remote control of the computer over Tor: mission progress and confirmations. Holds no tokens and no pseudonym table | Swift |
 | `ona-server` | Thin relay in a TEE (Phala dstack): holds the NEAR AI Cloud key, enforces a flat request size, submits transactions | Rust |
@@ -60,20 +99,20 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-token` blind BLS tokens | done | native tests |
 | `ona-mint` contract | done, gas measured ([SPEC](SPEC.md#measured-gas)) | mocked NEAR VM with real BLS and ed25519 host functions, and a local NEAR node |
 | `ona-registry` contract | done | mocked NEAR VM only |
-| `ona-pool` contract: listed staking vaults, share notes, switching vaults without an exit, exits only to depositors, 7-day escape | done, never deployed, lending not implemented | mocked NEAR VM only, never against a real staking pool |
+| `ona-pool` contract: listed staking vaults, cash notes with no vault and share notes, exits that name no vault, only to depositors, exit limits that grow only on money still in the pool, 7-day escape | done, never deployed, lending not implemented | mocked NEAR VM only, never against a real staking pool |
 | `ona-crowd` crowd simulator for the pool demo | simulation and vault-privacy measure done; the NEAR runner has never run | in-memory chain only |
-| `ona-anchor` hourly journal anchoring, auditor key sealing in `ona-core` | library done, no program receives leaves yet | fake registry only, never on a NEAR node |
-| `ona-deploy` deployment tool | done, refuses mainnet, testnet not tried yet | unit tests |
-| `ona-near` RPC client | done | unit tests, and a local NEAR node through `ona-sandbox` |
+| `ona-anchor` hourly journal anchoring, chained checkpoints and their audit, auditor key sealing in `ona-core` | library done, no program receives leaves yet, the agent does not submit checkpoints yet | fake registry only, never on a NEAR node |
+| `ona-deploy` deployment tool | done; refuses mainnet from the names, the parent account and the chain id the node reports; checks the roles and the deployed code hash; testnet not tried yet | unit tests |
+| `ona-near` RPC client | done; https only (except a local node, or an onion address through Tor), only final results are read, failed receipts are listed apart from the transaction status, an unclear send is looked up by its hash and never sent twice. Trusts its RPC node | unit tests against a fake node, and a local NEAR node through `ona-sandbox` before these changes |
 | `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
 | `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done; the `ona-relay` program has not run yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
-| `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
+| `ona-wallet` encrypted wallet file | done, keychain not wired in; a wallet without its seal file is refused by design (`open_adopting_unsealed` adopts one explicitly) | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
-| Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol; no wallet yet | Mac tests with the real `ona-core`, one end-to-end run with the iOS simulator on the local network ([notes](docs/desktop/app.md)) |
-| Desktop app (`desktop/tauri`, Windows and Linux) | same features and protocol as the macOS app, in Rust with Tauri; no wallet yet | Rust tests with the real `ona-core`, one end-to-end run with the iOS simulator on the local network, run on macOS. Never built or run on Windows or Linux ([notes](docs/desktop/tauri.md)) |
+| Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol v1 (commit-then-reveal pairing, signed replies, token for reads, counter against replays, signed content of each confirmation); local-network mode in debug builds only; no wallet yet | Core tests with the real `ona-core` (compiled with `swiftc`, not `swift test`); the app target and an end-to-end run with protocol v1 not done ([notes](docs/desktop/app.md)) |
+| Desktop app (`desktop/tauri`, Windows and Linux) | same features and protocol v1 as the macOS app, in Rust with Tauri; no wallet yet | Rust tests of every module but `main.rs` with the real `ona-core`, run on macOS; one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network, on macOS. Never built or run on Windows or Linux ([notes](docs/desktop/tauri.md)) |
 | iOS app (`ios/`) | Tor (Arti embedded): an earlier test build reached a test onion service; the Tor screen is now a tab of the app | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
-| iOS app (`ios/`) | chat-style conversations with the agent, QR pairing and signed messages and confirmations against a mock computer, labelled `mode: mock` (the mock replays one demo mission for any request). Over Tor (Arti), pairing, polling and a signed confirmation passed once end to end in the simulator. The Secure Enclave key path has not run on a device yet | iOS simulator (software key), unit tests on the Mac ([notes](docs/ios/app.md)) |
+| iOS app (`ios/`) | chat-style conversations with the agent over protocol v1: commit-then-reveal QR pairing, every reply of the computer checked with its key, a token for reads, a counter and a low-s signature for writes, confirmations signed over the digest of what the phone shows, payment digest v2. The mock computer speaks v1 too, labelled `mode: mock`. Over Tor (Arti), one full v1 mission passed against the Tauri app; the first connections to the onion often took more than 60 s. The Secure Enclave key path has not run on a device yet | iOS simulator (software key) against the Tauri app (local network and Tor) and the mock, unit tests on the Mac, vectors shared with the desktop apps ([notes](docs/ios/app.md)) |
 | `ona-tor` client through Tor | library done, no program uses it yet ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
 | Phala enclave | not built | none |
 
@@ -81,39 +120,66 @@ with the content, but the account, the network address, the payment and the agen
 
 Setup and details are in [docs/INSTALL.md](docs/INSTALL.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-`./verify.sh` runs every test and compiles the three contracts. It needs Rust and the `wasm32-unknown-unknown` target, and no key,
-no funded account, no Docker and no browser.
+`./verify.sh` runs every test, compiles the three contracts without local paths and prints their SHA-256. It needs Rust 1.99.1 and the
+`wasm32-unknown-unknown` target, and no key, no funded account, no Docker and no browser.
 
 ```
 cargo run -p ona-core --bin ona -- demo     # a full mission against the fakes
 cargo run -p ona-server --bin ona-mock-relay -- 8787     # a fake relay on localhost for front-end work
 ```
 
-To measure gas on a local node, build the contract as in `verify.sh`, set `NEAR_SANDBOX_BIN_PATH` to a `near-sandbox` binary, and run
-`cargo run -p ona-sandbox`.
+To measure gas on a local node, run `verify.sh`, set `NEAR_SANDBOX_BIN_PATH` to a `near-sandbox` binary you have checked (required: the
+program refuses to let the library download one), and run `cargo run -p ona-sandbox`.
 
 ## Known limitations
 
 - At launch the anonymity set is one, so ONA claims no unlinkability until a measured number of users is published.
 - Deposits are public on chain and show that an account uses ONA.
-- The model enclave reads the pseudonymized prompt by design, under a TEE assumption.
+- Every program trusts the NEAR RPC node it is given: no proof is checked, so a lying node can make the signer sign for a deposit
+  that does not exist. Run your own node for the signer and the relay.
+- The model enclave reads the pseudonymized prompt by design, under a TEE assumption. Pseudonyms replace declared terms only (see
+  [what pseudonyms cover](#what-pseudonyms-cover)).
+- **The relay can read what goes to the model and invent replies.** The client takes the model key from an attestation report that the
+  relay delivers and does not verify the Intel and NVIDIA quotes yet. Every exposure report with a real call says so.
+- The payment confirmation is a digest bound to the network, the contract, the mission, a random nonce, the recipient and the amount
+  of the chosen offer; it proves the caller saw these fields, not that a human did, since it is not signed by a separate device.
 - NEAR AI Cloud keeps one usage row per request.
 - The computer must be on for a mission to progress.
 - The same team would operate the relay, the signer and the anchoring.
+- Anchoring proves that the checkpoints shown form an unbroken chain that existed at those dates. It rules out a second chain with
+  the same key only if the aggregator is honest, kept its records and was not replaced during the mission, and the auditor knows
+  from elsewhere when the mission was opened. It cannot rule out a second history built from the start with another key unless the
+  mission's opening tag was recorded elsewhere, and it proves what the agent wrote, not that it is true.
+- One owner of the registry can replace the other after 30 days unless the other vetoes, so a stolen key is a threat as long as
+  nobody watches for such proposals.
+- Chats are deleted after 24 hours only when the app runs: nothing purges while it is closed. Keys are in a local file outside the
+  chat folder until the keychain is wired in, and overwriting deleted files does not erase them on an SSD or on APFS.
 - Testnet only. The mint has no real-money deployment planned.
 - **A dishonest relay may still be able to read replies.** With encryption version 2, the relay controls which client key the reply is encrypted to.
   The client now uses version 3, which binds the reply key, but this fixes the problem only if the NEAR AI gateway accepts version 3, which is **not verified**.
   Version 3 was tested only against a simulated enclave. A relay running in an attested enclave is not in place yet.
-- The relay serves a fixed pool of connections with per-request deadlines, but a few dozen slow clients can still keep it busy. Do not expose it
-  to the internet yet.
+- The relay serves a fixed pool of 32 connections with per-request deadlines, so 32 slow clients are enough to keep it busy. Do not expose it
+  to the internet yet; behind an onion service, rely on its denial-of-service protection.
+- The signer and the relay read the chain through two RPC endpoints and stop when they disagree. Two endpoints that lie together still
+  decide what gets signed.
 - A stolen signer key can drain the reserve at the speed of the hourly redemption limit. There is no key rotation.
-- An attacker holding tokens can use up a tier's hourly limit and delay exits for that tier.
+- An attacker holding tokens can keep a tier's redemption limit used up and slow exits for that tier (the relay has its own limit).
 
 More in [SPEC.md](SPEC.md).
 
 ## Libraries and AI-generated code
 
-Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`.
+Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`,
+`unicode-normalization`.
+The NEAR client, the deployment tool and the crowd simulator also use `ureq` (with `rustls`), `bs58`, `base64`, `anyhow`, `libc`,
+`zeroize`, `rand` and `rand_chacha`. The relay and the signer use `ureq` 3.5.1 and `zeroize` 1.9.1, pinned exactly. `Cargo.lock` fixes
+every version, and `verify.sh` builds with `--locked`.
+
+Client core (`crates/ona-core`), pinned exactly:
+
+| Library | Version | Used by | Notes |
+|---|---|---|---|
+| `unicode-normalization` | 0.1.26 | `ona-core` (pseudonyms) | NFKD and combining marks, before protected terms are compared |
 
 The code and tests in this repository were written with Claude (Anthropic), under human direction.
 
@@ -134,8 +200,8 @@ Desktop app for Windows and Linux (`desktop/tauri/src-tauri`), pinned exactly (`
 |---|---|---|
 | `tauri` | 2.12.5 | window, web view, commands |
 | `tauri-build` | 2.7.4 | build script |
-| `p256` (RustCrypto) | 0.13.2 | checking the phone's ECDSA P-256 signatures, the computer's key |
-| `sha2` | 0.10.9 | the 6-digit pairing code |
+| `p256` (RustCrypto) | 0.13.2 | checking the phone's ECDSA P-256 signatures, signing replies with the computer's key |
+| `sha2` | 0.10.9 | pairing commitment, 6-digit code, digests of what the phone confirms |
 | `base64` | 0.22.1 | protocol encoding |
 | `rand` | 0.8.8 | pairing codes and ids |
 | `qrcode` | 0.14.1 | pairing QR code (SVG) |

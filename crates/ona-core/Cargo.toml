@@ -23,6 +23,7 @@ ed25519-dalek = { version = "2", features = ["rand_core", "hazmat"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 zeroize = "1"
+unicode-normalization = "=0.1.26"
 
 [dev-dependencies]
 chacha20poly1305 = "0.10"

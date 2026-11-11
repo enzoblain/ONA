@@ -11,11 +11,11 @@ ona-near = { path = "../ona-near" }
 ona-deploy = { path = "../ona-deploy" }
 ona-signer = { path = "../ona-signer" }
 ona-server = { path = "../ona-server" }
-near-sandbox = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-serde_json = "1"
-base64 = "0.22"
-bs58 = "0.5"
-rand = "0.8"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-anyhow = "1"
+near-sandbox = "=0.3.16"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros"] }
+serde_json = "=1.0.154"
+base64 = "=0.22.1"
+bs58 = "=0.5.1"
+rand = "=0.8.8"
+ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
+anyhow = "=1.0.104"

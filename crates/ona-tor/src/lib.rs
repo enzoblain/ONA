@@ -2,12 +2,20 @@
 //!
 //! There is no direct path in this crate: every agent it builds has the proxy set, so if Tor is
 //! down or refuses a connection the request fails. See `docs/TOR.md`.
+//!
+//! Each transport or RPC client gets its own random SOCKS username and password. With Tor's
+//! `IsolateSOCKSAuth` (on by default), streams with different credentials use different circuits;
+//! this is Tor's documented behaviour, not verified here on the real network. Build one transport
+//! per mission so missions do not share a circuit. No `User-Agent` header is sent.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use ona_core::e2ee::Transport;
+use rand::rngs::OsRng;
+use rand::RngCore;
+use ureq::config::AutoHeaderValue;
 use ureq::{Agent, Proxy};
 
 /// Tor's usual SOCKS port. See `docs/torrc.client.example`.
@@ -26,9 +34,14 @@ fn is_onion_v3(host: &str) -> bool {
 /// internet would be readable at the Tor exit, and an IP address cannot pass Tor's `SafeSocks`.
 fn check_destination(url: &str) -> Result<(), String> {
     let (scheme, rest) = url.split_once("://").ok_or("destination has no scheme")?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // A base address needs no query or fragment; appended paths would land inside them.
+    if rest.contains(['?', '#']) {
+        return Err("destination must not have a query or a fragment".into());
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
     let host = match authority.rsplit_once(':') {
-        Some((host, port)) if port.parse::<u16>().is_ok() => host,
+        // Digits only: `"+443".parse::<u16>()` succeeds.
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok() => host,
         Some(_) => return Err("destination has an invalid port".into()),
         None => authority,
     }
@@ -47,6 +60,10 @@ fn check_destination(url: &str) -> Result<(), String> {
     }
     if host.parse::<IpAddr>().is_ok() {
         return Err("destination must be a host name, not an IP address".into());
+    }
+    // These name this machine or a local network, never a destination reached through Tor.
+    if host == "localhost" || host.ends_with(".localhost") || !host.contains('.') {
+        return Err("destination must be a public host name or an onion address".into());
     }
     if host.ends_with(".onion") && !is_onion_v3(&host) {
         return Err("not a valid version 3 onion address".into());
@@ -75,10 +92,16 @@ impl TorProxy {
     }
 
     /// Redirects are off: following one could send a request somewhere the caller did not check.
+    /// New random SOCKS credentials for each agent, so Tor can keep its streams on their own circuit.
     fn agent(&self) -> Result<Agent, String> {
-        let proxy = Proxy::new(&format!("socks5h://{}", self.addr)).map_err(|e| e.to_string())?;
+        let mut random = [0u8; 16];
+        OsRng.fill_bytes(&mut random);
+        let hex: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        let (user, password) = hex.split_at(16);
+        let proxy = Proxy::new(&format!("socks5h://{user}:{password}@{}", self.addr)).map_err(|e| e.to_string())?;
         Ok(Agent::config_builder()
             .proxy(Some(proxy))
+            .user_agent(AutoHeaderValue::None)
             .http_status_as_error(false)
             .max_redirects(0)
             .timeout_global(Some(TIMEOUT))
@@ -137,4 +160,106 @@ impl Transport for TorTransport {
 pub fn near_client(url: &str, key: SigningKey, proxy: &TorProxy) -> Result<ona_near::Client, String> {
     check_destination(url)?;
     Ok(ona_near::Client::with_agent(url, key, proxy.agent()?))
+}
+
+#[cfg(test)]
+mod tests {
+    //! These need a destination that would reach a local canary if traffic escaped the proxy, which
+    //! the destination check now refuses, so they build the transport without it.
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    fn canary() -> (TcpListener, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    fn assert_untouched(listener: &TcpListener) {
+        thread::sleep(Duration::from_millis(200));
+        assert!(listener.accept().is_err(), "a connection bypassed the proxy");
+    }
+
+    fn dead_proxy() -> TorProxy {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        TorProxy::new(&format!("127.0.0.1:{port}")).unwrap()
+    }
+
+    /// A fake proxy: answers the greeting with `reply`, then refuses the connection if asked.
+    /// Returns the proxy and the number of connections it received.
+    fn socks(reply: &'static [u8], refuse_connect: bool) -> (TorProxy, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counted = connections.clone();
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(reply);
+                if refuse_connect {
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
+                }
+            }
+        });
+        (TorProxy::new(&addr.to_string()).unwrap(), connections)
+    }
+
+    fn unchecked(port: u16, proxy: &TorProxy) -> TorTransport {
+        TorTransport { base: format!("https://localhost:{port}"), agent: proxy.agent().unwrap() }
+    }
+
+    #[test]
+    fn fails_closed_when_tor_is_not_running() {
+        let (listener, port) = canary();
+        let mut transport = unchecked(port, &dead_proxy());
+        assert!(transport.get("/", &[]).is_err());
+        assert!(transport.post("/", &[], b"secret").is_err());
+        assert_untouched(&listener);
+    }
+
+    #[test]
+    fn fails_closed_when_tor_refuses_the_connection() {
+        let (listener, port) = canary();
+        let (proxy, connections) = socks(&[5, 0], true);
+        let mut transport = unchecked(port, &proxy);
+        assert!(transport.post("/", &[], b"secret").is_err());
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(connections.load(Ordering::SeqCst), 1, "a refusal must not be retried another way");
+        assert_untouched(&listener);
+    }
+
+    #[test]
+    fn fails_closed_when_the_proxy_does_not_speak_socks() {
+        let (listener, port) = canary();
+        let (proxy, _) = socks(b"HTTP/1.1 400 Bad Request\r\n\r\n", false);
+        let mut transport = unchecked(port, &proxy);
+        assert!(transport.get("/", &[]).is_err());
+        assert_untouched(&listener);
+    }
+
+    #[test]
+    fn near_rpc_fails_closed_when_tor_is_not_running() {
+        let (listener, port) = canary();
+        let agent = dead_proxy().agent().unwrap();
+        let client = ona_near::Client::with_agent(&format!("https://localhost:{port}"), SigningKey::from_bytes(&[7; 32]), agent);
+        assert!(client.post("status", serde_json::json!([])).is_err());
+        assert_untouched(&listener);
+    }
+
+    #[test]
+    fn each_agent_gets_its_own_socks_credentials() {
+        let proxy = TorProxy::new("127.0.0.1:9050").unwrap();
+        let (a, b) = (proxy.agent().unwrap(), proxy.agent().unwrap());
+        let user = |agent: &Agent| agent.config().proxy().and_then(|p| p.username()).map(String::from);
+        assert!(user(&a).is_some());
+        assert_ne!(user(&a), user(&b), "two transports must not share a circuit");
+    }
 }

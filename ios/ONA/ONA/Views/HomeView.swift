@@ -50,6 +50,17 @@ struct ConnectionStatusRow: View {
             } icon: {
                 Image(systemName: viaTor ? "lock.circle.fill" : "checkmark.circle.fill").foregroundStyle(.green)
             }
+        case .awaitingComputer:
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Confirmez sur \(computer ?? "l'ordinateur")")
+                    Text("Cliquez sur « Les codes sont identiques » sur l'ordinateur pour finir l'appairage.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: "hourglass").foregroundStyle(.tint)
+            }
         case .failed(let message):
             Label {
                 Text(message)

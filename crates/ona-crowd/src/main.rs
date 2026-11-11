@@ -2,8 +2,10 @@
 //! `ona-crowd run <config.json> <out-dir>` also plays it on a local NEAR node or testnet, configured
 //! by the environment variables in `docs/INSTALL.md`. Mainnet is refused.
 //!
-//! Both write `timeline.json` (public), `truth.json` (the vault each user chose) and
-//! `keys.json` (private keys, created readable by its owner only). Keys are never printed.
+//! Both write `timeline.json` (public once played), `truth.json` (the vault each user chose) and
+//! `keys.json` (private keys). All three are new files readable by their owner only; an existing file is
+//! never replaced. Keys are never printed. Write them outside the repository.
+#![forbid(unsafe_code)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,23 +13,28 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use ona_crowd::chain::{execute, Chain};
-use ona_crowd::near::{check_settings, NearChain, NearSettings};
+use ona_crowd::near::{agent_needs, check_settings, check_spend, planned_spend, NearChain, NearSettings};
 use ona_crowd::parades::{compare, scenarios, table, yield_scenarios};
-use ona_crowd::{privacy, simulate, simulate_secret, write_keys, Config, EventKind, Simulation};
+use ona_crowd::{privacy, simulate, simulate_secret, write_keys, write_private, Config, EventKind, Simulation};
 use ona_near::load_account_key;
 use rand::rngs::OsRng;
 use rand::RngCore;
 
 const MILLI_NEAR: u128 = 1_000_000_000_000_000_000_000;
+const NEAR: u128 = 1000 * MILLI_NEAR;
+/// What `run` may send from the funder account unless `ONA_CROWD_MAX_SPEND_NEAR` says otherwise.
+const DEFAULT_MAX_SPEND_NEAR: u128 = 10;
 
 fn env(name: &str) -> Result<String> {
     std::env::var(name).map_err(|_| anyhow!("{name} is not set"))
 }
 
+/// A variable left out takes its default. A variable that is set but unreadable is an error, never the default.
 fn env_number<T: std::str::FromStr>(name: &str, default: T) -> Result<T> {
     match std::env::var(name) {
         Ok(value) => value.parse().map_err(|_| anyhow!("{name} is not a number")),
-        Err(_) => Ok(default),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow!("{name} is not valid text")),
     }
 }
 
@@ -39,8 +46,8 @@ fn read_config(path: &str) -> Result<Config> {
 fn write_outputs(sim: &Simulation, config: &Config, dir: &Path) -> Result<()> {
     fs::create_dir_all(dir)?;
     write_keys(&dir.join("keys.json"), &sim.users)?;
-    fs::write(dir.join("timeline.json"), serde_json::to_string_pretty(&sim.timeline)?)?;
-    fs::write(dir.join("truth.json"), serde_json::to_string_pretty(&sim.truth)?)?;
+    write_private(&dir.join("timeline.json"), &serde_json::to_string_pretty(&sim.timeline)?)?;
+    write_private(&dir.join("truth.json"), &serde_json::to_string_pretty(&sim.truth)?)?;
 
     let count = |kind| sim.timeline.iter().filter(|e| e.kind == kind).count();
     let exited = sim.truth.requests.iter().filter(|r| r.withdrawn_at.is_some()).count();
@@ -111,13 +118,16 @@ fn run_offline(config_path: &str, dir: &str) -> Result<()> {
 
 fn run_on_near(config_path: &str, dir: &str) -> Result<()> {
     let mut config = read_config(config_path)?;
+    let network = env("ONA_NETWORK")?;
+    let unit_milli: u128 = env_number("ONA_CROWD_UNIT_MILLI_NEAR", 100)?;
     let settings = NearSettings {
         rpc_url: env("ONA_RPC_URL")?,
-        network: env("ONA_NETWORK")?,
+        chain_id: std::env::var("ONA_CHAIN_ID").unwrap_or_else(|_| network.clone()),
+        network,
         mint: env("ONA_MINT")?,
         funder_account: env("ONA_CROWD_FUNDER_ACCOUNT")?,
         agent_account: env("ONA_CROWD_AGENT_ACCOUNT")?,
-        unit_yocto: env_number::<u128>("ONA_CROWD_UNIT_MILLI_NEAR", 100)? * MILLI_NEAR,
+        unit_yocto: unit_milli.checked_mul(MILLI_NEAR).ok_or_else(|| anyhow!("ONA_CROWD_UNIT_MILLI_NEAR is too large"))?,
     };
     check_settings(&settings, &config.vaults)?;
     if config.has_yield() {
@@ -126,6 +136,8 @@ fn run_on_near(config_path: &str, dir: &str) -> Result<()> {
     config.mint_account = settings.mint.clone();
     config.agent.account = settings.agent_account.clone();
     let speed: u64 = env_number("ONA_CROWD_SPEED", 1)?;
+    let cap_near: u128 = env_number("ONA_CROWD_MAX_SPEND_NEAR", DEFAULT_MAX_SPEND_NEAR)?;
+    let cap = cap_near.checked_mul(NEAR).ok_or_else(|| anyhow!("ONA_CROWD_MAX_SPEND_NEAR is too large"))?;
 
     let funder_key = load_account_key(&PathBuf::from(env("ONA_CROWD_FUNDER_KEY_FILE")?))?;
     let agent_key = load_account_key(&PathBuf::from(env("ONA_CROWD_AGENT_KEY_FILE")?))?;
@@ -134,21 +146,19 @@ fn run_on_near(config_path: &str, dir: &str) -> Result<()> {
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     let sim = simulate_secret(&config, seed)?;
-    let dir = PathBuf::from(dir);
-    write_outputs(&sim, &config, &dir)?;
 
+    // Refused before any file or request: what the funder account would send in all.
+    let total = planned_spend(&sim, settings.unit_yocto)?;
+    check_spend(total, cap)?;
+    println!("the run will send {} milliNEAR from the funder account (cap {cap_near} NEAR)", total / MILLI_NEAR);
+
+    let dir = PathBuf::from(dir);
+    fs::create_dir_all(&dir)?;
     let agent = settings.agent_account.clone();
     let mut chain =
         NearChain::connect(settings, funder_key, agent_key, &config.denominations, &config.vaults, &dir.join("tokens.txt"))?;
-    // The agent account stands in for the pool and pays from its own funds. `unstake` gives nothing
-    // back for several epochs, so it needs what it places and what it pays out.
-    let spent: u64 = sim
-        .timeline
-        .iter()
-        .filter(|e| matches!(e.kind, EventKind::Placement | EventKind::ExitPayment))
-        .map(|e| e.amount)
-        .sum();
-    let agent_transactions = sim.timeline.iter().filter(|e| e.kind != EventKind::Deposit).count() as u64;
+    write_outputs(&sim, &config, &dir)?;
+    let (spent, agent_transactions) = agent_needs(&sim)?;
     chain.fund(&agent, spent, agent_transactions, 0)?;
     let mut wait = |secs: u64| {
         if speed > 0 && secs > 0 {

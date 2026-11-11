@@ -1,7 +1,8 @@
 import Foundation
 import Security
 
-/// The only thing the app keeps across launches: which computer it is paired with, and its own key handle.
+/// The only thing the app keeps across launches: which computer it is paired with, its own key handle, the read
+/// token and the write counter (protocol v1). Saved only after the person compared the 6-digit codes.
 struct StoredPairing: Codable, Equatable, Sendable {
     let pairingID: String
     let name: String
@@ -13,6 +14,10 @@ struct StoredPairing: Codable, Equatable, Sendable {
     /// Secure Enclave handle (encrypted, usable only on this device) or, in the simulator, the software key.
     let keyRepresentation: Data
     let pairedAt: Date
+    /// Given by the computer at pairing: needed for every request. Sent only inside the Tor stream.
+    let token: String
+    /// Last counter used by a write. Only goes up, never reused (even after a network error or a refusal).
+    var counter: UInt64
 }
 
 protocol PairingStore: Sendable {
@@ -53,7 +58,12 @@ struct KeychainPairingStore: PairingStore {
         let status = SecItemCopyMatching(request as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = result as? Data else { throw PairingStoreError.keychain(status) }
-        return try JSONDecoder().decode(StoredPairing.self, from: data)
+        guard let pairing = try? JSONDecoder().decode(StoredPairing.self, from: data) else {
+            // A pairing from protocol v0 (no token, no counter) cannot be used with v1 computers: pair again.
+            try delete()
+            return nil
+        }
+        return pairing
     }
 
     func save(_ pairing: StoredPairing) throws {

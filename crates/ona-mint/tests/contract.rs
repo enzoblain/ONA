@@ -8,12 +8,12 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use ed25519_dalek::SigningKey;
 use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_sdk::mock::MockAction;
-use near_sdk::test_utils::{get_created_receipts, VMContextBuilder};
+use near_sdk::test_utils::{get_created_receipts, get_logs, VMContextBuilder};
 use near_sdk::{env, testing_env, AccountId, Gas, NearToken, PromiseResult};
 use ona_mint::*;
 use ona_token::{
-    claim_digest, hash_to_g1, keygen, redeem_digest, sign_blinded, sign_digest, spend_digest,
-    token_dst, ChangeOut, PendingToken, SecretKey, Token, G1_LEN, G2_LEN,
+    claim_digest_until, hash_to_g1, keygen, redeem_digest_until, sign_blinded, sign_digest,
+    spend_digest_until, token_dst, ChangeOut, PendingToken, SecretKey, Token, G1_LEN, G2_LEN,
 };
 use rand::rngs::OsRng;
 use rand::{Rng, RngCore};
@@ -22,6 +22,16 @@ const NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 const MILLI: u128 = NEAR / 1000;
 const UNIT: u128 = 100 * MILLI;
 const NETWORK: &str = "sandbox";
+/// Expiry used by most tests: the latest one the contract accepts at the start time (1000 h), so it
+/// stays valid for the whole of each test (none runs past 1168 h). Expiry has its own tests.
+const NO_EXPIRY: u64 = 1_000 * HOUR_NS + MAX_SIGNATURE_VALIDITY_NS;
+
+fn redeem_digest(contract: &str, submitter: &str, nf: &[u8; 32]) -> [u8; 32] {
+    redeem_digest_until(contract, submitter, nf, NO_EXPIRY)
+}
+fn claim_digest(mint: &str, relay: &str, nf: &[u8; 32]) -> [u8; 32] {
+    claim_digest_until(mint, relay, nf, NO_EXPIRY)
+}
 
 fn acc(s: &str) -> AccountId {
     s.parse().unwrap()
@@ -64,7 +74,7 @@ thread_local! {
 fn rd(m: &mut Mint, t: &Token) {
     let d = redeem_digest(contract().as_str(), env::predecessor_account_id().as_str(), &t.nullifier());
     let key = OWNERS.with(|o| o.borrow().get(&t.pk).cloned()).unwrap_or_else(|| SigningKey::generate(&mut OsRng));
-    m.redeem(token_input(t), b64(&sign_digest(&key, &d)));
+    m.redeem(token_input(t), b64(&sign_digest(&key, &d)), U64(NO_EXPIRY));
 }
 
 fn panic_text(e: Box<dyn std::any::Any + Send>) -> String {
@@ -271,10 +281,33 @@ struct SpendArgs {
     amount: U128,
     fee: U128,
     change: Vec<BlindedOut>,
+    expires_at: U64,
 }
 
 fn spend_args(t: &Token, owner: &SigningKey, to: &AccountId, amount: u128, fee: u128, change: &[ChangeOut]) -> SpendArgs {
-    let d = spend_digest(contract().as_str(), relay().as_str(), t.denom_id, &t.nullifier(), to.as_str(), amount, fee, change);
+    spend_args_until(t, owner, to, amount, fee, change, NO_EXPIRY)
+}
+
+fn spend_args_until(
+    t: &Token,
+    owner: &SigningKey,
+    to: &AccountId,
+    amount: u128,
+    fee: u128,
+    change: &[ChangeOut],
+    expires_at: u64,
+) -> SpendArgs {
+    let d = spend_digest_until(
+        contract().as_str(),
+        relay().as_str(),
+        t.denom_id,
+        &t.nullifier(),
+        to.as_str(),
+        amount,
+        fee,
+        change,
+        expires_at,
+    );
     SpendArgs {
         token: token_input(t),
         sig: b64(&sign_digest(owner, &d)),
@@ -282,16 +315,21 @@ fn spend_args(t: &Token, owner: &SigningKey, to: &AccountId, amount: u128, fee: 
         amount: U128(amount),
         fee: U128(fee),
         change: change.iter().map(|c| BlindedOut { denom_id: c.denom_id, blinded: b64(&c.blinded) }).collect(),
+        expires_at: U64(expires_at),
     }
 }
 
 fn do_spend(m: &mut Mint, a: SpendArgs) {
-    m.spend(a.token, a.sig, a.to, a.amount, a.fee, a.change)
+    m.spend(a.token, a.sig, a.to, a.amount, a.fee, a.change, a.expires_at)
 }
 
 fn claim(t: &Token, owner: &SigningKey) -> ClaimInput {
-    let d = claim_digest(contract().as_str(), relay().as_str(), &t.nullifier());
-    ClaimInput { token: token_input(t), owner_sig: b64(&sign_digest(owner, &d)) }
+    claim_until(t, owner, NO_EXPIRY)
+}
+
+fn claim_until(t: &Token, owner: &SigningKey, expires_at: u64) -> ClaimInput {
+    let d = claim_digest_until(contract().as_str(), relay().as_str(), &t.nullifier(), expires_at);
+    ClaimInput { token: token_input(t), owner_sig: b64(&sign_digest(owner, &d)), expires_at: U64(expires_at) }
 }
 
 // ---------- cross-checks with blst ----------
@@ -519,11 +557,11 @@ fn forged_tokens_are_refused() {
 
     let mut short = token_input(&t);
     short.sig = b64(&[1, 2, 3]);
-    let msg = h.refused(&bob(), 0, |m| m.redeem(short, b64(&[0; 64])));
+    let msg = h.refused(&bob(), 0, |m| m.redeem(short, b64(&[0; 64]), U64(NO_EXPIRY)));
     assert!(msg.contains("bad token encoding"), "{msg}");
 
     let unknown = TokenInput { denom_id: 200, ..token_input(&t) };
-    let msg = h.refused(&bob(), 0, |m| m.redeem(unknown, b64(&[0; 64])));
+    let msg = h.refused(&bob(), 0, |m| m.redeem(unknown, b64(&[0; 64]), U64(NO_EXPIRY)));
     assert!(msg.contains("unknown denomination"), "{msg}");
 }
 
@@ -531,21 +569,21 @@ fn forged_tokens_are_refused() {
 fn redeem_needs_the_owner_and_names_the_submitter() {
     let mut h = H::new();
     let (t, owner) = h.mint_one(1);
-    let msg = h.refused(&bob(), 0, |m| m.redeem(token_input(&t), b64(&[0; 10])));
+    let msg = h.refused(&bob(), 0, |m| m.redeem(token_input(&t), b64(&[0; 10]), U64(NO_EXPIRY)));
     assert!(msg.contains("owner signature length"), "{msg}");
 
     let thief = SigningKey::generate(&mut OsRng);
     let d = redeem_digest(contract().as_str(), bob().as_str(), &t.nullifier());
     let forged = b64(&sign_digest(&thief, &d));
-    let msg = h.refused(&bob(), 0, |m| m.redeem(token_input(&t), forged));
+    let msg = h.refused(&bob(), 0, |m| m.redeem(token_input(&t), forged, U64(NO_EXPIRY)));
     assert!(msg.contains("bad owner signature"), "someone who only saw the token: {msg}");
 
     let for_bob = b64(&sign_digest(&owner, &d));
     let replay = for_bob.clone();
-    let msg = h.refused(&alice(), 0, |m| m.redeem(token_input(&t), replay));
+    let msg = h.refused(&alice(), 0, |m| m.redeem(token_input(&t), replay, U64(NO_EXPIRY)));
     assert!(msg.contains("bad owner signature"), "signature made for another submitter: {msg}");
 
-    h.call(&bob(), 0, |m| m.redeem(token_input(&t), for_bob));
+    h.call(&bob(), 0, |m| m.redeem(token_input(&t), for_bob, U64(NO_EXPIRY)));
     assert_eq!(h.paid_to(&bob()), REDEEM_FEE);
 }
 
@@ -789,11 +827,89 @@ fn a_published_signature_cannot_be_combined_with_a_refund() {
     h.call(&signer(), 0, |m| m.lock(U64(id)));
     h.now += ISSUE_TIMEOUT_NS;
     let msg = h.refused(&alice(), 0, |m| m.refund(U64(id)));
-    assert!(msg.contains("deadline not reached"), "the lock holds past the original deadline: {msg}");
+    assert!(msg.contains("locked"), "the lock holds past the original deadline: {msg}");
 
     h.call(&signer(), 0, |m| m.issue(U64(id), sigs));
     let msg = h.refused(&alice(), 0, |m| m.refund(U64(id)));
     assert!(msg.contains("unknown deposit"), "{msg}");
+}
+
+/// The signer locks, broadcasts `issue`, and the transaction never lands. Days later the
+/// depositor holds valid tokens from the public signatures, but cannot also get a refund, so the
+/// other holders of the tier lose nothing.
+#[test]
+fn published_signatures_never_combine_with_a_refund() {
+    let mut h = H::new();
+    let honest = h.mint_tokens(0, 2);
+
+    let (id, pending) = h.deposit(0, 2);
+    let sigs = h.sign(0, &pending);
+    h.call(&signer(), 0, |m| m.lock(U64(id)));
+    assert_eq!(h.counters(0).issued, 4, "a locked record counts as issued");
+    // The issue transaction is public but fails; the signer then stays down for two days.
+    h.now += 48 * HOUR_NS;
+    let msg = h.refused(&alice(), 0, |m| m.refund(U64(id)));
+    assert!(msg.contains("locked"), "{msg}");
+
+    let pk = h.pks[0];
+    let stolen: Vec<(Token, SigningKey)> =
+        pending.into_iter().zip(sigs).map(|(p, s)| p.finish(&s, &pk).unwrap()).collect();
+    for (t, k) in &stolen {
+        OWNERS.with(|o| o.borrow_mut().insert(t.pk, k.clone()));
+        h.call(&bob(), 0, |m| rd(m, t));
+    }
+    for (t, _) in &honest {
+        h.call(&bob(), 0, |m| rd(m, t));
+    }
+    let c = h.counters(0);
+    assert_eq!((c.issued, c.redeemed, c.refunded), (4, 4, 0), "every holder was paid, nobody was refunded");
+}
+
+#[test]
+fn unlock_reopens_the_refund() {
+    let mut h = H::new();
+    let (id, _) = h.deposit(0, 1);
+    assert!(h.refused(&signer(), 0, |m| m.unlock(U64(id))).contains("not locked"));
+    h.call(&signer(), 0, |m| m.lock(U64(id)));
+    assert!(h.refused(&bob(), 0, |m| m.unlock(U64(id))).contains("only the signer"));
+    h.call(&signer(), 0, |m| m.unlock(U64(id)));
+    assert_eq!(h.counters(0).issued, 0);
+    assert!(h.refused(&alice(), 0, |m| m.refund(U64(id))).contains("deadline not reached"));
+    h.now += ISSUE_TIMEOUT_NS;
+    h.call(&alice(), 0, |m| m.refund(U64(id)));
+    assert_eq!(h.counters(0).refunded, 1);
+}
+
+/// With this record as the only one of its tier, redeeming one of its tokens leaves no live token
+/// for `unlock` to remove. With other holders in the tier the check cannot tell whose tokens were
+/// redeemed: that residual trust in the signer is stated in SPEC.
+#[test]
+fn unlock_refused_when_its_tier_has_no_live_token_left() {
+    let mut h = H::new();
+    let (id, pending) = h.deposit(0, 1);
+    let sigs = h.sign(0, &pending);
+    h.call(&signer(), 0, |m| m.lock(U64(id)));
+    let pk = h.pks[0];
+    let (t, k) = pending.into_iter().next().unwrap().finish(&sigs[0], &pk).unwrap();
+    OWNERS.with(|o| o.borrow_mut().insert(t.pk, k));
+    h.call(&bob(), 0, |m| rd(m, &t));
+    let msg = h.refused(&signer(), 0, |m| m.unlock(U64(id)));
+    assert!(msg.contains("already redeemed"), "{msg}");
+}
+
+/// The blinded signatures are in the `issue` event, readable from any RPC that serves logs.
+#[test]
+fn issue_event_carries_the_signatures() {
+    let mut h = H::new();
+    let (id, pending) = h.deposit(0, 2);
+    let sigs: Vec<_> = h.sign(0, &pending).iter().map(|s| b64(s)).collect();
+    h.call(&signer(), 0, |m| m.lock(U64(id)));
+    let expected = near_sdk::serde_json::to_string(&sigs).unwrap();
+    let logs = h.call(&signer(), 0, |m| {
+        m.issue(U64(id), sigs);
+        get_logs()
+    });
+    assert!(logs.iter().any(|l| l.contains("\"event\":\"issue\"") && l.contains(&expected)), "{logs:?}");
 }
 
 #[test]
@@ -810,14 +926,15 @@ fn lock_rules() {
 }
 
 #[test]
-fn an_abandoned_lock_eventually_allows_a_refund() {
+fn a_lock_never_expires_and_issue_can_land_late() {
     let mut h = H::new();
     let (id, pending) = h.deposit(0, 1);
     let sigs: Vec<_> = h.sign(0, &pending).iter().map(|s| b64(s)).collect();
     h.call(&signer(), 0, |m| m.lock(U64(id)));
-    h.now += LOCK_TIMEOUT_NS;
-    assert!(h.refused(&signer(), 0, |m| m.issue(U64(id), sigs)).contains("lock expired"));
-    h.call(&alice(), 0, |m| m.refund(U64(id)));
+    h.now += 30 * 24 * HOUR_NS;
+    assert!(h.refused(&alice(), 0, |m| m.refund(U64(id))).contains("locked"));
+    h.call(&signer(), 0, |m| m.issue(U64(id), sigs));
+    assert_eq!(h.counters(0).issued, 1, "issue does not count the tokens a second time");
 }
 
 #[test]
@@ -858,7 +975,7 @@ fn deposit_validation() {
     let good = || b64(&PendingToken::new(&mut OsRng, 0, &dst).unwrap().blinded);
     let cost = NEAR;
 
-    for n in [0usize, 3, 5, 65, 128] {
+    for n in [0usize, 3, 5, 64, 65, 128] {
         let items: Vec<_> = (0..n).map(|_| good()).collect();
         assert!(h.refused(&alice(), cost * 70, |m| { m.deposit(0, items); }).contains("power of two"), "n = {n}");
     }
@@ -907,7 +1024,7 @@ fn refund_after_issue_is_refused() {
     let (id, pending) = h.deposit(0, 1);
     let sigs: Vec<_> = h.sign(0, &pending).iter().map(|s| b64(s)).collect();
     h.lock_and_issue(id, sigs);
-    h.now += LOCK_TIMEOUT_NS;
+    h.now += 24 * HOUR_NS;
     let msg = h.refused(&alice(), 0, |m| m.refund(U64(id)));
     assert!(msg.contains("unknown deposit"), "{msg}");
 }
@@ -932,12 +1049,38 @@ fn hourly_bucket_exhausted_then_refilled() {
     let msg = h.refused(&bob(), 0, |m| rd(m, &tokens[2].0));
     assert!(msg.contains("hourly redemption limit"), "{msg}");
 
-    let items = vec![claim(&tokens[2].0, &tokens[2].1)];
-    assert_eq!(h.call(&relay(), 0, |m| m.relay_claim(items)), vec![false], "the relay is limited too");
-
     h.now += HOUR_NS;
     h.call(&bob(), 0, |m| rd(m, &tokens[2].0));
     assert_eq!(h.counters(0).redeemed, 3);
+}
+
+/// With a window aligned on the hour, a thief could redeem the cap at 10:59:59 and again
+/// at 11:00:00. The sliding bucket refills at the cap's pace instead.
+#[test]
+fn the_limit_slides_instead_of_resetting_on_the_hour() {
+    let mut h = H::with_limits(100, 2);
+    let tokens = h.mint_tokens(0, 4);
+    h.now = 1_001 * HOUR_NS - 1_000_000_000; // one second before the hour
+    h.call(&bob(), 0, |m| rd(m, &tokens[0].0));
+    h.call(&bob(), 0, |m| rd(m, &tokens[1].0));
+    h.now += 1_000_000_000; // on the hour
+    let msg = h.refused(&bob(), 0, |m| rd(m, &tokens[2].0));
+    assert!(msg.contains("hourly redemption limit"), "no second burst on the hour: {msg}");
+    h.now += HOUR_NS / 2; // a cap of 2 per hour frees one place every 30 minutes
+    h.call(&bob(), 0, |m| rd(m, &tokens[2].0));
+    let msg = h.refused(&bob(), 0, |m| rd(m, &tokens[3].0));
+    assert!(msg.contains("hourly redemption limit"), "{msg}");
+}
+
+/// Holders emptying the public bucket do not stop the relay from collecting.
+#[test]
+fn the_relay_has_its_own_limit() {
+    let mut h = H::with_limits(100, 1);
+    let tokens = h.mint_tokens(0, 4);
+    h.call(&bob(), 0, |m| rd(m, &tokens[0].0));
+    assert!(h.refused(&bob(), 0, |m| rd(m, &tokens[1].0)).contains("hourly redemption limit"));
+    let items = vec![claim(&tokens[1].0, &tokens[1].1), claim(&tokens[2].0, &tokens[2].1)];
+    assert_eq!(h.call(&relay(), 0, |m| m.relay_claim(items)), vec![true, false], "the relay's own cap of 1");
 }
 
 #[test]
@@ -983,7 +1126,11 @@ fn claim_signed_for_another_relay_is_skipped() {
     let mut h = H::new();
     let (t, owner) = h.mint_one(0);
     let d = claim_digest(contract().as_str(), "other-relay.test", &t.nullifier());
-    let items = vec![ClaimInput { token: token_input(&t), owner_sig: b64(&sign_digest(&owner, &d)) }];
+    let items = vec![ClaimInput {
+        token: token_input(&t),
+        owner_sig: b64(&sign_digest(&owner, &d)),
+        expires_at: U64(NO_EXPIRY),
+    }];
     assert_eq!(h.call(&relay(), 0, |m| m.relay_claim(items)), vec![false]);
 }
 
@@ -1010,7 +1157,9 @@ fn constructor_refuses_bad_keys() {
         hourly_redeem_cap: 10,
     };
     assert!(try_new(vec![]).contains("denomination count"));
-    assert!(try_new(vec![init(&pk), init(&pk)]).contains("duplicate"));
+    let mut higher = init(&pk);
+    higher.value = U128(2 * UNIT);
+    assert!(try_new(vec![init(&pk), higher]).contains("duplicate"));
     assert!(try_new(vec![init(&pk[..50])]).contains("key length"));
     let mut inf = [0u8; G2_LEN];
     inf[0] = 0xc0;
@@ -1019,6 +1168,235 @@ fn constructor_refuses_bad_keys() {
     let mut small = init(&pk);
     small.value = U128(REDEEM_FEE);
     assert!(try_new(vec![small]).contains("too small"));
+}
+
+fn try_new_with(denoms: Vec<DenomInit>, signer: AccountId, relay: AccountId, guardian: AccountId, network: &str) -> String {
+    context(&alice(), 0, 50 * NEAR, 0, 1);
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let network = network.to_string();
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        Mint::new(denoms, signer, relay, guardian, network);
+    }));
+    std::panic::set_hook(hook);
+    panic_text(r.expect_err("constructor should refuse"))
+}
+
+/// A tier whose key is the negation of another's would turn a cheap signature into an
+/// expensive token.
+#[test]
+fn constructor_refuses_a_negated_key() {
+    let pk = keygen(&mut OsRng).public_key();
+    let mut neg = pk;
+    neg[0] ^= 0x20;
+    let denoms = vec![
+        DenomInit { value: U128(UNIT), pk_g2: b64(&pk), circulation_cap: 10, hourly_redeem_cap: 10 },
+        DenomInit { value: U128(2 * UNIT), pk_g2: b64(&neg), circulation_cap: 10, hourly_redeem_cap: 10 },
+    ];
+    assert!(try_new(denoms).contains("related key"));
+}
+
+/// Roles, network name and tier values are checked.
+#[test]
+fn constructor_checks_roles_network_and_values() {
+    let pks: Vec<[u8; G2_LEN]> = (0..2).map(|_| keygen(&mut OsRng).public_key()).collect();
+    let good = || denom_inits(&pks, 10, 10);
+    assert!(try_new_with(good(), signer(), signer(), guardian(), NETWORK).contains("distinct"));
+    assert!(try_new_with(good(), signer(), relay(), relay(), NETWORK).contains("distinct"));
+    assert!(try_new_with(good(), guardian(), relay(), guardian(), NETWORK).contains("distinct"));
+    assert!(try_new_with(good(), contract(), relay(), guardian(), NETWORK).contains("the mint itself"));
+    for bad in ["", "Testnet", "a:b", &"x".repeat(MAX_NETWORK_LEN + 1)] {
+        assert!(try_new_with(good(), signer(), relay(), guardian(), bad).contains("network"), "{bad:?}");
+    }
+    let mut same = good();
+    same[1].value = same[0].value;
+    assert!(try_new(same).contains("strictly increase"));
+    let mut down = good();
+    down.swap(0, 1);
+    let msg = try_new(down);
+    assert!(msg.contains("strictly increase"), "{msg}");
+}
+
+/// The same blinded point twice in one record would count twice in `issued` for one token.
+#[test]
+fn duplicate_blinded_points_are_refused() {
+    let mut h = H::new();
+    let dst = h.dst.clone();
+    let p = PendingToken::new(&mut OsRng, 0, &dst).unwrap();
+    let cost = h.cost(0, 2);
+    let msg = h.refused(&alice(), cost, |m| {
+        m.deposit(0, vec![b64(&p.blinded), b64(&p.blinded)]);
+    });
+    assert!(msg.contains("duplicate blinded point"), "{msg}");
+
+    let (t, owner) = h.mint_one(2);
+    let change = [ChangeOut { denom_id: 0, blinded: p.blinded }, ChangeOut { denom_id: 0, blinded: p.blinded }];
+    let fee = 50 * MILLI;
+    let a = spend_args(&t, &owner, &bob(), (UNIT << 2) - 2 * UNIT - fee, fee, &change);
+    let msg = h.refused(&relay(), 0, |m| do_spend(m, a));
+    assert!(msg.contains("duplicate blinded point"), "{msg}");
+}
+
+/// Owner signatures carry an expiry that is part of the signed digest.
+#[test]
+fn owner_signatures_expire() {
+    let mut h = H::new();
+    let (t, owner) = h.mint_one(1);
+    let now = h.now;
+
+    let d = redeem_digest_until(contract().as_str(), bob().as_str(), &t.nullifier(), now - 1);
+    let sig = b64(&sign_digest(&owner, &d));
+    let msg = h.refused(&bob(), 0, |m| m.redeem(token_input(&t), sig.clone(), U64(now - 1)));
+    assert!(msg.contains("expired"), "{msg}");
+    let msg = h.refused(&bob(), 0, |m| m.redeem(token_input(&t), sig, U64(now + HOUR_NS)));
+    assert!(msg.contains("bad owner signature"), "the expiry cannot be moved: {msg}");
+
+    let value = UNIT << 1;
+    let fee = 20 * MILLI;
+    let a = spend_args_until(&t, &owner, &bob(), value - fee, fee, &[], now - 1);
+    assert!(h.refused(&relay(), 0, |m| do_spend(m, a)).contains("expired"));
+    let mut a = spend_args_until(&t, &owner, &bob(), value - fee, fee, &[], now - 1);
+    a.expires_at = U64(now + HOUR_NS);
+    assert!(h.refused(&relay(), 0, |m| do_spend(m, a)).contains("bad owner signature"));
+
+    let items = vec![claim_until(&t, &owner, now - 1)];
+    assert_eq!(h.call(&relay(), 0, |m| m.relay_claim(items)), vec![false], "an expired claim is skipped");
+
+    // An expiry beyond the maximum validity would make the signature last for ever.
+    let d = redeem_digest_until(contract().as_str(), bob().as_str(), &t.nullifier(), u64::MAX);
+    let sig = b64(&sign_digest(&owner, &d));
+    let msg = h.refused(&bob(), 0, |m| m.redeem(token_input(&t), sig, U64(u64::MAX)));
+    assert!(msg.contains("too far"), "{msg}");
+    let too_far = now + MAX_SIGNATURE_VALIDITY_NS + 1;
+    let a = spend_args_until(&t, &owner, &bob(), value - fee, fee, &[], too_far);
+    assert!(h.refused(&relay(), 0, |m| do_spend(m, a)).contains("too far"));
+    let items = vec![claim_until(&t, &owner, u64::MAX)];
+    assert_eq!(h.call(&relay(), 0, |m| m.relay_claim(items)), vec![false], "a claim valid for ever is skipped");
+
+    // Valid up to and including the expiry timestamp, and up to the maximum validity.
+    let (t2, owner2) = h.mint_one(1);
+    let a = spend_args_until(&t2, &owner2, &bob(), value - fee, fee, &[], now + MAX_SIGNATURE_VALIDITY_NS);
+    h.call(&relay(), 0, |m| do_spend(m, a));
+    let a = spend_args_until(&t, &owner, &bob(), value - fee, fee, &[], now);
+    h.call(&relay(), 0, |m| do_spend(m, a));
+    assert_eq!(h.paid_to(&bob()), 2 * (value - fee));
+}
+
+/// With a small-order owner key, a trivial signature passes the host's non-strict check for
+/// any message: anyone who sees the token could spend it. The contract refuses such keys.
+#[test]
+fn a_small_order_owner_key_is_refused() {
+    let mut h = H::new();
+    let mut weak_pk = [0u8; 32];
+    weak_pk[0] = 1; // the identity point
+    let nonce = [9u8; 32];
+    let mut message = [0u8; 65];
+    message[1..33].copy_from_slice(&weak_pk);
+    message[33..].copy_from_slice(&nonce);
+    let point = hash_to_g1(&message, &h.dst);
+    let cost = h.cost(0, 1);
+    let U64(id) = h.call(&alice(), cost, |m| m.deposit(0, vec![b64(&point)]));
+    let sig = sign_blinded(&h.sks[0], &point).unwrap();
+    h.lock_and_issue_with_one(id, &sig);
+    let t = Token { denom_id: 0, pk: weak_pk, nonce, sig };
+
+    // R = identity, S = 0: valid for every message under a non-strict verifier.
+    let mut trivial = [0u8; 64];
+    trivial[0] = 1;
+    let msg = h.refused(&bob(), 0, |m| m.redeem(token_input(&t), b64(&trivial), U64(NO_EXPIRY)));
+    assert!(msg.contains("weak owner key"), "{msg}");
+    let item = ClaimInput { token: token_input(&t), owner_sig: b64(&trivial), expires_at: U64(NO_EXPIRY) };
+    assert_eq!(h.call(&relay(), 0, |m| m.relay_claim(vec![item])), vec![false]);
+}
+
+#[test]
+fn the_small_order_list_matches_ed25519_dalek() {
+    use ed25519_dalek::VerifyingKey;
+    let ys = [
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+        "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    ];
+    for (i, hex) in ys.iter().enumerate() {
+        let mut y = [0u8; 32];
+        for j in 0..32 {
+            y[j] = u8::from_str_radix(&hex[2 * j..2 * j + 2], 16).unwrap();
+        }
+        for sign in [0u8, 0x80] {
+            let mut k = y;
+            k[31] |= sign;
+            assert!(weak_owner_key(&k), "entry {i} sign {sign}");
+            assert!(ona_token::is_weak_owner_key(&k), "entry {i} sign {sign}");
+            match VerifyingKey::from_bytes(&k) {
+                Ok(key) => assert!(key.is_weak(), "entry {i} sign {sign} decodes to a point that is not small order"),
+                Err(_) => assert!(sign != 0 || i >= 5, "canonical entry {i} must decode"),
+            }
+        }
+    }
+    for _ in 0..64 {
+        let pk = SigningKey::generate(&mut OsRng).verifying_key().to_bytes();
+        assert!(!weak_owner_key(&pk));
+        assert!(!ona_token::is_weak_owner_key(&pk));
+    }
+}
+
+/// The contract enforces its batch caps. The budget formulas below are the ones SPEC documents for
+/// the signer (10 + 8 Tgas per token) and the relay (10 + 10 Tgas per item), copied by hand: this
+/// test does not read their code and does not measure gas.
+#[test]
+fn batch_caps_are_enforced_and_fit_the_documented_budgets() {
+    assert!(10 + 8 * MAX_ISSUE as u64 <= 300, "documented signer budget for issue");
+    assert!(10 + 10 * MAX_CLAIM as u64 <= 300, "documented relay budget for relay_claim");
+    let mut h = H::new();
+    let dst = h.dst.clone();
+    let items: Vec<_> = (0..64).map(|_| b64(&PendingToken::new(&mut OsRng, 0, &dst).unwrap().blinded)).collect();
+    let cost = h.cost(0, 64);
+    assert!(h.refused(&alice(), cost, |m| { m.deposit(0, items); }).contains("power of two up to 32"));
+    let (t, owner) = h.mint_one(0);
+    let too_many = vec![claim(&t, &owner); 29];
+    assert!(h.refused(&relay(), 0, |m| { m.relay_claim(too_many); }).contains("too many"));
+}
+
+/// Ids already finished still cost a read; the view reads a bounded range and says where
+/// to continue, so a long run of refunded records cannot make it run out of gas.
+#[test]
+fn pending_scan_is_bounded_and_moves_on() {
+    let mut h = H::new();
+    let n = MAX_SCAN + 20;
+    let ids: Vec<u64> = (0..n).map(|_| h.deposit(0, 1).0).collect();
+    h.now += ISSUE_TIMEOUT_NS;
+    for id in &ids[..ids.len() - 1] {
+        h.call(&bob(), 0, |m| m.refund(U64(*id)));
+    }
+    context(&alice(), 0, h.balance, h.storage, h.now);
+    assert!(h.mint.pending_deposits(U64(0), 64).is_empty(), "the first page reads only MAX_SCAN ids");
+    let page = h.mint.pending_scan(U64(0), 64);
+    assert!(page.records.is_empty());
+    assert_eq!(page.next.0, MAX_SCAN);
+    let page = h.mint.pending_scan(page.next, 64);
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].id.0, n - 1);
+    assert_eq!(page.next.0, n);
+}
+
+/// A limit of 0 counts as 1, so a loop that follows `next` always moves forward.
+#[test]
+fn pending_scan_with_limit_zero_still_advances() {
+    let mut h = H::new();
+    let a = h.deposit(0, 1).0;
+    let b = h.deposit(0, 1).0;
+    context(&alice(), 0, h.balance, h.storage, h.now);
+    let page = h.mint.pending_scan(U64(a), 0);
+    assert_eq!(page.records.len(), 1);
+    assert_eq!(page.records[0].id.0, a);
+    assert_eq!(page.next.0, b);
+    let page = h.mint.pending_scan(page.next, 0);
+    assert_eq!(page.records[0].id.0, b);
+    assert_eq!(page.next.0, b + 1);
 }
 
 // ---------- random walk ----------

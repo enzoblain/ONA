@@ -1,7 +1,8 @@
 # App bureau macOS (SwiftUI) — document interne
 
-Créée le 2026-11-10 sur la branche `desktop-app`. **Changement d'architecture à valider avec Hugo** : le README prévoyait
-une app bureau Tauri + JavaScript, et l'app bureau lui est attribuée dans `CLAUDE.md`.
+Créée le 2026-11-10 sur la branche `desktop-app`. **Changement d'architecture à valider par l'équipe** : le README
+prévoyait une app bureau Tauri + JavaScript. Protocole téléphone passé en version 1 le 2026-11-11 (correctifs de
+sécurité, voir `docs/ios/protocol-draft.md`).
 
 ## Ce qui existe
 
@@ -20,13 +21,21 @@ une app bureau Tauri + JavaScript, et l'app bureau lui est attribuée dans `CLAU
   démonstration d'`ona-core`, quelle que soit la demande.
 - **Confirmations** : depuis le Mac (boutons dans la conversation) ou depuis le téléphone (signées). Le paiement est
   confirmé par `confirm_payment(digest)` : c'est le garde-fou d'`ona-core` qui compare l'empreinte.
-- **Appairage** : le Mac garde sa clé P-256 et la clé publique du téléphone dans le trousseau de session. Fenêtre
-  « Appairer un téléphone » : QR à usage unique, puis code à 6 chiffres à comparer ; tant que l'utilisateur n'a pas
-  confirmé sur le Mac, le téléphone reçoit `pairing not verified`.
-- **Téléphone** : même protocole que le faux ordinateur (`docs/ios/protocol-draft.md`). Lecture (`GET`) seulement
-  après appairage vérifié ; écritures signées.
-- **Connexion** : « Par Tor » (défaut) : serveur sur 127.0.0.1:8790, publié en service `.onion` par le démon `tor` local
-  (Homebrew), comme `docs/TOR.md`. « Réseau local (tests) » : serveur sur toutes les interfaces.
+- **Appairage** : le Mac garde sa clé P-256 et le téléphone appairé (clé publique, jeton, dernier compteur, identifiants
+  de confirmation déjà exécutés) dans un élément du trousseau de session. Le code demande
+  `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` à chaque écriture ; l'effet réel sur le trousseau de session d'un
+  Mac (fichier, app non signée) n'est **pas vérifié**. Un élément illisible n'est jamais écrasé : l'erreur est affichée
+  et l'appairage désactivé. Fenêtre « Appairer un téléphone » : QR à usage unique valable 10 minutes, engagement puis
+  révélation de la clé du téléphone, code à 6 chiffres à comparer dans les 5 minutes (« Refuser » aussi si le
+  téléphone n'affiche aucun code). Rien n'est enregistré avant la comparaison. Un échec d'enregistrement est affiché.
+- **Téléphone** : protocole v1 (`docs/ios/protocol-draft.md`) : tout en `POST`, lectures avec le jeton d'appairage,
+  écritures signées par le téléphone avec un compteur croissant, réponses signées par le Mac. En-tête `Host` vérifié,
+  requêtes de navigateur refusées.
+- **Connexion** : « Par Tor » : serveur sur 127.0.0.1, port choisi par le système à chaque démarrage, publié en
+  service `.onion` par le démon `tor` local (Homebrew) une fois le serveur à l'écoute ; `__OwningControllerProcess`
+  arrête `tor` avec l'app. « Réseau local » (HTTP en clair sur toutes les interfaces, port 8790) : **versions Debug
+  seulement**, absent des versions Release.
+- **Serveur** : au plus 16 connexions simultanées, 10 s pour recevoir et traiter une requête.
 - **Rien sur disque pour les conversations** : en mémoire seulement (le coffre d'`ona-core` n'est pas branché).
 
 ## Lancer
@@ -37,9 +46,20 @@ open desktop/ONADesktop/ONADesktop.xcodeproj   # cible ONADesktop
 cd desktop/ONADesktop && swift test            # tests, avec le vrai ona-core
 ```
 
-L'app n'est pas sandboxée (elle lance `tor`) et est signée « Sign to Run Locally ».
+L'app n'est pas sandboxée (elle lance le `tor` de Homebrew, ce que le bac à sable interdit) et est signée « Sign to Run
+Locally ». « Hardened runtime » activé en Release (pas vérifié : pas de Xcode ici). Le bouton « Copier le texte du
+code » (presse-papiers général) n'existe qu'en Debug.
 
-## Vérifié le 2026-11-10
+## Vérifié le 2026-11-11 (protocole v1)
+
+- Tests de `Core` (32, framework Testing) compilés avec `swiftc` et exécutés contre le vrai `ona-core` : vecteurs
+  partagés avec l'app Tauri (dont une signature produite par `p256`), engagement et révélation, rejeu refusé après
+  redémarrage, jeton, `Host`, navigateur, contenu signé, empreinte de paiement v2. `swift test` lui-même n'a pas pu
+  tourner (pas de Xcode dans l'environnement de test). La cible App (SwiftUI) n'a pas été compilée.
+- Pas de nouvel essai de bout en bout avec l'app Mac. L'app iPhone parle la v1 depuis le 2026-11-11 (essai fait avec
+  l'app Tauri, voir `docs/desktop/tauri.md`).
+
+## Vérifié le 2026-11-10 (protocole v0, avant les correctifs)
 
 - `swift test` : 15 tests passés, dont une mission complète sur le vrai `ona-core` (plan, choix du cabinet, refus d'une
   mauvaise empreinte par le garde-fou, paiement, relevé) et le routeur (appairage, refus avant vérification du code,
@@ -57,3 +77,7 @@ L'app n'est pas sandboxée (elle lance `tor`) et est signée « Sign to Run Loca
 - Une fois, l'écoute du port n'a pas démarré après un redémarrage (cause inconnue) ; l'app affiche maintenant l'erreur
   et réessaie toute seule.
 - Portefeuille NEAR, dépôts, vrai modèle : pas dans cette app.
+- Les appels à `ona-core` se font sur le fil principal : avec un vrai modèle (secondes par appel), la fenêtre et le
+  serveur du téléphone seraient bloqués pendant chaque appel. À déplacer sur une file dédiée avant le vrai modèle.
+- Le plafond de connexions et le délai global du serveur Swift n'ont pas de test automatique (ceux de l'app Tauri en
+  ont).

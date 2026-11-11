@@ -1,4 +1,4 @@
-"""Conversations of the mock computer (docs/ios/protocol-draft.md, "Conversations").
+"""Conversations of the mock computer (docs/ios/protocol-draft.md, protocol v1).
 
 A chat is a conversation with the simulated agent. Each request the person sends starts a replay of the demo mission;
 the mission's progress is turned into chat items: the agent's messages, its activities (search, read, compare…),
@@ -8,6 +8,7 @@ server.
 
 from __future__ import annotations
 
+import secrets
 import time
 from typing import Callable
 
@@ -40,8 +41,8 @@ def title_from(text: str) -> str:
 
 
 class Chat:
-    def __init__(self, number: int, text: str, make_mission: Callable[[], object]):
-        self.id = f"chat-{number}"
+    def __init__(self, text: str, make_mission: Callable[[], object]):
+        self.id = "chat-" + secrets.token_hex(16)  # random, never reused
         self.title = title_from(text)
         self.created_at = self.updated_at = int(time.time())
         self.items: list[dict] = []

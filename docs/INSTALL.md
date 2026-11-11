@@ -16,7 +16,10 @@ A C compiler is also needed, for `blst`. On macOS: `xcode-select --install`.
 ./verify.sh
 ```
 
-This runs all tests and compiles the three contracts to wasm. It needs no key, no funded account, no Docker and no browser.
+This runs all tests with the locked dependency versions (`--locked`), compiles the three contracts to wasm with every local path
+rewritten, fails if a wasm still names a local directory or the user, and prints the SHA-256 of each contract. It needs no key, no
+funded account, no Docker and no browser. How to compare these hashes with a deployed contract is in
+[SPEC.md](../SPEC.md#reproducing-the-contract-hashes).
 
 To type-check only, use `cargo check --workspace --all-targets`. Plain `cargo check` fails on purpose: `near-sdk` refuses to build
 a contract for a native target outside tests.
@@ -30,6 +33,10 @@ cargo run -p ona-core --bin ona -- demo
 ```
 
 Without `demo`, `ona` reads one JSON request per line on stdin and prints one JSON reply per line. Every reply says `"mode":"mock"`.
+A line that is not UTF-8 or is longer than 64 KiB gets an error reply. `open` takes an optional `protected` list of terms (names,
+identifiers) to replace by pseudonyms before anything goes to the model. `prepare_payment` without `amount` pays the chosen offer's
+price at the policy's rate; with `amount`, it must be that same amount. It returns the fields of the confirmation digest (`payment`) and
+the digest to send back with `confirm_payment`.
 
 A fake relay on localhost, for front-end work:
 
@@ -41,8 +48,8 @@ Its startup output gives the request key and domain tag. Routes, all `POST` with
 
 | Route | Body | Reply |
 |---|---|---|
-| `/dev/credit` | `{}` | a free test credit: `token`, `owner_sig`. Exists only in this binary |
-| `/exchange` | `token`, `owner_sig`, `blinded` (8 hex points) | 202 while pending, then 200 with `signatures` when the same request is repeated |
+| `/dev/credit` | `{}` | a free test credit: `token`, `owner_sig`, `expires_at` (the claim signature's expiry, valid a day), and `owner_key`, the credit's owner key, so that the front end can sign `exchange_sig`. Exists only in this binary |
+| `/exchange` | `token`, `owner_sig`, `expires_at`, `exchange_sig`, `blinded` (8 points), all hexadecimal in lowercase except `expires_at` (nanoseconds, as a decimal string) | 202 while pending, then 200 with `signatures` when the same request is repeated; 410 if the claim expired before it reached the chain (send it again with a later `expires_at` and the same blinded points: the first claim may still land, and then only those points are signed) |
 | `/chat` | `token` (hex, 80 bytes), `prompt` | `reply`, `tokens_used`, `mode` |
 
 ## Use the real model
@@ -56,10 +63,11 @@ Nothing selects this mode by default: without the word `real`, or with any requi
 | `ONA_REAL_MODEL` | model name, which the relay must allow |
 | `ONA_REAL_MAX_TOKENS` | ceiling on the reply tokens of one call, at most the relay's own limit. The prompt counts on top of it |
 | `ONA_REAL_TOKEN_BUDGET` | most tokens in total for this run of `ona`, prompts and replies, at least one call's ceiling |
-| `ONA_REAL_TOKENS_FILE` | optional, a file with one request token per line, one spent per call and removed from the file before it is sent. Refused if empty. `ona-relay` refuses a chat without one |
+| `ONA_REAL_TOKENS_FILE` | optional, a file with one request token per line, one spent per call and removed from the file before it is sent. Refused if empty or readable by other accounts (`chmod 600`). Only one `ona real` can use a file at a time: a lock file `<file>.lock` is created next to it. `ona-relay` refuses a chat without one |
 
 **Until the enclave quotes are verified in this client, the relay can read the content of a mission and make up replies. Do not run a
-sensitive mission in this mode.**
+sensitive mission in this mode.** Proxy variables of the environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) are ignored and
+redirects are not followed. `ona real` connects to the relay directly, not through Tor.
 
 ```
 cargo run -p ona-core --bin ona -- real
@@ -71,36 +79,69 @@ a page to 32 KB. The budget is counted in memory, so restarting `ona` starts it 
 request tokens run out, and the model stops after three failures in a row where nothing was sent. Only the model is real: the web and
 the payments stay fake, and those replies still say `"mode":"mock"`. For each real call the journal keeps the response id, the model,
 the token count and salted fingerprints, never the content. The exposure report counts real and fake calls apart (`model_calls_real`,
-`model_calls_mock`, `real_calls`), and its `mode` is `mixed` when real calls and fake parts are both present. This mode has never run against NEAR AI.
+`model_calls_mock`, `real_calls`), and its `mode` is `mixed` when real calls and fake parts are both present. Its `parties` list names the
+relay and the model with the requests and bytes each received, attestation and signature requests included, and
+`content_readable_by_relay` is `true` as soon as one request reached the relay. This mode has never run against NEAR AI.
 
 ## Measure gas on a local node
 
 ```
-cargo build --profile contract --target wasm32-unknown-unknown -p ona-mint --config crates/ona-mint/wasm-build.toml
+./verify.sh
 NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox cargo run -p ona-sandbox
 ```
 
-`NEAR_SANDBOX_BIN_PATH` is read by the `near-sandbox` crate. This deploys the contract
+`NEAR_SANDBOX_BIN_PATH` is required and must name a `near-sandbox` binary you obtained and checked yourself: without it the
+`near-sandbox` crate would download one and run it without checking a checksum, so `ona-sandbox` stops instead. This deploys the contract
 on a local node, calls every method, prints the gas burnt, then runs the real signer loop and a real relay exchange against the node.
-The node crashes when started inside a macOS Seatbelt sandbox, so run it from a normal terminal.
+The signer and the relay read that one node as both of their endpoints, which their programs refuse: only this test run does it. The
+owner signatures it sends expire one hour after the node's latest final block. It has not been run since the contract and the relay
+changed, so the gas table in SPEC still holds the earlier measurements. The node crashes when started inside a macOS Seatbelt sandbox,
+so run it from a normal terminal.
+
+## The NEAR RPC endpoint
+
+Every program here talks to NEAR through `ona-near`, and **trusts the RPC node it is given**: the deposits the signer signs for, the
+claims the relay accepts and the checks of `ona-deploy` all rest on what the node answers, and no proof is checked. Use a node you run
+yourself, or one you trust as much as the keys it serves. The signer and the relay read through two endpoints and stop when they
+disagree (see below), which removes the need to trust one of them, not both. One account key should be used by one program at a time: two programs sending
+with the same key read the same nonce, and one of them is refused.
+
+- `ONA_RPC_URL` must start with `https://`. Plain `http://` is accepted only to `127.0.0.1`, `localhost` or `[::1]` (a local node);
+  only a client that goes through Tor also accepts it to a `.onion` address. Redirects are not followed, and the `HTTPS_PROXY`,
+  `HTTP_PROXY` and `ALL_PROXY` variables are ignored.
+- When a transaction gets no clear answer (a timeout, an HTTP error, a result that is not stated final), the client asks the node a few
+  times what became of it, and never sends it again. If the node still cannot say, the error gives the transaction hash: check it on an
+  explorer before doing anything that would repeat it, because it can still be included.
+- `ona-deploy` and `ona-crowd run` count a transaction as failed when any of its receipts failed, including a payment or a call the
+  contract did not wait for.
 
 ## Deploy the contracts
 
-Testnet or a local node only: the tool refuses mainnet. Build the contracts as in `verify.sh`, and create the signer keys as below. Each
+Testnet or a local node only. Mainnet is refused from the names given, from a `.near` parent account, and from the chain id the node
+reports, which is asked before anything is sent. Build the contracts with `verify.sh`, and create the signer keys as below. Each
 contract becomes `mint.<parent>`, `registry.<parent>` or `pool.<parent>`, created and initialized in one transaction, with no access key.
 None of them has been deployed on testnet yet, and the pool has never been deployed anywhere.
 
+Before sending, the tool checks that every role account is well formed, exists and holds only one role, then prints the plan (roles,
+funding, size and SHA-256 of the contract) and **waits for you to type the new account name** on the terminal. After the deployment it
+checks that the account holds no access key and that the code it runs has the SHA-256 of the file sent, and prints the transaction hash.
+
 | Variable | Value |
 |---|---|
-| `ONA_RPC_URL`, `ONA_NETWORK` | NEAR RPC endpoint and network name |
-| `ONA_PARENT_ACCOUNT`, `ONA_PARENT_KEY_FILE` | funded parent account, and its key in a file readable by its owner only |
+| `ONA_RPC_URL`, `ONA_NETWORK` | NEAR RPC endpoint, and the network name written into the contracts |
+| `ONA_CHAIN_ID` | optional, the chain id the node must report, default the value of `ONA_NETWORK`. For a local node, the id it reports (for example `localnet`, not verified) |
+| `ONA_PARENT_ACCOUNT`, `ONA_PARENT_KEY_FILE` | funded parent account (ending in `.testnet` on testnet), and its key in a regular file that belongs to you and only you can read (a symbolic link is refused) |
 | `ONA_SIGNER_KEYS_FILE` | mint only: the file from `ona-signer init-keys` |
 | `ONA_SIGNER_ACCOUNT`, `ONA_RELAY_ACCOUNT` | mint only: two of the roles |
 | `ONA_GUARDIAN_ACCOUNT` | mint and pool: the guardian |
 | `ONA_REGISTRY_OWNER_1`, `ONA_REGISTRY_OWNER_2`, `ONA_AGGREGATOR_ACCOUNT` | registry only |
 | `ONA_AGENT_ACCOUNT` | pool only: the account allowed to place funds and pay exits, different from the guardian |
 | `ONA_ESCAPE_DELAY_SECS` | optional, pool only, seconds without agent activity before anyone can pay exits, from 60 to 30 days, default 7 days |
-| `ONA_ADMIN_DELAY_SECS` | optional, pool only, seconds before a new agent or vault takes effect, from 7 to 30 days, default 7 days |
+| `ONA_ADMIN_DELAY_SECS` | optional, pool only, seconds before a new agent, vault or fee takes effect, from 7 to 30 days, default 7 days |
+| `ONA_POOL_CASH_TIERS` | pool only: a JSON file listing the cash notes, `[{"value": "<yoctoNEAR>", "pk_g2": "<base64 of the 96-byte compressed key>"}]`, 1 to 8 tiers, each key used once, each value above 0.004 NEAR |
+| `ONA_CASH_HOURLY_CAP` | pool only: most yoctoNEAR the cash exits may pay per hour, at least two of the largest cash notes |
+| `ONA_MAX_RATE_BPS` | optional, pool only: yearly growth of each account's exit limit in basis points, at most 10000, default 2000 |
+| `ONA_MIN_LIVE_NOTES` | optional, pool only: live notes a cash tier must have before the agent spends or pays one of them, at least 1, default 5 |
 | `ONA_FUNDING_NEAR` | optional, NEAR sent to the new account, default 5 |
 | `ONA_BASE_VALUE_MILLI_NEAR` | optional, mint only, value of the lowest tier, default 100 |
 | `ONA_CIRCULATION_CAP`, `ONA_HOURLY_REDEEM_CAP` | optional, mint only, per tier, default 1000 and 100 |
@@ -113,11 +154,11 @@ cargo run -p ona-deploy -- pool
 ```
 
 The pool starts with no vault. The guardian then lists each staking pool with `add_vault`, giving the SHA-256 of the code it checked
-there and one share-note key per tier; creating and holding those keys for the agent is not built yet. Lending vaults are refused.
-A new vault or agent takes effect only after the admin delay, and anyone can leave in the meantime. Depositors pay the pool through
-its `deposit` method, at least 0.1 NEAR; a plain transfer is never credited to anyone. A holder can move notes to another listed
-vault without an exit (`switch_vault`, submitted by the agent); the agent then moves the funds inside the pool with `settle_switch`.
-Nothing new to configure.
+there and one share-note key per tier; creating and holding those keys, and the cash keys, for the agent is not built yet. Lending
+vaults are refused, and a staking pool can serve one vault only. A new vault, agent or fee takes effect only after the admin delay,
+and anyone can leave in the meantime. Depositors pay the pool through its `deposit` method, at least 0.1 NEAR; a plain transfer is
+never credited to anyone. The agent turns deposits into cash notes (`issue_cash`), cash into a vault's shares (`enter`), shares back
+into cash (`leave`, from the vault's liquid funds, which is also how a holder changes vault), and pays cash notes (`pay_exit`).
 
 ## Run the signer
 
@@ -130,49 +171,73 @@ needs its own keys. To issue tokens:
 
 | Variable | Value |
 |---|---|
-| `ONA_RPC_URL` | NEAR RPC endpoint |
+| `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only); transactions are sent here |
+| `ONA_RPC_URL_2` | a second NEAR RPC endpoint, run by another operator; every read must agree with the first |
+| `ONA_CHAIN_ID` | the chain id both endpoints must report (for example `testnet`); mainnet is refused |
 | `ONA_MINT` | account of the deployed contract |
 | `ONA_SIGNER_ACCOUNT` | account named as signer in the contract |
 | `ONA_SIGNER_ACCOUNT_KEY_FILE` | file holding `ed25519:<base58>`, readable by its owner only |
 | `ONA_SIGNER_KEYS_FILE` | the file from `init-keys` |
-| `ONA_SIGNER_STATE_FILE` | where the signer records its progress; must survive restarts |
+| `ONA_SIGNER_STATE_FILE` | where the signer records its progress, readable by its owner only; must survive restarts |
 
 ```
 cargo run -p ona-signer -- run
 ```
 
-It refuses to start if its keys are not the ones the contract verifies against.
+It refuses to start if its keys are not the ones the contract verifies against, if the two RPC URLs name the same endpoint, if an
+endpoint reports another chain, if the state file belongs to another contract or keys or other users can read it, if another signer
+holds it, or if the state file is new while the contract holds locked deposits (restore the old file instead: it remembers which
+signatures were already published). Each pass reads at one final block known to both endpoints, at most 20 blocks apart, and never
+below the highest block already used, which the state file keeps; any difference stops the pass. Two endpoints that lie together are
+not detected. A pass looks at most 512 deposits and 2048 record ids ahead of its cursor; what lies beyond waits for the next pass. A
+locked deposit it never published and cannot sign is unlocked, so it refunds at its deadline. Key files written by an earlier version,
+without a type line, are refused.
 
 ## Run the relay
 
 ```
-cargo run -p ona-server --bin ona-relay -- init-key relay-request-keys.bin
+cargo run -p ona-server --bin ona-relay -- init-key relay-request-key.bin relay-store.log
 ```
+
+This creates the request key and the store bound to it, both readable by their owner only; if the store cannot be created, the key file
+is removed again. The relay never creates a store by itself: a lost or replaced store would make every used request token valid again,
+so it refuses to start instead. Run one relay process per store; a second one is refused, and deleting `relay-store.log.lock` while the
+relay runs stops its store until a restart.
 
 To serve, on `127.0.0.1` only:
 
 | Variable | Value |
 |---|---|
-| `ONA_RPC_URL` | NEAR RPC endpoint |
+| `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only); transactions are sent here |
+| `ONA_RPC_URL_2` | a second NEAR RPC endpoint, run by another operator; every read must agree with the first |
 | `ONA_MINT` | account of the deployed contract |
 | `ONA_NETWORK` | network name used when the contract was created |
+| `ONA_CHAIN_ID` | optional, the chain id both endpoints must report, default the value of `ONA_NETWORK`; mainnet is refused |
 | `ONA_RELAY_ACCOUNT` | account named as relay in the contract |
 | `ONA_RELAY_ACCOUNT_KEY_FILE` | file holding `ed25519:<base58>`, readable by its owner only |
-| `ONA_RELAY_REQUEST_KEY_FILE` | the file from `init-key` |
-| `ONA_RELAY_STORE_FILE` | where the relay records exchanges; must survive restarts |
-| `ONA_MODELS` | allowed models, separated by commas |
-| `NEAR_AI_CLOUD_API_KEY` | NEAR AI key. Set it with `read -s`, never in a file |
+| `ONA_RELAY_REQUEST_KEY_FILE` | the key file from `init-key` |
+| `ONA_RELAY_STORE_FILE` | the store file from `init-key`; must survive restarts |
+| `ONA_MODELS` | allowed models, separated by commas, none empty |
+| `NEAR_AI_CLOUD_API_KEY` | NEAR AI key. Set it with `read -s`, never in a file. Removed from the environment once read |
 | `ONA_RELAY_PORT` | optional, default 8787 |
 | `ONA_FLUSH_SECS` | optional, seconds between batches of claims, default 60 |
 | `ONA_TOKENS_PER_CREDIT` | optional, default 100 |
 | `ONA_MAX_TOKENS` | optional, most tokens per reply, default 512 |
+| `ONA_MAX_PROMPT_BYTES` | optional, most bytes of text in a chat message, default 4096. A reply is withheld above `ONA_MAX_TOKENS` + this + 64 tokens, so price a request token for that much |
 
 ```
 cargo run -p ona-server --bin ona-relay -- run
 ```
 
-It serves 8 connections at a time and keeps 32 waiting; beyond that it answers 503. Attestation and signature routes are limited to 600 calls per
-minute across all clients. If the store reports a write error, every further write is refused until the relay is restarted.
+It serves 32 connections at a time and keeps 256 waiting; beyond that it answers 503. A connection has 5 seconds for its request
+line and headers and 30 for the whole request, so 32 slow clients can still keep it busy: put it behind an onion service with its
+denial-of-service protection. An exchange (`POST /exchange`) carries the credit, its claim signature with `expires_at` (between 30
+minutes and 7 days ahead), and `exchange_sig`, the owner's signature of the blinded points; a claim that could not reach the chain
+before its expiry is given up and answers 410. An attestation needs an unused request token (`X-Ona-Token`), which it does not spend:
+4 per token, and 600 per minute across all clients. A signature needs the request token spent on the chat it signs, for that reply's
+`id`: 4 per chat for 10 minutes, a fetch the service does not answer is not counted, and the global limit never refuses it. The same
+token on the attestation, the chat and the signature lets the relay link these three requests, as it already could from their timing.
+If the store reports a write error, every further write is refused until the relay is restarted.
 
 ## Journal anchoring
 
@@ -182,7 +247,12 @@ minute across all clients. If the store reports a write error, every further wri
 cargo test -p ona-anchor
 ```
 
-When a program uses it, it will sign `anchor` with the account named as aggregator in `ona-registry`, through `ona-near`.
+When a program uses it, it will sign `anchor` with the account named as aggregator in `ona-registry`, through `ona-near`, attaching
+0.01 NEAR per anchor for storage (the registry refunds the excess), and read each anchor back from a final block. The registry accepts
+at most one anchor every 30 minutes, and the aggregator cannot be one of its owners. After deployment, the registry's owners call
+`propose` (payable, storage), then `confirm(id, action)` for the other owner, or `emergency` alone to revoke a value or raise the
+incident level; `propose_takeover` replaces a lost owner after 30 days unless it vetoes. A program using the aggregator should give
+it a tag file (`Aggregator::with_tag_file`) on storage that survives restarts. Nothing new to configure.
 
 ## Simulate a crowd
 
@@ -204,8 +274,8 @@ cargo run -p ona-crowd -- simulate crowd.json out/
 ```
 
 It writes `out/timeline.json` (only what the chain shows), `out/truth.json` (which vault each user chose, kept apart to measure
-privacy) and `out/keys.json` (the fake users' private keys, readable by its owner only, never printed; an existing file is not
-replaced). For each depositor account, it counts the vaults and the placement batches still possible from the public timeline and
+privacy) and `out/keys.json` (the fake users' private keys, never printed). All three are new files readable by their owner only; an
+existing file is never replaced. Choose an output folder outside the repository; `out/` and these file names are ignored by git anyway. For each depositor account, it counts the vaults and the placement batches still possible from the public timeline and
 the pool's public rules, and how many accounts have only one possible vault. Batches are assigned jointly, since each holds exactly
 the notes of its members. The figures are an upper bound on privacy: the elimination never removes the true vault, but a stronger
 observer can remove more. Accounts never placed are counted apart. A fixed seed lets anyone rebuild every key and the ground truth,
@@ -220,7 +290,9 @@ played on a chain.
 
 `ona-crowd run crowd.json out/` also plays the timeline on a local node or testnet. **It has never run.** It ignores the configured
 seed and draws a secret one from the system, never stored. It refuses mainnet, by name and by the chain id the node reports, and
-lending vaults (no adapter yet). Every fake account is funded by the same account, so the crowd is recognizable on chain. The `ona-pool` contract is not used yet, so the agent account stands in for it with its own funds:
+lending vaults (no adapter yet). Before writing any file or sending anything, it computes everything the funder account will send and
+stops if that is above `ONA_CROWD_MAX_SPEND_NEAR`. An error from the node stops the run; nothing is taken back from the fake accounts
+or from staking. Every fake account is funded by the same account, so the crowd is recognizable on chain. The `ona-pool` contract is not used yet, so the agent account stands in for it with its own funds:
 placement calls `deposit_and_stake` on a staking pool, withdrawal calls `unstake` (the funds stay locked for some epochs and are not
 withdrawn), exit payments are transfers. The agent account is funded with what it places plus what it pays out. Deposits are real `deposit` calls on the mint, whose token secrets are written to
 `out/tokens.txt` first. Each denomination must equal one tier of the mint exactly; the mint from `ona-deploy` doubles its tiers, so it
@@ -229,7 +301,9 @@ cannot serve 1, 10 and 100 at once.
 | Variable | Value |
 |---|---|
 | `ONA_RPC_URL`, `ONA_NETWORK` | NEAR RPC endpoint and network name |
+| `ONA_CHAIN_ID` | optional, the chain id the node must report, default the value of `ONA_NETWORK` |
 | `ONA_MINT` | account of the deployed mint |
+| `ONA_CROWD_MAX_SPEND_NEAR` | optional, most NEAR the run may send from the funder account, default 10 |
 | `ONA_CROWD_FUNDER_ACCOUNT`, `ONA_CROWD_FUNDER_KEY_FILE` | account that funds the fake users and the agent, and its key in a file readable by its owner only |
 | `ONA_CROWD_AGENT_ACCOUNT`, `ONA_CROWD_AGENT_KEY_FILE` | account that places, withdraws and pays, and its key |
 | `ONA_CROWD_UNIT_MILLI_NEAR` | optional, value of one unit of the asset, default 100 |

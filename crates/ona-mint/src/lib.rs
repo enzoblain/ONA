@@ -9,12 +9,24 @@ use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_sdk::{env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise};
 
 pub const MAX_DENOMS: usize = 8;
-pub const MAX_ISSUE: usize = 64;
-pub const MAX_CLAIM: usize = 32;
+/// Keeps the signer's `issue` budget (10 + 8 Tgas per token, 266 Tgas for 32) under 300 Tgas. The
+/// 2026-11-10 sandbox run measured 222.5 Tgas for 32 tokens on the earlier code; not measured since.
+pub const MAX_ISSUE: usize = 32;
+/// Keeps the relay's `relay_claim` budget (10 + 10 Tgas per item, 290 Tgas for 28) under 300 Tgas.
+/// About 8.3 Tgas per item was measured on the earlier code (264.6 Tgas for 32); 28 items not measured.
+pub const MAX_CLAIM: usize = 28;
 pub const MAX_CHANGE: usize = 8;
 pub const ISSUE_TIMEOUT_NS: u64 = 3_600_000_000_000;
-/// How long a locked deposit stays out of reach of `refund`, so the signer can retry `issue`.
-pub const LOCK_TIMEOUT_NS: u64 = 24 * 3_600_000_000_000;
+/// Value of `locked_until` once a record is locked. A lock no longer expires: only the signer's
+/// `unlock` reopens a refund.
+pub const LOCKED: u64 = u64::MAX;
+/// Most record ids one `pending_deposits` call reads, live or not, so the view stays cheap.
+pub const MAX_SCAN: u64 = 256;
+/// Longest validity of an owner signature: its `expires_at` may be at most this far after the block
+/// that executes it, so a signature cannot be made to last for ever.
+pub const MAX_SIGNATURE_VALIDITY_NS: u64 = 7 * 24 * HOUR_NS;
+/// Longest network name accepted by `new`.
+pub const MAX_NETWORK_LEN: usize = 32;
 const CALLBACK_GAS: Gas = Gas::from_tgas(15);
 pub const HOUR_NS: u64 = 3_600_000_000_000;
 pub const STORAGE_PER_TOKEN: u128 = 1_000_000_000_000_000_000_000;
@@ -98,6 +110,8 @@ pub struct TokenInput {
 pub struct ClaimInput {
     pub token: TokenInput,
     pub owner_sig: Base64VecU8,
+    /// Last block timestamp (ns) at which the owner signature is valid. Part of the signed digest.
+    pub expires_at: U64,
 }
 
 #[near(serializers = [json])]
@@ -115,15 +129,45 @@ pub struct Denom {
     hourly_redeem_cap: u64,
 }
 
+/// Sliding redemption limit (leaky bucket). Each redemption adds `HOUR_NS` to `level`, which drains
+/// by `cap` per nanosecond, and a redemption is refused if `level` would pass `cap * HOUR_NS`.
+/// So at most `cap` redemptions at once, and at most `cap + cap * t / 1 h` over any period `t`.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Default)]
+pub struct Bucket {
+    pub level: U128,
+    /// Block timestamp of the last accepted redemption.
+    pub at: U64,
+}
+
+impl Bucket {
+    /// Takes one unit if the bucket has room. Changes nothing on refusal.
+    fn take(&mut self, cap: u64, now: u64) -> bool {
+        let unit = u128::from(HOUR_NS);
+        let full = u128::from(cap).saturating_mul(unit);
+        let elapsed = u128::from(now.saturating_sub(self.at.0));
+        let level = self.level.0.saturating_sub(elapsed.saturating_mul(u128::from(cap)));
+        if level.saturating_add(unit) > full {
+            return false;
+        }
+        self.level = U128(level + unit);
+        self.at = U64(now);
+        true
+    }
+}
+
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Default)]
 pub struct Counters {
     pub deposited: u64,
+    /// Counted at `lock`, not at `issue`: once locked, a record's signatures may be public.
     pub issued: u64,
     pub redeemed: u64,
     pub refunded: u64,
-    pub window_hour: u64,
-    pub window_used: u64,
+    /// Limit shared by `redeem` and `spend`.
+    pub bucket: Bucket,
+    /// Separate limit for `relay_claim`, so holders emptying the public bucket cannot stop the relay.
+    pub relay_bucket: Bucket,
 }
 
 #[near(serializers = [borsh])]
@@ -135,8 +179,15 @@ pub struct Pending {
     total: u128,
     storage_paid: u128,
     is_change: bool,
-    /// Zero until `lock`. A signature is only ever published for a locked record.
+    /// Zero until `lock`, then `LOCKED`. A signature is only ever published for a locked record.
     locked_until: u64,
+}
+
+#[near(serializers = [json])]
+pub struct PendingPage {
+    pub records: Vec<PendingView>,
+    /// Where the next call should start. Moves forward even over a range with no live record.
+    pub next: U64,
 }
 
 #[near(serializers = [json])]
@@ -337,17 +388,18 @@ fn pairing_ok(sig_raw: &[u8], point_raw: &[u8], pk_raw: &[u8]) -> bool {
     env::bls12381_pairing_check(&input).unwrap_or(false)
 }
 
-/// Mirrors `ona_token::redeem_digest`.
-fn redeem_digest(contract: &AccountId, submitter: &AccountId, nf: &[u8; 32]) -> [u8; 32] {
-    let mut d = Vec::with_capacity(109);
-    d.extend_from_slice(b"ONA-REDEEM-V1");
+/// Mirrors `ona_token::redeem_digest_until`.
+fn redeem_digest(contract: &AccountId, submitter: &AccountId, nf: &[u8; 32], expires_at: u64) -> [u8; 32] {
+    let mut d = Vec::with_capacity(117);
+    d.extend_from_slice(b"ONA-REDEEM-V2");
     d.extend_from_slice(&sha256(contract.as_bytes()));
     d.extend_from_slice(&sha256(submitter.as_bytes()));
     d.extend_from_slice(nf);
+    d.extend_from_slice(&expires_at.to_le_bytes());
     sha256(&d)
 }
 
-/// Mirrors `ona_token::spend_digest`. Tests sign with one and verify with the other.
+/// Mirrors `ona_token::spend_digest_until`. Tests sign with one and verify with the other.
 #[allow(clippy::too_many_arguments)]
 fn spend_digest(
     contract: &AccountId,
@@ -358,9 +410,10 @@ fn spend_digest(
     amount: u128,
     fee: u128,
     change: &[(u8, [u8; G1_LEN])],
+    expires_at: u64,
 ) -> [u8; 32] {
-    let mut d = Vec::with_capacity(172 + change.len() * 49);
-    d.extend_from_slice(b"ONA-SPEND-V2");
+    let mut d = Vec::with_capacity(180 + change.len() * 49);
+    d.extend_from_slice(b"ONA-SPEND-V3");
     d.extend_from_slice(&sha256(contract.as_bytes()));
     d.extend_from_slice(&sha256(submitter.as_bytes()));
     d.push(denom_id);
@@ -373,19 +426,86 @@ fn spend_digest(
         d.push(*denom);
         d.extend_from_slice(blinded);
     }
+    d.extend_from_slice(&expires_at.to_le_bytes());
     sha256(&d)
 }
 
-/// Mirrors `ona_token::claim_digest`.
-fn claim_digest(mint: &AccountId, relay: &AccountId, nf: &[u8; 32]) -> [u8; 32] {
-    let mut d = Vec::with_capacity(108);
-    d.extend_from_slice(b"ONA-CLAIM-V1");
+/// Mirrors `ona_token::claim_digest_until`.
+fn claim_digest(mint: &AccountId, relay: &AccountId, nf: &[u8; 32], expires_at: u64) -> [u8; 32] {
+    let mut d = Vec::with_capacity(116);
+    d.extend_from_slice(b"ONA-CLAIM-V2");
     d.extend_from_slice(&sha256(mint.as_bytes()));
     d.extend_from_slice(&sha256(relay.as_bytes()));
     d.extend_from_slice(nf);
+    d.extend_from_slice(&expires_at.to_le_bytes());
     sha256(&d)
 }
 
+/// The y coordinates (little-endian, sign bit cleared) of the eight small-order points of
+/// edwards25519, including the non-canonical encodings p and p + 1 of 0 and 1. With such an owner
+/// key, the non-strict `ed25519_verify` of the host can accept a trivial signature for any message.
+/// Checked against `ed25519_dalek::VerifyingKey::is_weak` in tests.
+const SMALL_ORDER_Y: [[u8; 32]; 7] = [
+    [0; 32],
+    {
+        let mut y = [0u8; 32];
+        y[0] = 1;
+        y
+    },
+    hex32(b"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
+    hex32(b"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
+    hex32(b"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex32(b"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex32(b"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+];
+
+const fn hex32(s: &[u8; 64]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = nibble(s[2 * i]) << 4 | nibble(s[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
+/// True for an owner key of small order, whatever its sign bit.
+pub fn weak_owner_key(pk: &[u8; 32]) -> bool {
+    let mut y = *pk;
+    y[31] &= 0x7f;
+    SMALL_ORDER_Y.contains(&y)
+}
+
+/// Checks an owner signature with its expiry. The host's `ed25519_verify` is not strict
+/// (near-vm-runner 0.38.0 calls `verify`, not `verify_strict`), so small-order keys are refused here.
+fn owner_sig_ok(sig: &[u8; 64], digest: [u8; 32], pk: &[u8; 32], expires_at: u64) -> Result<(), &'static str> {
+    let now = env::block_timestamp();
+    if now > expires_at {
+        return Err("owner signature expired");
+    }
+    if expires_at > now.saturating_add(MAX_SIGNATURE_VALIDITY_NS) {
+        return Err("owner signature expiry too far in the future");
+    }
+    if weak_owner_key(pk) {
+        return Err("weak owner key");
+    }
+    if !env::ed25519_verify(sig, digest, pk) {
+        return Err("bad owner signature");
+    }
+    Ok(())
+}
+
+/// Refuses the same blinded point twice in one record: both copies would get the same signature,
+/// count twice in `issued`, and only one could ever be spent.
+fn require_distinct(items: &[(u8, [u8; G1_LEN])]) {
+    for (i, (_, p)) in items.iter().enumerate() {
+        require!(!items[..i].iter().any(|(_, q)| q == p), "duplicate blinded point");
+    }
+}
+
+/// Plain transfer without callback. If `to` was deleted in the meantime, NEAR returns the amount to
+/// this contract, where nobody can take it out: solvency is unaffected, the payee loses it. Only
+/// `spend` has a callback, because its payee is chosen by the token owner.
 fn pay(to: AccountId, amount: u128) {
     if amount > 0 {
         let _ = Promise::new(to).transfer(NearToken::from_yoctonear(amount));
@@ -418,6 +538,20 @@ impl Mint {
     ) -> Self {
         require!(!denoms.is_empty() && denoms.len() <= MAX_DENOMS, "bad denomination count");
         let contract = env::current_account_id();
+        require!(
+            signer != relay && signer != guardian && relay != guardian,
+            "signer, relay and guardian must be distinct accounts"
+        );
+        require!(
+            signer != contract && relay != contract && guardian != contract,
+            "a role cannot be the mint itself"
+        );
+        require!(
+            !network.is_empty()
+                && network.len() <= MAX_NETWORK_LEN
+                && network.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'),
+            "network must be 1 to 32 characters among a-z, 0-9, - and _"
+        );
         let dst = format!("ONA-MINT-V1:{network}:{contract}:BLS12381G1_XMD:SHA-256_SSWU_RO_");
         require!(dst.len() <= 255, "DST too long");
 
@@ -438,7 +572,13 @@ impl Mint {
             nullifiers: LookupMap::new(b"n".to_vec()),
         };
 
-        let mut seen: Vec<Vec<u8>> = Vec::new();
+        // Tier safety rests on independent keys. Identical keys and a key with its negation are
+        // refused here; other relations (k * pk for a known k) cannot be detected by the contract.
+        require!(
+            denoms.windows(2).all(|w| w[0].value.0 < w[1].value.0),
+            "denomination values must strictly increase"
+        );
+        let mut seen: Vec<[u8; G2_LEN]> = Vec::new();
         for (id, d) in denoms.iter().enumerate() {
             require!(d.value.0 >= REDEEM_FEE + MIN_PAYOUT, "denomination too small");
             require!(d.circulation_cap > 0 && d.hourly_redeem_cap > 0, "caps must be positive");
@@ -446,7 +586,10 @@ impl Mint {
                 fixed(&d.pk_g2.0).unwrap_or_else(|| env::panic_str("bad key length"));
             require!(pk[0] & 0x80 != 0 && pk[0] & 0x40 == 0, "bad key flags");
             require!(!seen.iter().any(|k| k[..] == pk[..]), "duplicate key");
-            seen.push(pk.to_vec());
+            let mut negated = pk;
+            negated[0] ^= 0x20;
+            require!(!seen.iter().any(|k| k[..] == negated[..]), "related key: the negation of another tier's key");
+            seen.push(pk);
             let pk_raw = env::bls12381_p2_decompress(pk)
                 .filter(|raw| raw.len() == 192)
                 .unwrap_or_else(|| env::panic_str("bad key"));
@@ -480,7 +623,7 @@ impl Mint {
     pub fn deposit(&mut self, denom_id: u8, blinded: Vec<Base64VecU8>) -> U64 {
         require!(!self.halted, "halted");
         let n = blinded.len();
-        require!(n.is_power_of_two() && n <= MAX_ISSUE, "token count must be a power of two up to 64");
+        require!(n.is_power_of_two() && n <= MAX_ISSUE, "token count must be a power of two up to 32");
         let denom = self.denom(denom_id);
         let items: Vec<(u8, [u8; G1_LEN])> = blinded
             .iter()
@@ -491,6 +634,7 @@ impl Mint {
                 (denom_id, p)
             })
             .collect();
+        require_distinct(&items);
 
         let mut c = self.counter(denom_id);
         self.require_room(&denom, &c, n as u64);
@@ -510,9 +654,10 @@ impl Mint {
         U64(id)
     }
 
-    /// First half of issuance. Blinded signatures are public as soon as an `issue` transaction is
-    /// sent, even if it fails, so a depositor must not be able to get a refund after that. The
-    /// signer locks first, and only publishes signatures for a record it has seen locked.
+    /// First half of issuance, and the accounting commitment. Blinded signatures are public as
+    /// soon as an `issue` transaction is sent, even if it fails, so the tokens are counted as
+    /// issued here and the record can no longer be refunded, unless the signer `unlock`s it. A
+    /// signer that fails after publishing therefore costs the depositor, never other holders.
     pub fn lock(&mut self, deposit_id: U64) {
         require!(!self.halted, "halted");
         require!(env::predecessor_account_id() == self.signer, "only the signer can lock");
@@ -520,18 +665,46 @@ impl Mint {
             self.pending.get(&deposit_id.0).unwrap_or_else(|| env::panic_str("unknown deposit"));
         require!(record.locked_until == 0, "already locked");
         require!(env::block_timestamp() < record.deadline, "deadline passed");
-        record.locked_until = env::block_timestamp() + LOCK_TIMEOUT_NS;
+        for (denom_id, _) in &record.items {
+            let mut c = self.counter(*denom_id);
+            c.issued += 1;
+            self.counters.insert(denom_id, &c);
+        }
+        // The token values now back `issued`; only the issue fees stay held by the record.
+        self.pending_total -= self.committed(&record.items);
+        record.locked_until = LOCKED;
         self.pending.insert(&deposit_id.0, &record);
         event("lock", &format!("{{\"id\":{}}}", deposit_id.0));
     }
 
-    /// Allowed after `halt` for records already locked: their signatures may already be public.
+    /// Reverses a `lock`. The signer calls it only for a record whose signatures it never
+    /// broadcast, for example a record it cannot sign. The record then refunds at its deadline.
+    /// Refused if the tier has fewer live tokens than the record would remove.
+    pub fn unlock(&mut self, deposit_id: U64) {
+        require!(env::predecessor_account_id() == self.signer, "only the signer can unlock");
+        let mut record =
+            self.pending.get(&deposit_id.0).unwrap_or_else(|| env::panic_str("unknown deposit"));
+        require!(record.locked_until != 0, "deposit is not locked");
+        for (denom_id, _) in &record.items {
+            let mut c = self.counter(*denom_id);
+            require!(c.issued > c.redeemed, "tokens of this tier already redeemed");
+            c.issued -= 1;
+            self.counters.insert(denom_id, &c);
+        }
+        self.pending_total = add(self.pending_total, self.committed(&record.items));
+        record.locked_until = 0;
+        self.pending.insert(&deposit_id.0, &record);
+        event("unlock", &format!("{{\"id\":{}}}", deposit_id.0));
+    }
+
+    /// Allowed at any time after `lock`, including after `halt`: the signatures may already be
+    /// public. The event carries the blinded signatures, so a wallet can read them from any RPC
+    /// that serves logs instead of looking for the transaction's arguments.
     pub fn issue(&mut self, deposit_id: U64, sigs: Vec<Base64VecU8>) {
         require!(env::predecessor_account_id() == self.signer, "only the signer can issue");
         let record =
             self.pending.get(&deposit_id.0).unwrap_or_else(|| env::panic_str("unknown deposit"));
         require!(record.locked_until != 0, "deposit is not locked");
-        require!(env::block_timestamp() < record.locked_until, "lock expired");
         require!(sigs.len() == record.items.len(), "wrong signature count");
 
         for ((denom_id, blinded), sig) in record.items.iter().zip(sigs.iter()) {
@@ -542,13 +715,10 @@ impl Mint {
             let blinded_raw =
                 decompress_g1(blinded).unwrap_or_else(|| env::panic_str("bad blinded point"));
             require!(pairing_ok(&sig_raw, &blinded_raw, &denom.pk_raw), "bad signature");
-            let mut c = self.counter(*denom_id);
-            c.issued += 1;
-            self.counters.insert(denom_id, &c);
         }
 
         self.pending.remove(&deposit_id.0);
-        self.pending_total -= record.total - record.storage_paid;
+        self.pending_total -= record.total - record.storage_paid - self.committed(&record.items);
         let fees = mul(ISSUE_FEE_PER_TOKEN, record.items.len() as u128);
         self.signer_fees = add(self.signer_fees, fees);
         // A change record's depositor may not exist yet, and this amount would be too small to
@@ -558,14 +728,20 @@ impl Mint {
         } else {
             pay(record.depositor, record.storage_paid);
         }
-        event("issue", &format!("{{\"id\":{},\"count\":{}}}", deposit_id.0, sigs.len()));
+        let sigs_json = near_sdk::serde_json::to_string(&sigs)
+            .unwrap_or_else(|_| env::panic_str("signature encoding"));
+        event(
+            "issue",
+            &format!("{{\"id\":{},\"count\":{},\"sigs\":{sigs_json}}}", deposit_id.0, sigs.len()),
+        );
     }
 
+    /// Only for a record that is not locked, after its deadline.
     pub fn refund(&mut self, deposit_id: U64) {
         let record =
             self.pending.get(&deposit_id.0).unwrap_or_else(|| env::panic_str("unknown deposit"));
-        let opens_at = if record.locked_until != 0 { record.locked_until } else { record.deadline };
-        require!(env::block_timestamp() >= opens_at, "deadline not reached");
+        require!(record.locked_until == 0, "deposit is locked: only the signer can unlock it");
+        require!(env::block_timestamp() >= record.deadline, "deadline not reached");
         for (denom_id, _) in &record.items {
             let mut c = self.counter(*denom_id);
             c.refunded += 1;
@@ -579,15 +755,22 @@ impl Mint {
 
     /// Pays the token's own implicit account. Needs the owner's signature naming the submitter,
     /// so that nobody who merely saw the token can force its exit and collect the fee.
-    pub fn redeem(&mut self, token: TokenInput, owner_sig: Base64VecU8) {
+    pub fn redeem(&mut self, token: TokenInput, owner_sig: Base64VecU8, expires_at: U64) {
         let t = parse_token(&token).unwrap_or_else(|| env::panic_str("bad token encoding"));
         let denom = self.denom(t.denom_id);
         let nf = nullifier(t.denom_id, &t.pk, &t.nonce);
         require!(!self.nullifiers.contains_key(&nf), "token already spent");
         let sig: [u8; 64] =
             fixed(&owner_sig.0).unwrap_or_else(|| env::panic_str("bad owner signature length"));
-        let digest = redeem_digest(&env::current_account_id(), &env::predecessor_account_id(), &nf);
-        require!(env::ed25519_verify(&sig, digest, &t.pk), "bad owner signature");
+        let digest = redeem_digest(
+            &env::current_account_id(),
+            &env::predecessor_account_id(),
+            &nf,
+            expires_at.0,
+        );
+        if let Err(reason) = owner_sig_ok(&sig, digest, &t.pk, expires_at.0) {
+            env::panic_str(reason);
+        }
         require!(self.token_valid(&t, &denom), "invalid token");
         if let Err(reason) = self.mark_spent(&nf, t.denom_id, &denom, false) {
             env::panic_str(reason);
@@ -608,6 +791,7 @@ impl Mint {
         amount: U128,
         fee: U128,
         change: Vec<BlindedOut>,
+        expires_at: U64,
     ) {
         let t = parse_token(&token).unwrap_or_else(|| env::panic_str("bad token encoding"));
         let denom = self.denom(t.denom_id);
@@ -629,14 +813,26 @@ impl Mint {
             change_value = add(change_value, d.value);
             items.push((out.denom_id, p));
         }
+        require_distinct(&items);
 
         let sig: [u8; 64] =
             fixed(&owner_sig.0).unwrap_or_else(|| env::panic_str("bad owner signature length"));
         let contract = env::current_account_id();
         let submitter = env::predecessor_account_id();
-        let digest =
-            spend_digest(&contract, &submitter, t.denom_id, &nf, &to, amount.0, fee.0, &items);
-        require!(env::ed25519_verify(&sig, digest, &t.pk), "bad owner signature");
+        let digest = spend_digest(
+            &contract,
+            &submitter,
+            t.denom_id,
+            &nf,
+            &to,
+            amount.0,
+            fee.0,
+            &items,
+            expires_at.0,
+        );
+        if let Err(reason) = owner_sig_ok(&sig, digest, &t.pk, expires_at.0) {
+            env::panic_str(reason);
+        }
         require!(self.token_valid(&t, &denom), "invalid token");
         require!(
             add(add(amount.0, fee.0), change_value) == denom.value,
@@ -706,7 +902,10 @@ impl Mint {
         results
     }
 
-    /// Permanent. Stops new money only: holders can always get out through redeem, spend, refund.
+    /// Permanent. Stops new money only: `deposit`, `lock` and change in `spend`. It does not stop
+    /// `redeem`, `spend` without change, `relay_claim`, `refund`, `unlock`, or `issue` of a record
+    /// already locked, and it does not lower the redemption limits: a thief holding the signer key
+    /// keeps redeeming at the limit's pace after a halt.
     pub fn halt(&mut self) {
         require!(env::predecessor_account_id() == self.guardian, "only the guardian can halt");
         self.halted = true;
@@ -749,27 +948,44 @@ impl Mint {
         fixed::<32>(&nf.0).is_some_and(|nf| self.nullifiers.get(&nf).unwrap_or(false))
     }
 
+    /// Live records from `from`, reading at most `MAX_SCAN` ids. An empty answer does not mean
+    /// that no record follows: use `pending_scan` to learn where to continue.
     pub fn pending_deposits(&self, from: U64, limit: u16) -> Vec<PendingView> {
-        (from.0..self.next_id)
-            .filter_map(|id| self.pending.get(&id).map(|p| (id, p)))
-            .take(usize::from(limit.min(64)))
-            .map(|(id, p)| PendingView {
-                id: U64(id),
-                depositor: p.depositor,
-                items: p
-                    .items
-                    .iter()
-                    .map(|(denom_id, b)| BlindedOut {
-                        denom_id: *denom_id,
-                        blinded: Base64VecU8(b.to_vec()),
-                    })
-                    .collect(),
-                deadline: U64(p.deadline),
-                locked_until: U64(p.locked_until),
-                total: U128(p.total),
-                is_change: p.is_change,
-            })
-            .collect()
+        self.pending_scan(from, limit).records
+    }
+
+    /// Like `pending_deposits`, plus the id to start the next call from. A `limit` of 0 counts as 1,
+    /// so `next` always moves forward while records remain.
+    pub fn pending_scan(&self, from: U64, limit: u16) -> PendingPage {
+        let limit = usize::from(limit.clamp(1, 64));
+        let end = from.0.saturating_add(MAX_SCAN).min(self.next_id);
+        let mut records = Vec::new();
+        let mut next = end.max(from.0);
+        for id in from.0..end {
+            if records.len() == limit {
+                next = id;
+                break;
+            }
+            if let Some(p) = self.pending.get(&id) {
+                records.push(PendingView {
+                    id: U64(id),
+                    depositor: p.depositor,
+                    items: p
+                        .items
+                        .iter()
+                        .map(|(denom_id, b)| BlindedOut {
+                            denom_id: *denom_id,
+                            blinded: Base64VecU8(b.to_vec()),
+                        })
+                        .collect(),
+                    deadline: U64(p.deadline),
+                    locked_until: U64(p.locked_until),
+                    total: U128(p.total),
+                    is_change: p.is_change,
+                });
+            }
+        }
+        PendingPage { records, next: U64(next) }
     }
 
     /// Invariant I1: the balance covers storage and every claim on the contract.
@@ -802,6 +1018,14 @@ impl Mint {
 
     fn counter(&self, id: u8) -> Counters {
         self.counters.get(&id).unwrap_or_else(|| env::panic_str("unknown denomination"))
+    }
+
+    /// What a record's tokens are worth once counted in `issued`: value plus the token's storage,
+    /// the same amount `reserve_status` counts per live token.
+    fn committed(&self, items: &[(u8, [u8; G1_LEN])]) -> u128 {
+        items.iter().fold(0u128, |acc, (denom_id, _)| {
+            add(acc, add(self.denom(*denom_id).value, STORAGE_PER_TOKEN))
+        })
     }
 
     fn require_room(&self, denom: &Denom, c: &Counters, n: u64) {
@@ -862,15 +1086,11 @@ impl Mint {
         if c.redeemed + 1 > c.issued {
             return Err("more redemptions than issued tokens");
         }
-        let hour = env::block_timestamp() / HOUR_NS;
-        if hour != c.window_hour {
-            c.window_hour = hour;
-            c.window_used = 0;
-        }
-        if c.window_used >= denom.hourly_redeem_cap {
+        let now = env::block_timestamp();
+        let bucket = if by_relay { &mut c.relay_bucket } else { &mut c.bucket };
+        if !bucket.take(denom.hourly_redeem_cap, now) {
             return Err("hourly redemption limit reached");
         }
-        c.window_used += 1;
         c.redeemed += 1;
         self.counters.insert(&denom_id, &c);
         self.nullifiers.insert(nf, &by_relay);
@@ -887,8 +1107,10 @@ impl Mint {
             return None;
         }
         // The cheap check first: a wrong owner signature should not cost a pairing.
-        let digest = claim_digest(&env::current_account_id(), &self.relay, &nf);
-        if !env::ed25519_verify(&sig, digest, &t.pk) || !self.token_valid(&t, &denom) {
+        let digest = claim_digest(&env::current_account_id(), &self.relay, &nf, item.expires_at.0);
+        if owner_sig_ok(&sig, digest, &t.pk, item.expires_at.0).is_err()
+            || !self.token_valid(&t, &denom)
+        {
             return None;
         }
         self.mark_spent(&nf, t.denom_id, &denom, true).ok()?;

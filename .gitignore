@@ -9,3 +9,15 @@ target/
 *keystore*
 *keys.bin
 *.state
+
+# ona-crowd outputs: private keys, token secrets and the ground truth. Write them outside the repository.
+out/
+keys.json
+tokens.txt
+truth.json
+timeline.json
+
+# Relay store and NEAR CLI credential files
+*.store
+store.log
+credentials/
