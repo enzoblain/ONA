@@ -234,9 +234,14 @@ The account that holds the funds the agent places. Never deployed, tested on the
   vault's list has stayed full for that delay (any note may then leave), otherwise what the vault's payable requests need beyond its
   liquid funds. `placed` (the total balance) counts staked and already unstaked funds together, and the staking pool is expected to
   refuse an `unstake` above what is staked and a `withdraw` above what is unstaked (not verified). So a call whose amount the
-  contract fixes first reads `get_account_staked_balance` (or `get_account_unstaked_balance` for a withdrawal) and asks for at most
-  that: an `unstake` of 1 yocto by the agent, or share rounding at the staking pool, cannot make it fail. A failed reading frees the
-  vault and starts no interval. At most one successful `unstake` per vault every 3 days (a design
+  contract fixes first reads the target's balances and asks for at most what is there: a forced `withdraw` reads
+  `get_account_unstaked_balance`; a forced `unstake` reads both `get_account_unstaked_balance` and `get_account_staked_balance`,
+  asks for at most the staked part, and asks for nothing while unstaked funds are still waiting there (event `unstake_waits`): each
+  `unstake` is expected to push back the release of everything already unstaked (not verified), so a saboteur repeating a forced
+  `unstake` every 3 days could otherwise keep those funds locked; the `withdraw` comes first. An `unstake` of 1 yocto by the agent, or
+  share rounding at the staking pool, cannot make a forced call fail. A failed reading frees the vault and starts no interval. How
+  long the staking pool really keeps unstaked funds locked (a number of epochs, not verified), and whether a new `unstake` restarts
+  that wait, are to be measured on a local node; the tests use a stand-in of 36 hours. At most one successful `unstake` per vault every 3 days (a design
   margin) of each kind: the agent's own calls and the calls whose amount the contract fixes have separate intervals, so an
   `unstake` by the agent just before a request is overdue cannot hold back the one the contract fixes. A failed call does not count
   (`on_unstake` reads the result). Someone other than the agent can `withdraw` at most once an

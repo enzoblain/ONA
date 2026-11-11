@@ -1122,9 +1122,16 @@ impl Pool {
         self.vaults.insert(&vault_id, &v);
         if forced {
             // `placed` counts staked and already unstaked funds together, and the staking pool refuses to unstake
-            // more than is staked (not verified): read what is staked, then ask for at most that.
-            let _ = Promise::new(target)
-                .function_call("get_account_staked_balance", self.account_args(), NearToken::from_yoctonear(0), VAULT_GAS)
+            // more than is staked (not verified): read what is unstaked and what is staked, then ask for at most the
+            // staked part, and only if nothing unstaked is waiting (each `unstake` may restart its lock).
+            let _ = Promise::new(target.clone())
+                .function_call("get_account_unstaked_balance", self.account_args(), NearToken::from_yoctonear(0), VAULT_GAS)
+                .and(Promise::new(target).function_call(
+                    "get_account_staked_balance",
+                    self.account_args(),
+                    NearToken::from_yoctonear(0),
+                    VAULT_GAS,
+                ))
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(READ_CALLBACK_GAS)
@@ -1445,13 +1452,22 @@ impl Pool {
         self.vaults.insert(&vault_id, &v);
     }
 
-    /// Second step of an `unstake` whose amount the contract fixed: asks for at most what the target reports as
-    /// staked. A failed or late reading frees the vault and starts no interval.
+    /// Second step of an `unstake` whose amount the contract fixed, with the target's unstaked (result 0) and
+    /// staked (result 1) balances: asks for at most what is staked, and nothing while unstaked funds wait to be
+    /// withdrawn, since a new `unstake` may push back their release (not verified): `withdraw` must come first.
+    /// A failed or late reading frees the vault and starts no interval.
     #[private]
     pub fn on_staked_read(&mut self, vault_id: u32, op: u64, amount: U128) {
         let mut v = self.vault(vault_id);
-        let reading = env::promise_result_checked(0, 64).ok().and_then(|b| parse_u128(&b));
-        let ask = reading.map_or(0, |staked| staked.min(amount.0));
+        let read = |i: u64| env::promise_result_checked(i, 64).ok().and_then(|b| parse_u128(&b));
+        let ask = match (read(0), read(1)) {
+            (Some(0), Some(staked)) => staked.min(amount.0),
+            (Some(_), Some(_)) => {
+                event("unstake_waits", &format!("{{\"vault\":{vault_id}}}"));
+                0
+            }
+            _ => 0,
+        };
         if v.busy_op != op || ask == 0 {
             finish(&mut v, op);
             self.vaults.insert(&vault_id, &v);

@@ -194,7 +194,13 @@ struct H {
     staked: Vec<u128>,
     unstaked: Vec<u128>,
     strict: bool,
+    /// With `strict`, when the unstaked funds of each vault can be withdrawn. Every `unstake` pushes it back
+    /// for all of them, as the standard staking pool is expected to (not verified).
+    unlock_at: Vec<u64>,
 }
+
+/// How long the strict mock keeps unstaked funds locked after an `unstake`: a stand-in for a few epochs.
+const MOCK_LOCK_NS: u64 = 36 * HOUR_NS;
 
 fn new_pool(
     escape: Option<u64>,
@@ -245,6 +251,7 @@ impl H {
             staked: vec![0; MAX_VAULTS as usize],
             unstaked: vec![0; MAX_VAULTS as usize],
             strict: false,
+            unlock_at: vec![0; MAX_VAULTS as usize],
         };
         h.add_vault(max_assets, hourly);
         h.add_vault(max_assets, hourly);
@@ -333,6 +340,11 @@ impl H {
 
     /// Delivers the result of a vault call, or of a payout, to its callback.
     fn callback(&mut self, result: PromiseResult, f: impl FnOnce(&mut Pool)) {
+        self.callback_with(vec![result], f);
+    }
+
+    /// Delivers several joined results to one callback.
+    fn callback_with(&mut self, results: Vec<PromiseResult>, f: impl FnOnce(&mut Pool)) {
         let ctx = VMContextBuilder::new()
             .current_account_id(contract())
             .predecessor_account_id(contract())
@@ -346,7 +358,7 @@ impl H {
             near_sdk::test_vm_config(),
             near_sdk::RuntimeFeesConfig::test(),
             Default::default(),
-            vec![result]
+            results
         );
         f(&mut self.pool);
         self.storage = env::storage_usage();
@@ -539,13 +551,14 @@ impl H {
         let moved = amount.min(self.staked[v]);
         self.staked[v] -= moved;
         self.unstaked[v] += moved;
+        self.unlock_at[v] = self.now + MOCK_LOCK_NS;
         true
     }
 
     /// The staking pool runs a `withdraw` of `amount`: true if it accepts, and the money arrives.
     fn run_withdraw(&mut self, vault: u32, amount: u128) -> bool {
         let v = vault as usize;
-        if self.strict && amount > self.unstaked[v] {
+        if self.strict && (amount > self.unstaked[v] || self.now < self.unlock_at[v]) {
             return false;
         }
         let from_unstaked = amount.min(self.unstaked[v]);
@@ -576,8 +589,10 @@ impl H {
             let args = self.self_call("on_staked_read");
             let (op, target) = (args["op"].as_u64().unwrap(), args["amount"].as_str().unwrap().parse::<u128>().unwrap());
             let staked = self.staked_reading(vault);
+            let unstaked = if self.strict { self.unstaked[vault as usize] } else { 0 };
             let mark = self.calls.len();
-            self.callback(Self::u128_reply(staked), |p| p.on_staked_read(vault, op, U128(target)));
+            let results = vec![Self::u128_reply(unstaked), Self::u128_reply(staked)];
+            self.callback_with(results, |p| p.on_staked_read(vault, op, U128(target)));
             match self.target_call_after(mark, "unstake") {
                 Some(a) => a,
                 None => return false,
@@ -1729,11 +1744,14 @@ fn a_strict_staking_pool_still_returns_everything_after_the_agent_unstaked_one_y
     h.place(0, IN_POSITION);
     assert!(h.unstake_by(&agent(), 0, Some(1)));
     h.now += DEFAULT_ESCAPE_DELAY_NS;
+    assert!(!h.unstake_by(&mallory(), 0, None), "nothing is unstaked while unstaked funds wait");
+    assert!(h.withdraw_by(&mallory(), 0, None), "the waiting yocto comes back first");
+    assert_eq!(h.last_amount("withdraw"), "{\"amount\":\"1\"}");
     assert!(h.unstake_by(&mallory(), 0, None), "asks for what is staked, not for `placed`");
     assert_eq!(h.last_amount("unstake"), format!("{{\"amount\":\"{}\"}}", IN_POSITION - 1));
     h.now += 2 * DAY_NS;
     assert!(h.withdraw_by(&mallory(), 0, None), "asks for what is unstaked");
-    assert_eq!(h.last_amount("withdraw"), format!("{{\"amount\":\"{IN_POSITION}\"}}"));
+    assert_eq!(h.last_amount("withdraw"), format!("{{\"amount\":\"{}\"}}", IN_POSITION - 1));
     h.sync_by(&mallory(), 0, 0);
     h.transfers.clear();
     escape(&mut h, &mallory(), &a[9], &alice());
@@ -1764,13 +1782,36 @@ fn a_strict_staking_pool_returns_everything_when_a_vault_list_stays_full() {
         h.now += DAY_NS;
         h.sync(0, total);
     }
+    assert!(!h.unstake_by(&bob(), 0, None), "the agent's yocto must come back first");
+    assert!(h.withdraw_by(&bob(), 0, None));
     assert!(h.unstake_by(&bob(), 0, None));
     h.now += 2 * DAY_NS;
-    h.sync(0, total);
+    h.sync(0, total - 1);
     assert!(h.withdraw_by(&bob(), 0, None));
     h.transfers.clear();
     escape(&mut h, &bob(), &a[0], &alice());
     assert_eq!(h.transfers, vec![(alice(), CASH[0] - EXIT_STORAGE_FEE)]);
+}
+
+#[test]
+fn a_saboteur_cannot_keep_unstaked_funds_locked_by_unstaking_again() {
+    // Each unstake may push back the release of everything already unstaked: a new forced unstake waits for the
+    // withdrawal, so repeating it every three days cannot keep the funds locked.
+    let mut h = H::new();
+    h.strict = true;
+    let a = h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    h.now += DEFAULT_ESCAPE_DELAY_NS;
+    assert!(h.unstake_by(&mallory(), 0, None));
+    h.now += UNSTAKE_INTERVAL_NS;
+    h.sync_by(&mallory(), 0, IN_POSITION);
+    let unlock = h.unlock_at[0];
+    assert!(!h.unstake_by(&mallory(), 0, None), "the saboteur's second unstake is not sent");
+    assert_eq!(h.unlock_at[0], unlock, "the lock was not pushed back");
+    assert!(h.withdraw_by(&bob(), 0, None));
+    h.transfers.clear();
+    escape(&mut h, &bob(), &a[9], &alice());
+    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE)]);
 }
 
 #[test]
@@ -1783,7 +1824,8 @@ fn a_failed_unstake_does_not_start_the_interval_and_others_cannot_choose_the_amo
     h.call(&mallory(), |p| p.unstake(0, Some(U128(1))));
     assert_eq!(h.self_call("on_staked_read")["amount"], json!(IN_POSITION.to_string()), "not what the caller chose");
     // The staking pool does not answer: the vault is freed and no interval starts.
-    h.reply(0, PromiseResult::Failed, |p, op| p.on_staked_read(0, op, U128(IN_POSITION)));
+    let op = h.vault(0).busy_op;
+    h.callback_with(vec![PromiseResult::Failed, PromiseResult::Failed], |p| p.on_staked_read(0, op, U128(IN_POSITION)));
     assert!(!h.vault(0).busy);
     assert!(h.unstake_by(&alice(), 0, None));
     assert_eq!(h.last_amount("unstake"), format!("{{\"amount\":\"{IN_POSITION}\"}}"));
