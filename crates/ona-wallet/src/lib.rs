@@ -17,8 +17,13 @@
 //! caller must keep `state()` somewhere the backup does not reach (the system keychain), and check it
 //! with `open_expecting`. Getting the key from the operating system's secure storage is not
 //! implemented. The file is locked while open: a second `open` of the same file is refused.
+//!
+//! The same file keeps the pool's notes (see `pool`): cash notes and share notes, each with its vault (none for
+//! cash), its secrets saved before its blinded point leaves, and a status.
 
-use std::collections::BTreeSet;
+pub mod pool;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -36,6 +41,85 @@ const PENDING: u8 = 0;
 const MINTED: u8 = 1;
 const SPENDING: u8 = 2;
 const RELEASED: u8 = 3;
+const NOTE_PENDING: u8 = 4;
+const NOTE_HELD: u8 = 5;
+const NOTE_STATUS: u8 = 6;
+/// Stands for "no vault" in a note record: a cash note.
+const CASH: u32 = u32::MAX;
+
+/// Where a signed pool note stands. Notes still waiting for the agent's blind signature are listed apart, by
+/// `notes_pending`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteStatus {
+    /// Signed by the agent and spendable.
+    Held,
+    /// Signed by its owner for an operation (entry, leave, exit) not known to have happened yet.
+    Spending,
+    /// Spent on chain.
+    Spent,
+}
+
+impl NoteStatus {
+    fn code(self) -> u8 {
+        match self {
+            Self::Held => 1,
+            Self::Spending => 2,
+            Self::Spent => 3,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            1 => Self::Held,
+            2 => Self::Spending,
+            3 => Self::Spent,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Held => "held",
+            Self::Spending => "spending",
+            Self::Spent => "spent",
+        }
+    }
+}
+
+/// A signed note of the pool, with its owner key: a cash note when `vault` is `None`.
+#[derive(Clone)]
+pub struct PoolNote {
+    pub vault: Option<u32>,
+    pub token: Token,
+    pub owner: SigningKey,
+    /// The pool's nullifier for this note.
+    pub nf: [u8; 32],
+    pub status: NoteStatus,
+}
+
+fn pool_nf(vault: Option<u32>, token: &Token) -> [u8; 32] {
+    match vault {
+        None => pool::cash_nullifier(token.denom_id, &token.pk, &token.nonce),
+        Some(v) => pool::note_nullifier(v, token.denom_id, &token.pk, &token.nonce),
+    }
+}
+
+fn vault_code(vault: Option<u32>) -> Result<u32, String> {
+    match vault {
+        None => Ok(CASH),
+        Some(CASH) => Err("bad vault id".into()),
+        Some(v) => Ok(v),
+    }
+}
+
+fn split_vault(data: &[u8]) -> Result<(Option<u32>, &[u8]), String> {
+    if data.len() < 4 {
+        return Err("bad note record".into());
+    }
+    let (code, rest) = data.split_at(4);
+    let code = u32::from_le_bytes(code.try_into().map_err(|_| "bad note record")?);
+    Ok((if code == CASH { None } else { Some(code) }, rest))
+}
 const SEAL_AAD: &[u8] = b"ona/wallet/seal/v1";
 const CHAIN_TAG: &[u8] = b"ona/wallet/line/v1";
 
@@ -71,6 +155,10 @@ pub struct Wallet {
     pending: Vec<Vec<u8>>,
     tokens: Vec<(Token, [u8; 32])>,
     spending: BTreeSet<[u8; 32]>,
+    note_pending: Vec<(Option<u32>, Vec<u8>)>,
+    notes: Vec<(Option<u32>, Token, [u8; 32])>,
+    note_status: BTreeMap<[u8; 32], NoteStatus>,
+    spending_until: BTreeMap<[u8; 32], u64>,
     /// A write failed: nothing more is written until the wallet is opened again.
     broken: bool,
     dropped_torn_line: bool,
@@ -148,6 +236,10 @@ impl Wallet {
             pending: Vec::new(),
             tokens: Vec::new(),
             spending: BTreeSet::new(),
+            note_pending: Vec::new(),
+            notes: Vec::new(),
+            note_status: BTreeMap::new(),
+            spending_until: BTreeMap::new(),
             broken: false,
             dropped_torn_line: false,
         };
@@ -304,6 +396,44 @@ impl Wallet {
                     self.spending.remove(&nf);
                 }
             }
+            NOTE_PENDING => {
+                let (vault, secret) = split_vault(data)?;
+                self.note_pending.push((vault, secret.to_vec()));
+            }
+            NOTE_HELD => {
+                let (vault, rest) = split_vault(data)?;
+                if rest.len() != G1_LEN + TOKEN_LEN + 32 {
+                    return Err("bad note record".into());
+                }
+                let (blinded, rest) = rest.split_at(G1_LEN);
+                let (token, seed) = rest.split_at(TOKEN_LEN);
+                let token = Token::from_bytes(token).map_err(|e| e.to_string())?;
+                let seed: [u8; 32] = seed.try_into().map_err(|_| "bad note record")?;
+                self.note_pending.retain(|(v, p)| {
+                    *v != vault
+                        || PendingToken::from_secret_bytes(p).map(|t| t.blinded[..] != *blinded).unwrap_or(true)
+                });
+                self.note_status.insert(pool_nf(vault, &token), NoteStatus::Held);
+                self.notes.push((vault, token, seed));
+            }
+            NOTE_STATUS => {
+                if data.len() != 33 && data.len() != 41 {
+                    return Err("bad note status record".into());
+                }
+                let nf: [u8; 32] = data[..32].try_into().map_err(|_| "bad note status record")?;
+                let status = NoteStatus::from_code(data[32]).ok_or("bad note status record")?;
+                self.note_status.insert(nf, status);
+                // A spending mark may carry when the owner's signature expires.
+                match data.get(33..41) {
+                    Some(until) if status == NoteStatus::Spending => {
+                        let until = u64::from_le_bytes(until.try_into().map_err(|_| "bad note status record")?);
+                        self.spending_until.insert(nf, until);
+                    }
+                    _ => {
+                        self.spending_until.remove(&nf);
+                    }
+                }
+            }
             _ => return Err("unknown wallet record".into()),
         }
         Ok(())
@@ -404,6 +534,96 @@ impl Wallet {
         let mut record = vec![RELEASED];
         record.extend_from_slice(nf);
         self.append(record)
+    }
+
+    /// Call this before the blinded point of a pool note leaves the device. `vault` is `None` for cash.
+    pub fn save_note_pending(&mut self, vault: Option<u32>, note: &PendingToken) -> Result<(), String> {
+        let mut record = vec![NOTE_PENDING];
+        record.extend_from_slice(&vault_code(vault)?.to_le_bytes());
+        record.extend_from_slice(&note.to_secret_bytes());
+        self.append(record)
+    }
+
+    /// Pool notes waiting for the agent's blind signature, with their vault.
+    pub fn notes_pending(&self) -> Result<Vec<(Option<u32>, PendingToken)>, String> {
+        self.note_pending
+            .iter()
+            .map(|(v, p)| PendingToken::from_secret_bytes(p).map(|t| (*v, t)).map_err(|e| e.to_string()))
+            .collect()
+    }
+
+    /// Completes a pool note from the agent's answer, verified under the tier key read from the contract.
+    pub fn finish_note(
+        &mut self,
+        vault: Option<u32>,
+        blinded: &[u8; G1_LEN],
+        blind_sig: &[u8; G1_LEN],
+        tier_pk: &[u8; G2_LEN],
+    ) -> Result<PoolNote, String> {
+        let pending = self
+            .notes_pending()?
+            .into_iter()
+            .find(|(v, p)| *v == vault && &p.blinded == blinded)
+            .map(|(_, p)| p)
+            .ok_or("no pending note with this blinded point")?;
+        let (token, owner) = pending.finish(blind_sig, tier_pk).map_err(|e| e.to_string())?;
+        let mut record = vec![NOTE_HELD];
+        record.extend_from_slice(&vault_code(vault)?.to_le_bytes());
+        record.extend_from_slice(blinded);
+        record.extend_from_slice(&token.to_bytes());
+        record.extend_from_slice(&owner.to_bytes());
+        self.append(record)?;
+        let nf = pool_nf(vault, &token);
+        Ok(PoolNote { vault, token, owner, nf, status: NoteStatus::Held })
+    }
+
+    /// Every signed pool note, whatever its status, in the order they were received.
+    pub fn notes(&self) -> Vec<PoolNote> {
+        self.notes
+            .iter()
+            .map(|(vault, token, seed)| {
+                let nf = pool_nf(*vault, token);
+                let status = self.note_status.get(&nf).copied().unwrap_or(NoteStatus::Held);
+                PoolNote { vault: *vault, token: token.clone(), owner: SigningKey::from_bytes(seed), nf, status }
+            })
+            .collect()
+    }
+
+    /// Records a note's new status. Call it before the owner's signature leaves the device, so a restart cannot
+    /// offer the note twice. Allowed: held to spending; spending to spent, or back to held when the operation is
+    /// known not to have happened. Spent stays spent.
+    pub fn set_note_status(&mut self, nf: &[u8; 32], status: NoteStatus) -> Result<(), String> {
+        let current = *self.note_status.get(nf).ok_or("unknown pool note")?;
+        let allowed = matches!(
+            (current, status),
+            (NoteStatus::Held, NoteStatus::Spending) | (NoteStatus::Spending, NoteStatus::Spent | NoteStatus::Held)
+        );
+        if !allowed {
+            return Err(format!("a {} note cannot become {}", current.name(), status.name()));
+        }
+        let mut record = vec![NOTE_STATUS];
+        record.extend_from_slice(nf);
+        record.push(status.code());
+        self.append(record)
+    }
+
+    /// Marks a held note as spending, with when its owner's signature expires (nanoseconds): after that, if the
+    /// chain shows the note unspent, the operation can no longer happen and the note can be held again.
+    pub fn set_note_spending(&mut self, nf: &[u8; 32], until: u64) -> Result<(), String> {
+        let current = *self.note_status.get(nf).ok_or("unknown pool note")?;
+        if current != NoteStatus::Held {
+            return Err(format!("a {} note cannot become spending", current.name()));
+        }
+        let mut record = vec![NOTE_STATUS];
+        record.extend_from_slice(nf);
+        record.push(NoteStatus::Spending.code());
+        record.extend_from_slice(&until.to_le_bytes());
+        self.append(record)
+    }
+
+    /// When the signature of a spending note expires, if it was recorded.
+    pub fn spending_until(&self, nf: &[u8; 32]) -> Option<u64> {
+        self.spending_until.get(nf).copied()
     }
 }
 

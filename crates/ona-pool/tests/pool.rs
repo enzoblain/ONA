@@ -1156,6 +1156,17 @@ fn what_is_left_in_an_emptied_vault_belongs_to_nobody() {
     h.enter(&c[0], 0, &POSITION);
     let v = h.vault(0);
     assert_eq!(v.share_price.0, INITIAL_PRICE, "the newcomer does not take what was left");
+    // The view publishes what is set aside, so a wallet can compute the entry price exactly as the contract does.
+    assert_eq!(v.orphan.0, NEAR / 2);
+    let assets = v.liquid.0 + v.placed.0 - v.fee_owed.0;
+    let naive = assets.div_ceil(v.total_shares.0);
+    let exact = (assets - v.orphan.0).div_ceil(v.total_shares.0);
+    assert_ne!(naive, exact, "without `orphan` a wallet would price the entry wrong");
+    let budget = 10 * NEAR - NOTE_STORAGE_FEE;
+    let ones = (budget / (SHARES[1] * exact)) as u64;
+    let tenths = ((budget - u128::from(ones) * SHARES[1] * exact) / (SHARES[0] * exact)) as u64;
+    let c = h.cash(&bob(), 2, 1);
+    h.enter(&c[0], 0, &[(0, tenths), (1, ones)]);
 }
 
 // ---- notes and owners ----
@@ -2015,4 +2026,50 @@ fn deposit_cash_entry_gains_leave_and_exit_never_show_an_account_with_a_vault() 
     for event in ["enter", "leave", "exit"] {
         assert!(h.logs.iter().any(|l| l.contains(&format!("\"event\":\"{event}\""))), "{event}");
     }
+}
+
+// ---- the formats a user's wallet builds ----
+
+#[test]
+fn the_wallets_pool_formats_are_the_contracts_byte_for_byte() {
+    use ona_wallet::pool as wp;
+    let _h = H::new();
+    let (c, to) = (contract(), alice());
+    let (pk, nonce, nf) = ([3u8; 32], [4u8; 32], [5u8; 32]);
+    let list = [(0u8, 9u64), (1, 2)];
+    assert_eq!(wp::cash_dst(NETWORK, c.as_str()), cash_dst(NETWORK, c.as_str()));
+    assert_eq!(wp::note_dst(NETWORK, c.as_str(), 3), note_dst(NETWORK, c.as_str(), 3));
+    assert_eq!(wp::cash_nullifier(2, &pk, &nonce), cash_nullifier(2, &pk, &nonce));
+    assert_eq!(wp::note_nullifier(3, 1, &pk, &nonce), note_nullifier(3, 1, &pk, &nonce));
+    assert_eq!(wp::cash_exit_digest(c.as_str(), &nf, to.as_str(), 77), cash_exit_digest(&c, &nf, &to, 77));
+    assert_eq!(wp::share_exit_digest(c.as_str(), 3, &nf, to.as_str(), 9, 77), share_exit_digest(&c, 3, &nf, &to, 9, 77));
+    assert_eq!(wp::enter_digest(c.as_str(), &nf, 3, &list, 77), enter_digest(&c, &nf, 3, &outs(&list), 77));
+    assert_eq!(wp::leave_digest(c.as_str(), 3, &nf, &list, 77), leave_digest(&c, 3, &nf, &outs(&list), 77));
+}
+
+#[test]
+fn a_cash_note_kept_by_the_wallet_is_paid_by_the_pool() {
+    use ona_wallet::{pool as wp, Wallet};
+    let mut h = H::new();
+    h.deposit(&alice(), NEAR);
+    h.call(&agent(), |p| p.issue_cash(alice(), 1, 1));
+    let path = std::env::temp_dir().join(format!("ona-pool-wallet-{}", std::process::id()));
+    let seal = std::env::temp_dir().join(format!("ona-pool-wallet-{}.seal", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&seal);
+    let mut w = Wallet::open(&path, &[3u8; 32]).unwrap();
+    let dst = wp::cash_dst(NETWORK, contract().as_str());
+    let p = PendingToken::new(&mut OsRng, 1, dst.as_bytes()).unwrap();
+    w.save_note_pending(None, &p).unwrap();
+    let sig = sign_blinded(&h.cash_keys[1], &p.blinded).unwrap();
+    let note = w.finish_note(None, &p.blinded, &sig, &h.cash_pks[1]).unwrap();
+    assert_eq!(note.nf, cash_nullifier(1, &note.token.pk, &note.token.nonce));
+    let owner_sig = sign_digest(&note.owner, &wp::cash_exit_digest(contract().as_str(), &note.nf, alice().as_str(), FAR));
+    let input = NoteInput { tier: 1, pk: b64(&note.token.pk), nonce: b64(&note.token.nonce), sig: b64(&note.token.sig) };
+    h.transfers.clear();
+    h.call(&agent(), move |p| p.pay_exit(input, b64(&owner_sig), alice(), FAR));
+    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE)]);
+    drop(w);
+    std::fs::remove_file(&path).unwrap();
+    let _ = std::fs::remove_file(&seal);
 }

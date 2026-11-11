@@ -1,9 +1,11 @@
 //! `ona`: reads one JSON request per line on stdin and prints one JSON reply per line.
 //! `ona demo` runs a full mission against the fakes. `ona real` uses the real model, configured by
-//! the `ONA_REAL_*` variables: only then does anything here touch a network. Never a chain.
+//! the `ONA_REAL_*` variables. With `ONA_WALLET_FILE` set, the pool commands read the pool contract (`ONA_POOL`)
+//! through `ONA_RPC_URL`, views only; no transport to the pool agent exists yet. Nothing else touches a network.
 
 use std::io;
 
+use ona_core::pool::PoolClient;
 use ona_core::remote::RemoteConfig;
 use ona_core::{serve, Core};
 use serde_json::{json, Value};
@@ -41,6 +43,14 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("real") {
         if let Err(e) = RemoteConfig::from_env().and_then(|config| core.use_real_model(config)) {
             eprintln!("cannot use the real model: {e}");
+            std::process::exit(1);
+        }
+    }
+    match PoolClient::from_env() {
+        Ok(Some(pool)) => core.set_pool(pool),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("cannot open the pool wallet: {e}");
             std::process::exit(1);
         }
     }

@@ -302,3 +302,69 @@ fn a_wallet_without_seal_is_refused_unless_adopted_explicitly() {
     assert!(Wallet::open(&path, &KEY).is_ok(), "sealed from now on");
     assert!(Wallet::open_adopting_unsealed(&path, &KEY).is_err(), "only for a wallet without seal");
 }
+
+const CASH_DST: &str = "ONA-POOL-CASH-V1:sandbox:pool.test:BLS12381G1_XMD:SHA-256_SSWU_RO_";
+const SHARE_DST: &str = "ONA-POOL-V1:sandbox:pool.test:3:BLS12381G1_XMD:SHA-256_SSWU_RO_";
+
+#[test]
+fn pool_notes_and_their_status_survive_a_restart() {
+    use ona_wallet::{pool, NoteStatus};
+    let path = fresh("pool-notes");
+    let sk = keygen(&mut OsRng);
+    let cash = PendingToken::new(&mut OsRng, 2, CASH_DST.as_bytes()).unwrap();
+    let share = PendingToken::new(&mut OsRng, 1, SHARE_DST.as_bytes()).unwrap();
+    let (cb, sb) = (cash.blinded, share.blinded);
+    {
+        let mut w = Wallet::open(&path, &KEY).unwrap();
+        w.save_note_pending(None, &cash).unwrap();
+        w.save_note_pending(Some(3), &share).unwrap();
+    }
+    let mut w = Wallet::open(&path, &KEY).unwrap();
+    let pending = w.notes_pending().unwrap();
+    assert_eq!(pending.iter().map(|(v, _)| *v).collect::<Vec<_>>(), vec![None, Some(3)]);
+    assert!(w.pending().unwrap().is_empty(), "pool notes are not mint tokens");
+    let wrong = w.finish_note(Some(3), &cb, &sign_blinded(&sk, &cb).unwrap(), &sk.public_key());
+    assert!(wrong.is_err(), "the vault is part of the note");
+    let c = w.finish_note(None, &cb, &sign_blinded(&sk, &cb).unwrap(), &sk.public_key()).unwrap();
+    let s = w.finish_note(Some(3), &sb, &sign_blinded(&sk, &sb).unwrap(), &sk.public_key()).unwrap();
+    assert_eq!(c.nf, pool::cash_nullifier(2, &c.token.pk, &c.token.nonce));
+    assert_eq!(s.nf, pool::note_nullifier(3, 1, &s.token.pk, &s.token.nonce));
+    assert_ne!(c.token.pk, s.token.pk, "a fresh owner key per note");
+    w.set_note_status(&c.nf, NoteStatus::Spending).unwrap();
+    drop(w);
+    let mut w = Wallet::open(&path, &KEY).unwrap();
+    assert!(w.notes_pending().unwrap().is_empty());
+    let notes = w.notes();
+    assert_eq!(notes.len(), 2);
+    assert_eq!((notes[0].vault, notes[0].status), (None, NoteStatus::Spending));
+    assert_eq!((notes[1].vault, notes[1].status), (Some(3), NoteStatus::Held));
+    assert!(w.set_note_status(&s.nf, NoteStatus::Spent).is_err(), "spent only after spending");
+    w.set_note_status(&c.nf, NoteStatus::Spent).unwrap();
+    assert!(w.set_note_status(&c.nf, NoteStatus::Held).is_err(), "spent stays spent");
+    assert!(w.set_note_status(&[0u8; 32], NoteStatus::Spending).is_err(), "unknown note");
+    drop(w);
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(seal_of(&path));
+}
+
+#[test]
+fn a_spending_note_keeps_its_signatures_deadline_across_a_restart() {
+    use ona_wallet::NoteStatus;
+    let path = fresh("spending-until");
+    let sk = keygen(&mut OsRng);
+    let p = PendingToken::new(&mut OsRng, 1, CASH_DST.as_bytes()).unwrap();
+    let mut w = Wallet::open(&path, &KEY).unwrap();
+    w.save_note_pending(None, &p).unwrap();
+    let n = w.finish_note(None, &p.blinded, &sign_blinded(&sk, &p.blinded).unwrap(), &sk.public_key()).unwrap();
+    w.set_note_spending(&n.nf, 1234).unwrap();
+    assert!(w.set_note_spending(&n.nf, 99).is_err(), "only a held note starts spending");
+    drop(w);
+    let mut w = Wallet::open(&path, &KEY).unwrap();
+    assert_eq!(w.spending_until(&n.nf), Some(1234));
+    assert_eq!(w.notes()[0].status, NoteStatus::Spending);
+    w.set_note_status(&n.nf, NoteStatus::Held).unwrap();
+    assert_eq!(w.spending_until(&n.nf), None, "a held note has no deadline");
+    drop(w);
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(seal_of(&path));
+}

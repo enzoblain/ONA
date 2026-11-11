@@ -224,7 +224,8 @@ The account that holds the funds the agent places. Never deployed, tested on the
   been checked against its source, so its adapter is not implemented. The guardian also records the SHA-256 of the code it checked
   at the target, shown by `get_vault`; a contract cannot read another account's code, so the pool does not verify it. A target can
   serve one vault only. Each vault's hourly cap must cover two of its largest notes at the initial price. `get_vault` publishes each
-  tier's key uncompressed (`pk_raw`). A vault runs one call at a time, numbered: only the callback of the call in progress frees the
+  tier's key uncompressed (`pk_raw`), and `orphan` (see Share price), without which a wallet cannot compute the entry price
+  the contract applies. A vault runs one call at a time, numbered: only the callback of the call in progress frees the
   vault (`on_place`, `on_unstake`, `on_withdraw`, `on_sync`, and `on_staked_read` / `on_unstaked_read` which chain the forced calls
   below), and a call whose callback never returns stops blocking after one hour. Gas for those calls (50 Tgas, callback 20 Tgas, a
   reading callback that chains a call 80 Tgas) is not measured.
@@ -511,6 +512,53 @@ otherwise the open fails and the file is left as it was. After a failed write, n
 wallet is opened again. Restoring the wallet and its seal together from one backup is detected only if the caller keeps `state()` out
 of reach of that backup and opens with `open_expecting`. A spend mark needs a token of the wallet not already being spent; a release
 needs a spend mark. Key storage in the operating system's keychain is not implemented.
+
+The same file keeps the pool's notes: cash notes (no vault) and share notes (with their vault). A note's secrets (owner key, nonce,
+blinding factor) are saved before its blinded point leaves; the note is kept once the agent's blind signature checks under the tier
+key the contract publishes (`pk_raw`); then a status: held, spending (signed by its owner for an operation whose outcome is not
+known, with the signature's deadline), spent. Allowed: held to spending; spending to spent, or back to held. `ona_wallet::pool`
+builds the pool's tags, nullifiers and owner digests; an `ona-pool` test checks they are the contract's byte for byte and that a
+note kept by the wallet is paid by the contract.
+
+## Pool commands (`crates/ona-core/src/pool.rs`)
+`pool_portfolio`, `pool_prepare`, `pool_execute` and `pool_recover` in `dispatch`, documented for the apps in
+`docs/desktop/pool-commands.md`.
+- **Prepare, then execute.** `pool_prepare` (`op` = `deposit`, `enter`, `switch`, `exit`, `exit_cash`) computes the plan from the
+  contract's public figures and returns a summary and a `prepared_id` =
+  `hex(SHA-256("ONA-POOL-PREPARE-V1" || 0 || network || 0 || contract || 0 || op || 0 || vault (u32 LE, u32::MAX for none) || amount || 0 || nonce))`
+  with a random 32-byte nonce. The user confirms in the computer's app (no pool confirmation on the phone). `pool_execute` takes
+  the id once, within 5 minutes: it is removed when used or expired, and checked again against the network and contract read at
+  execution. The notes a preparation picks are reserved until then, so two preparations never take the same note.
+- **Deposit.** A `deposit` call for the user's own wallet (ONA does not sign it), at least the contract's 0.1 NEAR minimum, with a
+  0.01 NEAR storage margin (an estimate; the unused part stays refundable); then cash notes for the amount, largest tiers first,
+  signed blind by the agent (`issue_cash`). The preparation lists the recommended amounts (100, 500 and 2,000 NEAR by default,
+  `ONA_POOL_RECOMMENDED_NEAR`) and warns about any other amount: an unusual amount is easier to link to its exit. The agent must
+  authenticate the depositor before issuing cash (not built); the contract refuses more cash than the account deposited.
+- **Entries, leaves, exits.** An entry spends cash notes for share notes at the vault's price rounded up, computed from the public
+  figures as the contract does (with `orphan`, the part of the vault no share owns); a leave spends share notes for cash notes at the
+  price rounded down; a switch is leaves then entries, run together since no account is named. `exit` is only the leaves: it names
+  no account and leaves the cash in the wallet. Paying an account is `exit_cash`, a separate operation, since a `pay_exit` right after
+  a leave from vault V points to V; it checks the account's `exit_limit` (`get_holder`) first, and the account is checked as a NEAR
+  account id before anything is signed. What a step leaves over, less than one of the smallest notes, stays in the pool's cash and is
+  shown as `left_in_cash`. Values read from the contract are combined with checked arithmetic.
+- **Notes and signatures.** Every note has a fresh owner key. Owner signatures follow ENTER-V1, LEAVE-V1 and CASH-EXIT-V1 and
+  expire 24 hours after they are made, so the agent can batch them. A note is marked spending, with that deadline, before its
+  signature leaves. The agent's answer is one of: success (the note is spent, its new notes kept); a certain refusal (nothing sent,
+  or refused by the chain: the note is held again); an unknown outcome (sent, no answer: the note stays spending and its new notes
+  stay waiting for their signatures). A failure after some steps of an execution succeeded returns those steps with the error.
+- **Recovery.** `pool_recover` asks the contract `is_spent` for each spending note: spent → spent; unspent and past its signature's
+  deadline → held again; otherwise it keeps waiting. Then it asks the agent for the blind signatures of every note still waiting
+  for one, and keeps those that check. `is_spent` names a nullifier to the RPC endpoint: a spent one is public anyway, an unspent
+  one says something about a later spend.
+- **What leaves the computer.** `pool_portfolio` and every preparation read `get_config`, `get_cash` and `get_vault` for every vault,
+  on final blocks, whatever the user holds; nothing goes to the relay. `exit_cash` also reads `get_holder` for the paid account,
+  `pool_recover` `is_spent` for its spending notes. The agent receives the signed notes it must submit.
+- **Not built.** The transport to the agent (`PoolAgent`): with a real wallet the agent is `NoAgent`, every execution answers
+  `no connection to the pool agent yet` and no agent call is made; the notes prepared for it stay in the wallet, waiting for a
+  signature. A deposit sent from a wallet now could not become cash and would wait for a refund. Configuring a pool wallet through
+  the C bridge. Checking on chain that the user's deposit arrived before asking for cash. The contract's minimum of live notes per
+  tier and its waiting rules are not planned around: the agent may refuse, and the note is then held again. Tested against a fake
+  contract and a fake agent only.
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit

@@ -21,6 +21,9 @@ The difference is who sees what. ONA is designed so that no single party gets bo
 - **websites and the people the agent contacts** see Tor traffic and a generic message, not you;
 - **payments** use blind tokens: the mint that holds your deposit cannot link it to what you pay for;
 - **your phone** talks to your own computer over Tor, and the agent runs on that computer, not on our servers.
+- **the pool** (planned, testnet only): you deposit from your own wallet, your money becomes blind cash notes, and an exit pays
+  your account without naming the vault you chose. Deposit, enter, switch, exit and the portfolio run end to end only against a
+  fake contract and a fake agent so far.
 
 After each mission, ONA shows an **exposure report**: every party that received something, how many requests and how many bytes
 it received (not the content itself).
@@ -108,6 +111,7 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done; the `ona-relay` program has not run yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
 | `ona-wallet` encrypted wallet file | done, keychain not wired in; a wallet without its seal file is refused by design (`open_adopting_unsealed` adopts one explicitly) | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
+| `ona-core` pool commands (deposit, enter, switch, exit to cash, cash payout, portfolio, recovery; prepare then execute once) and pool notes in `ona-wallet` | done; the transport to the pool agent and the bridge's wallet setup are not built ([commands](docs/desktop/pool-commands.md)) | fake pool contract and fake agent only |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
 | Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol v1 (commit-then-reveal pairing, signed replies, token for reads, counter against replays, signed content of each confirmation); local-network mode in debug builds only; no wallet yet | Core tests with the real `ona-core` (compiled with `swiftc`, not `swift test`); one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network ([notes](docs/desktop/app.md)) |
 | Desktop app (`desktop/tauri`, Windows and Linux) | same features and protocol v1 as the macOS app, in Rust with Tauri; no wallet yet | Rust tests of every module but `main.rs` with the real `ona-core`, run on macOS; one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network, on macOS. Never built or run on Windows or Linux ([notes](docs/desktop/tauri.md)) |

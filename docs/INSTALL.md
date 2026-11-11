@@ -59,6 +59,23 @@ identifiers) to replace by pseudonyms before anything goes to the model. `prepar
 price at the policy's rate; with `amount`, it must be that same amount. It returns the fields of the confirmation digest (`payment`) and
 the digest to send back with `confirm_payment`.
 
+### The pool commands
+
+With these variables set, `ona` also answers `pool_portfolio`, `pool_prepare`, `pool_execute` and `pool_recover` (inputs,
+outputs and the confirmation flow: [docs/desktop/pool-commands.md](desktop/pool-commands.md)). They read the pool contract, views
+only, and never contact the relay. No transport to the pool agent exists yet, so `pool_execute` answers
+`no connection to the pool agent yet` and no agent call is made; the commands have only run against a fake pool in the tests.
+**Do not send a pool deposit from a wallet until the agent exists**: nobody could turn it into cash notes, and it would wait in the
+contract for a refund.
+
+| Variable | Value |
+|---|---|
+| `ONA_WALLET_FILE` | the encrypted wallet file, created if missing. Without it the pool commands answer `no pool wallet configured` |
+| `ONA_WALLET_KEY_FILE` | a file holding the wallet key as 64 hex characters, readable by its owner only |
+| `ONA_POOL` | the pool contract account |
+| `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only) |
+| `ONA_POOL_RECOMMENDED_NEAR` | optional, the deposit amounts the app recommends, whole NEAR separated by commas, each at least 0.1 NEAR; default `100,500,2000`. A deposit of another amount is still allowed, with a warning |
+
 A fake relay on localhost, for front-end work:
 
 ```

@@ -310,6 +310,8 @@ pub struct VaultView {
     pub withdrawing: U128,
     pub fee_owed: U128,
     pub total_shares: U128,
+    /// Left in the vault when its last shares went, owned by nobody and not counted in the price.
+    pub orphan: U128,
     pub share_price: U128,
     pub synced_at: u64,
     pub max_assets: U128,
@@ -1592,6 +1594,7 @@ impl Pool {
             withdrawing: U128(v.withdrawing),
             fee_owed: U128(v.fee_owed),
             total_shares: U128(v.total_shares),
+            orphan: U128(v.orphan),
             share_price: U128(price(&v)),
             synced_at: v.synced_at,
             max_assets: U128(v.max_assets),

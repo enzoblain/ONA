@@ -7,6 +7,7 @@ pub mod checkpoint;
 pub mod e2ee;
 pub mod gate;
 pub mod journal;
+pub mod pool;
 pub mod pseudonym;
 pub mod quote;
 pub mod reader;
@@ -927,6 +928,7 @@ pub type DemoMission = Mission<MockModel, MockWeb, MockPayments>;
 pub struct Core {
     mission: Option<CoreMission>,
     vault: Option<vault::Vault>,
+    pool: Option<pool::PoolClient>,
     model: Option<Box<dyn Model>>,
     model_mode: &'static str,
 }
@@ -948,11 +950,16 @@ impl Default for Core {
 
 impl Core {
     pub fn new() -> Self {
-        Self { mission: None, vault: None, model: Some(Box::new(MockModel::default())), model_mode: MODE }
+        Self { mission: None, vault: None, pool: None, model: Some(Box::new(MockModel::default())), model_mode: MODE }
     }
 
     pub fn with_vault(vault: vault::Vault) -> Self {
         Self { vault: Some(vault), ..Self::new() }
+    }
+
+    /// Adds the pool client, which answers `pool::COMMANDS`.
+    pub fn set_pool(&mut self, pool: pool::PoolClient) {
+        self.pool = Some(pool);
     }
 
     /// Replaces the model. Refused during a mission, whose plan was made with the previous one.
@@ -975,6 +982,9 @@ impl Core {
             request[key].as_str().map(String::from).ok_or_else(|| format!("missing field {key}"))
         };
         let cmd = text("cmd")?;
+        if pool::COMMANDS.contains(&cmd.as_str()) {
+            return self.pool.as_mut().ok_or("no pool wallet configured")?.run(&cmd, request);
+        }
         if matches!(cmd.as_str(), "chat_save" | "chat_read" | "chat_keep" | "chat_forget") {
             let vault = self.vault.as_mut().ok_or("no vault configured")?;
             let now = unix_now()?;
