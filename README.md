@@ -62,7 +62,7 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-registry` contract | done | mocked NEAR VM only |
 | `ona-pool` contract: listed staking vaults, share notes, switching vaults without an exit, exits only to depositors, 7-day escape | done, never deployed, lending not implemented | mocked NEAR VM only, never against a real staking pool |
 | `ona-crowd` crowd simulator for the pool demo | simulation and vault-privacy measure done; the NEAR runner has never run | in-memory chain only |
-| `ona-anchor` hourly journal anchoring, auditor key sealing in `ona-core` | library done, no program receives leaves yet | fake registry only, never on a NEAR node |
+| `ona-anchor` hourly journal anchoring, chained checkpoints and their audit, auditor key sealing in `ona-core` | library done, no program receives leaves yet, the agent does not submit checkpoints yet | fake registry only, never on a NEAR node |
 | `ona-deploy` deployment tool | done; refuses mainnet from the names, the parent account and the chain id the node reports; checks the roles and the deployed code hash; testnet not tried yet | unit tests |
 | `ona-near` RPC client | done; https only (except a local node, or an onion address through Tor), only final results are read, failed receipts are listed apart from the transaction status, an unclear send is looked up by its hash and never sent twice. Trusts its RPC node | unit tests against a fake node, and a local NEAR node through `ona-sandbox` before these changes |
 | `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
@@ -102,6 +102,14 @@ program refuses to let the library download one), and run `cargo run -p ona-sand
 - NEAR AI Cloud keeps one usage row per request.
 - The computer must be on for a mission to progress.
 - The same team would operate the relay, the signer and the anchoring.
+- Anchoring proves that the checkpoints shown form an unbroken chain that existed at those dates. It rules out a second chain with
+  the same key only if the aggregator is honest, kept its records and was not replaced during the mission, and the auditor knows
+  from elsewhere when the mission was opened. It cannot rule out a second history built from the start with another key unless the
+  mission's opening tag was recorded elsewhere, and it proves what the agent wrote, not that it is true.
+- One owner of the registry can replace the other after 30 days unless the other vetoes, so a stolen key is a threat as long as
+  nobody watches for such proposals.
+- Chats are deleted after 24 hours only when the app runs: nothing purges while it is closed. Keys are in a local file outside the
+  chat folder until the keychain is wired in, and overwriting deleted files does not erase them on an SSD or on APFS.
 - Testnet only. The mint has no real-money deployment planned.
 - **A dishonest relay may still be able to read replies.** With encryption version 2, the relay controls which client key the reply is encrypted to.
   The client now uses version 3, which binds the reply key, but this fixes the problem only if the NEAR AI gateway accepts version 3, which is **not verified**.

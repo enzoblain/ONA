@@ -208,7 +208,12 @@ minute across all clients. If the store reports a write error, every further wri
 cargo test -p ona-anchor
 ```
 
-When a program uses it, it will sign `anchor` with the account named as aggregator in `ona-registry`, through `ona-near`.
+When a program uses it, it will sign `anchor` with the account named as aggregator in `ona-registry`, through `ona-near`, attaching
+0.01 NEAR per anchor for storage (the registry refunds the excess), and read each anchor back from a final block. The registry accepts
+at most one anchor every 30 minutes, and the aggregator cannot be one of its owners. After deployment, the registry's owners call
+`propose` (payable, storage), then `confirm(id, action)` for the other owner, or `emergency` alone to revoke a value or raise the
+incident level; `propose_takeover` replaces a lost owner after 30 days unless it vetoes. A program using the aggregator should give
+it a tag file (`Aggregator::with_tag_file`) on storage that survives restarts. Nothing new to configure.
 
 ## Simulate a crowd
 

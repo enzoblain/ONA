@@ -155,8 +155,29 @@ Nothing in the contract enforces a minimum set size, a delay or a fixed fee; tha
   known `k`: keys must be generated separately for each tier, never derived from one another.
 
 ## `ona-registry`
-`anchor(root, count)` by the aggregator. `propose(action)` then `confirm(id)` by the other owner, for `Publish`, `Revoke`,
-`SetIncident`, `SetAggregator`. Published values are append-only with a 7-day delay checked at confirmation.
+Tested on the mocked NEAR VM only; the wasm build of this version is not verified.
+- `anchor(root)` by the aggregator, at most once every 30 minutes. The anchor stores `seq`, `root` and the block timestamp.
+- `propose(action)`, then `confirm(id, action)` by the other owner, restating the exact action (`get_proposal(id)` shows it).
+  Actions: `Publish`, `Revoke`, `SetIncident`, `SetAggregator`, `ChangeOwner`, `Restore`. The action is checked again against
+  the current state when confirmed. A proposal expires after 30 days, only its proposer can cancel it, and each owner may have
+  at most 4 pending. A replaced owner's pending proposals are removed.
+- `emergency(action)` by one owner alone: `Revoke`, or `SetIncident` with a higher level. Nothing else. A value revoked this way
+  can be brought back by both owners with `Restore`, or made final by both owners with `Revoke`; a value revoked by both owners
+  cannot be restored.
+- `propose_takeover(new)`: one owner proposes to replace the other, confirms it alone after 30 days (it expires after 60), and
+  the owner being replaced can `veto` it until then. A lost key is thus recoverable. The same path works for a thief: **someone
+  holding a stolen copy of one owner's key replaces the other owner if that owner does not veto within 30 days.** Owners must
+  watch for takeover proposals. A stolen copy can also veto a takeover aimed at it, and then only a new registry helps.
+- Lowering the incident level, changing the aggregator, replacing an owner or restoring a value can be confirmed only 7 days
+  after the proposal. The aggregator can never be an owner.
+- Published values are append-only, take effect at least 7 days and at most 90 days after confirmation, and a publication is
+  refused while another one on the same topic is still waiting. `active` returns the newest value in force; if it was revoked
+  the topic has no value: an older value never comes back by itself. A value revoked before its date is skipped, and a revoked
+  value can never be published again. An older value that was never revoked can be published again, as a new entry with its own
+  notice. Topics: lowercase letters, digits, `-` and `_`.
+- `anchor` and `propose` are payable: the caller pays the storage it adds and gets the excess back. The price per byte is the
+  network's (not verified here); `ona-anchor` attaches 0.01 NEAR per anchor.
+- Proposals that have expired no longer count against the limit of 4. No client reads `active` or `incident_level` yet.
 
 ## `ona-pool` (`crates/ona-pool`)
 The account that holds the funds the agent places. Never deployed, tested on the mocked NEAR VM only, with share notes made by
@@ -261,33 +282,80 @@ The account that holds the funds the agent places. Never deployed, tested on the
 Local only, model faked and every fake response labelled `mode: mock`. Mission state machine with a plan frozen before any web
 read; closed-schema reader output; payment gate with allowlisted templates, recipient list and amount cap (code, not model);
 hash-chained journal with one-byte tamper detection; exposure report built from the journal; `dispatch(json) -> json`; CLI
-(`ona demo`). `Journal::seal` produces the auditor form: XChaCha20-Poly1305 per entry, keys from HKDF, padded to 512-byte blocks,
-chain verifiable without a key, one entry can be disclosed alone. The master key is sealed to the auditor's public key by
-`auditor::seal_master_key` (see below); nothing in the mission calls it yet.
+(`ona demo`).
+
+Journal keys, all derived from the mission's secret salt, which only the agent holds:
+- the chain start `SHA-256("ona/j/v1" || salt)` is all a verifier needs (`verify_from`); it does not give the salt back;
+- fingerprints are HMAC-SHA256 under a key derived from the salt, so whoever checks the chain cannot test guessed contents.
+  Two equal contents in one mission give the same fingerprint;
+- the checkpoint key (see Journal anchoring).
+
+`Journal::seal(self)` consumes the journal, wipes its plaintext and produces the auditor form (format v2); if sealing fails,
+nothing is wiped and the journal comes back in the error. The form: XChaCha20-Poly1305
+per entry, entry keys from HKDF with the chain start as salt (a key opens its entry in that journal only), a commitment to the
+entry key in each line, plaintext padded to 512-byte blocks. The sealed entry holds the line without its `prev` field, so one
+disclosed entry does not give the chain head before it. `open_all` checks the sealed chain before decrypting and rebuilds the
+exact plaintext lines. The sealed head changes at every seal; nothing anchors it yet. The plaintext journal still holds the chosen
+firm, recipient, amount and transaction in clear. Nothing in the mission calls the sealing yet.
 
 ## Journal anchoring (`crates/ona-core/src/checkpoint.rs`, `crates/ona-anchor`)
-- Leaf of a checkpoint: `SHA-256(0x00 || "ona/leaf/v1" || salt || journal head)`, with a new random salt for each checkpoint, so two
-  leaves of one mission cannot be linked. Nodes: `SHA-256(0x01 || left || right)`, as in RFC 9162.
+- Checkpoints of one journal form a chain. Checkpoint `n` has a commitment
+  `SHA-256("ona/cp/commit/v1" || salt_n || n (u64 LE) || journal head || leaf of checkpoint n-1)` (zero before rank 0) and a
+  leaf `SHA-256(0x00 || "ona/leaf/v3" || tag_n || commitment)`. `salt_n` and `tag_n` are HMACs of `n` under the checkpoint key,
+  so leaves of one mission cannot be linked on chain. Nodes: `SHA-256(0x01 || left || right)`. Only the prefixes come from
+  RFC 9162; the tree is not an RFC 9162 log.
 - The tree always has depth 10 (1024 leaves). Real leaves sit at random positions and the rest are random filler leaves, so a root is
-  always 32 bytes and an inclusion proof always 2 + 10 × 32 bytes (index, then siblings), whatever the batch size.
-- `ona-anchor` collects leaves, refuses duplicates and more than 1024 per batch, anchors one tree per hour even when empty, and returns
-  the proofs. It keeps nothing once a batch is anchored. A refused anchor keeps the leaves for the next attempt with a new tree.
-- `anchor(root, count)` is always sent with `count = 1024`: the real number would reveal how busy the hour was. The contract field
-  therefore says nothing about activity.
-- Not built: a program that receives leaves and delivers proofs over the network, and the agent side that submits checkpoints. Before
-  such a program exists it needs a per-client limit, or one client can fill every batch. Today only the submitter of a leaf can notice
-  that it was left out.
+  always 32 bytes and an inclusion proof always 2 + 10 × 32 bytes (index, then siblings), whatever the batch size. The proof handed
+  back is prefixed with the anchor's `seq` (8 bytes).
+- `ona-anchor` receives `(client, tag, commitment)` and builds the leaf itself, so the tag it checks is inside the anchored leaf.
+  It refuses a duplicate leaf, a tag already seen, more than 4 leaves per client per batch and more than 1024 per batch. It
+  anchors one tree per hour even when empty, reads the anchor back from a final block, and hands out the proofs only if the chain
+  holds that root and the batch's tags are saved. A refused anchor keeps the leaves for the next attempt with a new tree; a lost
+  reply is recovered by reading the latest anchor. Tags are kept 7 days, in a file if one is given, and at most 1024 × 168;
+  beyond that it refuses new leaves rather than forget tags early.
+- The per-client limit holds only once `client` comes from something a sender cannot multiply for free (a spent request token is
+  the plan); nothing checks it yet.
+- `checkpoint::verify_checkpoints` and `journal::audit`, for an auditor holding the checkpoint key and an `AuditTrust`: every rank
+  from 0 with no gap or duplicate, each leaf recomputed with the tag of its rank and found in the root the registry holds at its
+  `seq` (read by the auditor), the first anchor inside the opening window the auditor knows from outside the agent, anchors in
+  order and no more than the maximum gap apart, heads that are successive states of the journal, the last one its final head, and
+  a journal that ends with `mission_close`. The opening window and the maximum gap must both be shorter than the 7-day tag
+  retention, or the check refuses to run.
+- What is guaranteed, under all these conditions: the aggregator is honest, kept its tag file, and was not changed during the
+  mission (`SetAggregator` starts a new aggregator with no tags); the auditor's opening window is right. Then no second chain with
+  the same checkpoint key that passes the check can have been anchored, because each of its ranks would have been submitted while
+  the first chain's tag for that rank was still kept. A leaf sent with any other tag is a different leaf and does not pass.
+- What is not: a parallel chain made with another checkpoint key from rank 0, unless the opening tag was recorded somewhere other
+  than the agent when the mission started; anything once one of the conditions above fails. It proves what the agent wrote, not
+  that it is true.
+- The aggregator sees who sends a leaf and when; unlinkability holds on chain only. Someone who sees a tag and commitment in
+  transit can submit them first.
+- Not built: a program that receives leaves and delivers proofs over the network, and the agent side that submits checkpoints.
 
 ## Auditor key (`crates/ona-core/src/auditor.rs`)
 The journal's 32-byte master key is sealed to the auditor's X25519 public key: ephemeral X25519 key, HKDF-SHA256 bound to both public
-keys, XChaCha20-Poly1305. Format: version (1) · ephemeral public key (32) · nonce (24) · ciphertext and tag (48). The caller's copy
-is wiped after a successful seal and kept after a failed one. Copies made elsewhere in memory are not reached.
+keys and to the journal's chain start, XChaCha20-Poly1305. Format v2: version (1) · ephemeral public key (32) · nonce (24) ·
+ciphertext and tag (48). The auditor key is refused unless its fingerprint `SHA-256("ona/auditor-fp/v1" || key)` matches the one
+the caller passes, which must come from elsewhere (pinned in the app or published in the registry). The caller's copy is wiped after
+a successful seal and kept after a refusal or a failure. Nothing checks that the auditor received the sealed key. Copies made
+elsewhere in memory are not reached.
 
 ## Chat retention (`crates/ona-core/src/vault.rs`)
 Local history only if the user chooses it, otherwise automatic deletion after 24 hours. Chat results stay encrypted on the device with one key per chat, 24 hours from the first save by default; saving again does not
 extend it. Expiry destroys the key, then the file, and a read is refused even if the purge has not run. `keep` is the user's choice
-for one chat, `forget` deletes any chat at once. No chat result ever goes on chain. Keys are in a private local file until the
-keychain is wired in. What the user copies or backs up is their own choice and must be stated in the app.
+for one chat, `forget` deletes any chat at once. No chat result ever goes on chain.
+- Keys are held by a `KeyStore` outside the vault directory (a key file inside it is refused). `FileKeyStore` is a stand-in until
+  the keychain is wired in: whoever reads both the key file and the vault can decrypt what has not expired.
+- The vault records the latest time it has seen, in the key store with the keys, and never goes back: removing that record
+  removes the keys. A clock set back by more than 5 minutes destroys every chat that was going to expire (kept chats stay).
+- The `keys` and `clock` files an earlier version kept in the vault directory are overwritten and removed when it opens.
+- Expiry runs only when the vault is used: nothing purges while the app is closed, and setting the clock back before the app has
+  seen a later time still shows a chat that should have expired. A scheduled system task is needed (not built).
+- Deleted chat files and replaced key files are overwritten with zeros before release. On an SSD or a copy-on-write file system
+  (APFS) that does not reach the old blocks, nor snapshots or backups; the app should exclude the vault from backups (not built).
+- A file lock stops a second process from opening the same vault. Leftover temporary files and keys without a file are cleared at
+  start. `chat_save` still answers 86400 seconds even when less is left (`Vault::expiry` gives the real end).
+- What the user copies or backs up is their own choice and must be stated in the app.
 
 ## Encrypted model client (`crates/ona-core/src/e2ee.rs`)
 NEAR AI encryption version 3 through the relay, written from the public `nearai/inference-proxy` sources and tested only against a simulated

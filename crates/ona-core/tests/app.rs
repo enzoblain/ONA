@@ -108,11 +108,12 @@ const MASTER: [u8; 32] = [3u8; 32];
 #[test]
 fn sealed_journal_opens_with_the_master_key_only() {
     let j = sample_journal();
-    let sealed = j.seal(&MASTER).unwrap();
-    let opened = ona_core::journal::open_all(&MASTER, &sealed.bytes).unwrap();
     let plain = String::from_utf8(j.to_bytes()).unwrap();
+    let start = j.start();
+    let sealed = j.seal(&MASTER).unwrap();
+    let opened = ona_core::journal::open_all(&MASTER, &start, &sealed.bytes, &sealed.head).unwrap();
     assert_eq!(opened, plain.lines().collect::<Vec<_>>());
-    assert!(ona_core::journal::open_all(&[4u8; 32], &sealed.bytes).is_err());
+    assert!(ona_core::journal::open_all(&[4u8; 32], &start, &sealed.bytes, &sealed.head).is_err());
 
     let text = String::from_utf8(sealed.bytes).unwrap();
     assert!(!text.contains("tool_commit"), "the kind of entry is not readable");
@@ -133,10 +134,11 @@ fn sealed_journal_is_checked_without_a_key_and_every_byte_counts() {
 #[test]
 fn one_entry_can_be_disclosed_alone() {
     let j = sample_journal();
+    let start = j.start();
     let sealed = j.seal(&MASTER).unwrap();
     let text = String::from_utf8(sealed.bytes).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    let key = ona_core::journal::entry_key(&MASTER, 2);
+    let key = ona_core::journal::entry_key(&MASTER, &start, 2);
     let opened = ona_core::journal::open_entry(&key, lines[2]).unwrap();
     assert!(opened.contains("\"n\":2"));
     assert!(ona_core::journal::open_entry(&key, lines[3]).is_err(), "that key opens no other entry");
@@ -152,17 +154,21 @@ fn sealed_entries_hide_their_length_within_a_block() {
 
     let mut huge = Journal::new(SALT);
     huge.append(Kind::ToolCommit, json!({"a": "x".repeat(2000)}));
+    let start = huge.start();
     let sealed = huge.seal(&MASTER).unwrap();
-    assert_eq!(ona_core::journal::open_all(&MASTER, &sealed.bytes).unwrap().len(), 1, "a long entry still fits");
+    let opened = ona_core::journal::open_all(&MASTER, &start, &sealed.bytes, &sealed.head).unwrap();
+    assert_eq!(opened.len(), 1, "a long entry still fits");
 }
 
 #[test]
 fn an_entry_moved_to_another_position_does_not_decrypt() {
-    let sealed = sample_journal().seal(&MASTER).unwrap();
+    let j = sample_journal();
+    let start = j.start();
+    let sealed = j.seal(&MASTER).unwrap();
     let text = String::from_utf8(sealed.bytes).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     let moved = lines[1].replacen("\"i\":1", "\"i\":2", 1);
-    let key = ona_core::journal::entry_key(&MASTER, 2);
+    let key = ona_core::journal::entry_key(&MASTER, &start, 2);
     assert!(ona_core::journal::open_entry(&key, &moved).is_err());
 }
 
