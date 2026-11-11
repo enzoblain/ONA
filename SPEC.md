@@ -204,103 +204,153 @@ Tested on the mocked NEAR VM only; the wasm build of this version is not verifie
 - Proposals that have expired no longer count against the limit of 4. No client reads `active` or `incident_level` yet.
 
 ## `ona-pool` (`crates/ona-pool`)
-The account that holds the funds the agent places. Never deployed, tested on the mocked NEAR VM only, with share notes made by
-`ona-token`. No staking pool has been called for real.
+The account that holds the funds the agent places. Never deployed, tested on the mocked NEAR VM only, with notes made by
+`ona-token`. No staking pool has been called for real. Gas is not measured.
 
 - **Roles.** Created by `ona-deploy pool` with no access key. The `guardian` lists vaults, freezes them, sets the agent account and the
   fee. The `agent` is an account set by the guardian. Checking that the agent's key lives in an attested enclave is done outside the
-  contract and is not built. A new agent (`set_agent`) or a new vault (`add_vault`) is announced and takes effect only after the admin
-  delay (set at creation, from 7 to 30 days, 7 by default: at least as long as a staking pool is expected to take to return unstaked
-  funds, which is not measured here); the current agent keeps working meanwhile, and the escape is
-  open to everyone until every announcement has taken effect. Freezing a vault and setting the fee take effect at once: neither moves
-  money out.
+  contract and is not built. A new agent (`set_agent`), a new vault (`add_vault`) or a new fee (`set_fee_bps`) is announced and takes
+  effect only after the admin delay (set at creation, from 7 to 30 days, 7 by default: meant to be at least as long as a staking pool
+  takes to return unstaked funds, which is not verified). Meanwhile the current agent keeps working but cannot place nor enter, and
+  the escape is open to everyone. Freezing a vault takes effect at once: it stops entries and placements, nothing else.
+- **Two compartments.** Money inside the pool is either **cash**, which backs blind cash notes of fixed value and belongs to no vault,
+  or in a **vault**, which backs that vault's share notes. Deposits become cash (`issue_cash`), cash enters a vault (`enter`), shares
+  leave a vault as cash (`leave`), and exits pay cash notes (`pay_exit`). Switching vaults is a `leave` then an `enter`. The cash is
+  always fully backed: it holds at least the value of every cash note issued and not paid (`get_cash`: `liquid` ≥ `outstanding`).
 - **Vaults on a list.** Each vault has an adapter type and a target account. `staking` calls only `deposit_and_stake` (with the amount
-  attached), `unstake {amount}`, `withdraw {amount}` and the view `get_account_total_balance {account_id}`, as named in the standard
-  NEAR staking pool (`near/core-contracts`, `staking-pool`); not run against one. `lending` cannot be added: no lending interface has
+  attached), `unstake {amount}`, `withdraw {amount}` and the views `get_account_total_balance`, `get_account_staked_balance` and
+  `get_account_unstaked_balance` (each `{account_id}`), as named in the standard NEAR staking pool (`near/core-contracts`,
+  `staking-pool`), from memory: the names and the behaviour below are **not verified** against its source, and no staking pool has run. `lending` cannot be added: no lending interface has
   been checked against its source, so its adapter is not implemented. The guardian also records the SHA-256 of the code it checked
-  at the target, shown by `get_vault`. A contract cannot read another account's code, so this hash is not verified by the pool;
-  anyone can compare it with the code the RPC returns. A vault runs one call at a time, numbered: only the callback of the call in
-  progress frees the vault, and a call whose callback never returns stops blocking after one hour. Gas for those calls (50 Tgas,
-  callback 20 Tgas) is not measured.
-- **Unstaking.** Whether each `unstake` on the standard staking pool restarts the lock on everything already unstaked is **not
-  verified**: its code could not be read here. The pool guards against it anyway: at most one `unstake` per vault every 3 days (a
-  design margin, not a measured lock length), and the agent cannot unstake on a vault while the escape is open or an exit request
-  on it is overdue; others can.
-- **Share notes.** Blind BLS notes as in `ona-mint`, with one key per tier and per vault (a key cannot be listed twice) and the tag
-  `ONA-POOL-V1:<network>:<contract>:<vault>:BLS12381G1_XMD:SHA-256_SSWU_RO_`. Message `tier || pk || nonce`. Nullifier
-  `SHA-256("ONA-POOL-NF-V1" || vault (u32 LE) || tier || pk || nonce)`. A tier carries a fixed number of shares, so a note's value in
-  NEAR follows the share price.
-- **Share price.** `(liquid + placed - fee owed) / shares`, rounded down; 10^-6 NEAR per share in an empty vault. `placed` is set by
-  `sync`, which reads the target's own balance for the pool, never a number given by the agent.
-- **Deposits.** The contract records depositors itself: `deposit` is payable, credits its caller with the attached amount minus
-  0.001 NEAR for storage (at least 0.1 NEAR), and adds it to the unassigned funds. No method lets the agent or the guardian name a
-  depositor. While the escape is open, or once the account's `request_refund` has waited the escape delay (even if the agent syncs
-  every day), `refund_deposit` returns unassigned money to depositors. `record_entry` names no depositor, so the contract does not
-  know whose money went to a vault: each account gets at most its share of the unassigned funds, its deposits not yet paid back by a
-  refund or an exit over everyone's. A refund lowers the account's exit limit by the same amount. When no vault has grown (best growth
-  1), an account whose money was placed therefore cannot take others' unassigned money and also exit its notes. When a vault has grown
-  by a factor g, exit limits are multiplied by g, so an account whose own vault did not grow can still refund up to (1 − 1/g) times
-  its deposit from others' unassigned money and exit all its notes.
-  The cost is that an account whose money was never placed may get
-  only part of it back by refund when others' money was placed. There is no other way back. This was chosen over reading `ona-mint`'s records: a mint spend arrives as a plain
-  transfer that names nobody, and reading the mint from the pool would need a cross-contract call per deposit. A plain transfer,
-  including an `ona-mint` spend, is never credited and never counted as unassigned, so it cannot be given to a vault.
-- **Entries.** The agent's `record_entry(vault, tier, count)` moves unassigned funds, as counted by the contract and never read from
-  the balance, into a vault at the current price and records the notes it may sign; it names no depositor. A withdrawal in flight is
-  tracked per vault (`withdrawing`) and becomes liquid funds of that vault only, never unassigned. Entries stop below a share price
-  of one thousandth of the initial price.
-- **Exits.** `pay_exit` (agent) pays one note to the account the note owner signed, and only to an account that deposited. The owner
-  signs `SHA-256("ONA-POOL-EXIT-V1" || H(contract) || vault (u32 LE) || nf || H(to) || min_amount (u128 LE))`. Each tier pays at most
-  as many notes as were recorded. Each account receives at most its deposits minus its refunds, times the best growth of any vault's share price (highest
-  over lowest seen, the lowest never counted below one thousandth of the initial price), minus what it has received, computed
-  without overflow: the contract does not know which vault an account chose, so it allows the best case. A vault worth nothing
-  refuses its own notes as worthless and blocks no other exit.
-  0.001 NEAR is kept from each exit for the nullifier's storage. An exit whose transfer comes back is kept for the account
-  (`claim_owed`). The notes hide which vault an account chose. They do not hide who owns the funds.
-- **Fee.** Zero by default. The guardian can set up to 20 % of the gains above each vault's highest price after fees, so a recovery
-  after a loss is not charged twice; gains made before a change are not charged at the new rate. The agent collects it from liquid funds
-  with `claim_fees`, the only payment that goes to the agent: never more than the fee charged, nothing while the rate is zero.
-- **Escape.** If the agent makes no placement, sync or paid exit for 7 days (set at creation, from one minute to 30 days), or while a
-  guardian announcement is waiting, anyone can `sync`, `unstake`, `withdraw` and `escape_exit` notes, still only to the signed account
-  that deposited, whether or not the agent ever served it, and depositors can `refund_deposit`. Entries, unstaking, withdrawals, fees
-  and `set_agent` do not restart the delay. Separately, anyone can `request_exit` with a note and its owner's signature, attaching
-  0.001 NEAR that the pool keeps for the request's storage (at most 64 waiting per vault). If that exit is still unpaid after the same
-  delay, even while the agent is active: `escape_exit` opens for that note, anyone can `sync`, `unstake` and `withdraw` on that vault,
-  and the agent cannot `place` in it until the exit is paid. A request is accepted only if the exit could be paid then (tier, value
-  above the storage fee and the owner's minimum, the account's exit limit), at most four per account and vault; the paid account can
-  withdraw it (`cancel_exit_request`), and a request that can no longer be paid, for instance after a loss, blocks nothing. A note
-  keeps the date of its first request even if the request is withdrawn and made again. A vault whose list of 64 requests stays full
-  for the escape delay (the clock stops only when the list is back to 32) opens the same way, so keeping it full cannot shut out an
-  honest holder. When a vault opens this way, `escape_exit` works for every note of that vault.
-- **Switching vaults.** `switch_vault(from, note, owner_sig, to_vault, outputs)` (agent) spends a note of `from` with the same checks
-  and nullifier as an exit, and records `outputs` (tier and count) as notes the agent may blind-sign in `to_vault`. The owner signs
-  `SHA-256("ONA-POOL-SWITCH-V1" || H(contract) || from (u32 LE) || nf || to_vault (u32 LE) || n (u32 LE) || (tier || count (u64 LE))*n)`.
-  The old note is valued at `from`'s price rounded down, the new notes at `to_vault`'s price rounded up, in favour of both vaults'
-  holders. The new notes cannot cost more; what is left over must be less than `to_vault`'s smallest note and goes to the pool's
-  reserve, which pays nobody, so no share price and no exit limit jumps. `to_vault` must be listed, active, not frozen and above the
-  price floor, and its asset cap counts what it is owed, as entries do. A note with an exit request waiting cannot be switched.
-  Nothing is paid and no account's counters change, so exit limits are unchanged. Debts are kept per pair of vaults (and per vault
-  towards the reserve, `get_debt`); both share prices count them. `settle_switch(from, to, amount)` moves liquid funds inside the
-  pool, only up to what `from` owes `to`, by the agent, or by anyone once the escape is open, `from` is overdue, or a vault `from` owes
-  is overdue; the agent can then no longer unstake `from`. Until settled, the new notes can be paid only from `to_vault`'s own liquid
-  funds. A vault that owes switched value cannot place more until it settles. A loss in `from` before settlement falls on `from`'s
-  remaining holders: the debt is a fixed amount of NEAR. If `from` no longer holds enough to cover what it owes and its fee
-  (liquid + placed + due < owes + fee owed), no entry and no switch can bring new money into it, so a new holder never pays that
-  debt. What it cannot pay is a loss for its creditors: their share prices still count the full debt, so they show more than can be
-  paid until settlement, and nothing writes the debt down (not implemented). The reserve from switch leftovers is locked: no method
-  pays it out, and each leftover is less than the destination vault's smallest note.
-- **Escape speed.** Exits through the escape are limited by the vault's hourly cap, like other exits, including during an admin
-  delay: a guardian announcement gives holders 7 days or more, but at most one hourly cap per hour per vault can leave that way.
-- **Caps.** Per vault: most assets, and most NEAR moved per hour, counted separately for placements, for exits paid by the agent and
-  for exits paid through the escape, so neither placing nor normal exits can use up the escape's window. Up to 64 notes per entry.
-- **Known limits, not fixed.** The agent holds the note keys. It can sign notes for an accomplice who deposited: the per-tier count
-  limits the total paid and the per-account limit bounds what that accomplice receives, but other holders of that tier can then find
-  it exhausted and lose. A vault's low price after a loss raises everyone's exit limit, up to a thousand times the deposit. The agent
-  can still keep the general escape closed by syncing, but not the escape of a vault where a payable request waits or whose request
-  list stays full. Someone holding many notes can fill a vault's 64 request slots, at 0.001 NEAR each; after the escape delay this
-  opens that vault's escape instead of blocking it. A guardian can list a target that is
-  not a real staking pool; the recorded code hash only lets others check. Withdrawal accounting assumes the target's transfer arrives;
-  a vault's call that times out is corrected only by the next `sync`.
+  at the target, shown by `get_vault`; a contract cannot read another account's code, so the pool does not verify it. A target can
+  serve one vault only. Each vault's hourly cap must cover two of its largest notes at the initial price. `get_vault` publishes each
+  tier's key uncompressed (`pk_raw`). A vault runs one call at a time, numbered: only the callback of the call in progress frees the
+  vault (`on_place`, `on_unstake`, `on_withdraw`, `on_sync`, and `on_staked_read` / `on_unstaked_read` which chain the forced calls
+  below), and a call whose callback never returns stops blocking after one hour. Gas for those calls (50 Tgas, callback 20 Tgas, a
+  reading callback that chains a call 80 Tgas) is not measured.
+- **Unstaking and withdrawing.** Whether each `unstake` on the standard staking pool restarts the lock on everything already unstaked
+  is **not verified**. The agent chooses the amount while the vault is not open (see Escape). Once it is open, anyone may call, the
+  agent included, and the contract fixes the amount: everything placed if the agent has been silent for the escape delay or the
+  vault's list has stayed full for that delay (any note may then leave), otherwise what the vault's payable requests need beyond its
+  liquid funds. `placed` (the total balance) counts staked and already unstaked funds together, and the staking pool is expected to
+  refuse an `unstake` above what is staked and a `withdraw` above what is unstaked (not verified). So a call whose amount the
+  contract fixes first reads `get_account_staked_balance` (or `get_account_unstaked_balance` for a withdrawal) and asks for at most
+  that: an `unstake` of 1 yocto by the agent, or share rounding at the staking pool, cannot make it fail. A failed reading frees the
+  vault and starts no interval. At most one successful `unstake` per vault every 3 days (a design
+  margin) of each kind: the agent's own calls and the calls whose amount the contract fixes have separate intervals, so an
+  `unstake` by the agent just before a request is overdue cannot hold back the one the contract fixes. A failed call does not count
+  (`on_unstake` reads the result). Someone other than the agent can `withdraw` at most once an
+  hour per vault, and `sync` only when the last reading is older than an hour, so others cannot keep a vault busy.
+- **Notes.** Blind BLS notes as in `ona-mint`, message `tier || pk || nonce`, one key per tier (a key serves one tier of one vault or of
+  the cash, never two). Share notes: tag `ONA-POOL-V1:<network>:<contract>:<vault>:BLS12381G1_XMD:SHA-256_SSWU_RO_`, nullifier
+  `SHA-256("ONA-POOL-NF-V1" || vault (u32 LE) || tier || pk || nonce)`; a tier carries a fixed number of shares. Cash notes: tag
+  `ONA-POOL-CASH-V1:<network>:<contract>:BLS12381G1_XMD:SHA-256_SSWU_RO_`, nullifier
+  `SHA-256("ONA-POOL-CASH-NF-V1" || tier || pk || nonce)`; a tier is worth a fixed amount, set at creation with its key, each worth
+  more than the exit and storage fees. An owner key serves one note only: a key already used by a spent note is refused. Owner keys
+  of small order (the 8 points and their non-canonical encodings, `WEAK_KEYS`) are refused: with one, a signature can be made for any
+  message.
+- **Share price.** `(liquid + placed − fee owed − orphan) / shares`, rounded down to value a note leaving and up to price one entering;
+  10^-6 NEAR per share in a vault with no share. `placed` is set by `sync`, which reads the target's own balance for the pool. `enter`,
+  `leave` and share-note exits use a price only if the vault was read within the hour or holds nothing at its target. When a vault's
+  last shares are gone, what is left there (unread rewards, rounding) is set aside as owned by nobody (`orphan`), so the next entrant
+  does not take it. There are no virtual shares. A staking pool credits rewards by epoch (epoch length not verified here), so the
+  balance a sync reads can jump at an epoch change: an entry made just before such a reading can share in rewards earned before it,
+  and holders leaving just before it miss them. The fresh-price rule only bounds how old a reading can be, not this.
+- **Deposits and cash.** The contract records depositors itself: `deposit` is payable (at least 0.1 NEAR) and credits its caller
+  with the attached amount minus the storage its record adds (measured, priced at the chain's storage price). No method lets the
+  agent or the guardian name a depositor. The agent's `issue_cash(account, tier, count)` turns that account's deposits into cash and
+  records notes it may blind-sign, never more than the account's deposits not refunded and not already issued, and never for an
+  account with a refund request waiting. A plain transfer, including an `ona-mint` spend, is never credited.
+- **Refunds.** While the escape is open, or once the account's `request_refund` has waited the escape delay (even if the agent syncs
+  every day), `refund_deposit` returns the account's own deposits never turned into cash, and nothing else.
+- **Entries.** `enter(vault, cash note, owner_sig, outputs, expires_at)` (agent) spends a cash note for share notes. The owner signs
+  `SHA-256("ONA-POOL-ENTER-V1" || H(contract) || nf || vault (u32 LE) || n (u32 LE) || (tier || count (u64 LE))*n || expires_at (u64 LE))`.
+  The new notes cost the vault's price rounded up, paid from the cash; 0.002 NEAR goes to the storage of the nullifier and the owner
+  key; what is left must be less than the vault's smallest note and stays in the cash, owned by nobody. Refused below a price of
+  one thousandth of the initial price, over the vault's asset cap, after `expires_at`, for a note ever named in an exit request, and
+  unless the note's cash tier has at least `min_live_notes` live notes.
+- **Leaves.** `leave(vault, share note, owner_sig, outputs, expires_at)` (agent) spends a share note for cash notes, signed as
+  `SHA-256("ONA-POOL-LEAVE-V1" || H(contract) || vault (u32 LE) || nf || n || (tier || count (u64 LE))*n || expires_at (u64 LE))`.
+  The note is valued at the vault's price rounded down; the cash notes plus 0.002 NEAR must fit in it and leave less than the
+  smallest cash note, which stays in the cash. The vault pays the whole note from its liquid funds at once, so cash is never backed by
+  a promise and no loss can be dodged by leaving before it is read: when the money is staked, the leave waits until the agent brings
+  it back. A leave must also leave in place the value of the payable exit requests waiting on that vault, so funds brought back for
+  a holder who asked cannot go to another note first. A leave moves no value to the holders who stay. It counts in the vault's
+  hourly exit window, and is refused for a note ever named in an exit request.
+- **Exits.** `pay_exit(cash note, owner_sig, to, expires_at)` (agent) pays a cash note to the account the owner signed, only to an
+  account that deposited, from the cash. The owner signs `SHA-256("ONA-POOL-CASH-EXIT-V1" || H(contract) || nf || H(to) || expires_at (u64 LE))`.
+  0.002 NEAR is kept for the storage of the nullifier and the owner key. Each tier pays at most as many notes as were issued, and the
+  agent pays only while the tier has at least `min_live_notes` live notes. An exit whose transfer comes back is kept for the account
+  (`claim_owed`).
+- **Exit limit.** Each account receives at most `deposited − refunded + accrued − received`. `accrued` grows on the account's cash
+  still in the pool (`issued − received`) at the yearly rate set at creation (20 % by default, at most 100 %), and is brought up to
+  date at every deposit, issue, refund and exit: money paid out and deposited again does not earn growth twice, and money only
+  deposited, never turned into cash, earns nothing. Rounded up, saturating. It
+  does not depend on any share price. It bounds what an accomplice of the agent can receive; the value itself is kept by the note
+  counters.
+- **Fee.** Zero by default. The guardian can announce up to 20 % of the gains above each vault's highest price read at a sync. A new
+  rate takes effect after the admin delay, and gains are charged at the rate in force when the previous reading was made, so gains
+  made before a change are not charged at the new rate. The agent collects it with `claim_fees`, from liquid funds beyond the value
+  of the payable requests waiting on that vault, the only payment to the agent; it goes to the current agent, including fees earned under a previous one.
+- **Requests.** `request_exit(vault_id, note, owner_sig, to, min_amount, expires_at)` is filed by the account it pays, which attaches
+  the storage fee (336 bytes, an estimate, at the chain's storage price). The fee goes back to that account when the request is paid,
+  withdrawn (`cancel_exit_request`) or dropped, less 80 bytes for the note's permanent mark: a note named in a request can afterwards
+  only leave the pool by an exit, never enter or leave a vault. `vault_id` null is a cash note, the normal case. A share note is the
+  fallback for a holder the agent does not serve: it is signed
+  `SHA-256("ONA-POOL-EXIT-V2" || H(contract) || vault (u32 LE) || nf || H(to) || min_amount (u128 LE) || expires_at (u64 LE))` and
+  shows the vault. A request is accepted only if it could be paid then, and if all the account's waiting requests in that list
+  together fit its exit limit; at most four per account and 64 per list. Its date is the date it was filed: a request withdrawn and
+  made again waits again, and a note withdrawn three times cannot be requested again. A request lasts at most 30 days: its
+  signature must expire within 30 days of filing. A request counts as payable only while its note is unspent, its owner key has
+  served no other note, the tier still has unpaid notes, its value covers the fee and the owner's minimum, and the account's limit
+  covers it. Anyone can `drop_request` a request that has expired or can no longer be paid. The agent pays a listed request with `pay_request` (event `exit` for cash, `share_exit` for a
+  share note).
+- **Escape.** The escape is open when the agent makes no placement, sync or paid exit for the escape delay (7 days by default, from
+  one minute to 30 days), and while a guardian announcement is waiting. The cash list is open as well when one of its payable
+  requests has waited the escape delay, or the list is full and has stayed full that long (the clock starts when it fills and stops
+  only when it is back to 32, so withdrawing and refiling requests does not restart it; the opening itself lasts only while the list
+  is full). A vault is
+  open on the same rules for its own requests. Then anyone can call `escape_exit` (only to the signed account that deposited, within
+  its limit; the minimum of live notes does not apply), `sync`, and the fixed-amount `unstake` and `withdraw` of that vault; the
+  agent cannot place in an open vault. While the agent is not silent (a request is overdue, or an announcement is waiting), the
+  escape pays only notes with a request listed, so holders who asked are served before anyone else, unless that list is full and
+  has stayed full for the escape delay (otherwise accounts filling it with requests nobody pays would keep everyone else from
+  asking). As soon as the list is no longer full, others can ask again and the escape is back to listed notes only. A share-note
+  exit without a request must leave the listed requests' value in place. Once the agent has been silent for the escape delay, every
+  note can leave. With the agent gone nobody can sign cash, so share notes then leave their vault directly, which shows the vault.
+- **Caps.** Per vault: most assets, and most NEAR moved per hour, counted separately for placements and for leaves and exits. For the
+  cash, one hourly cap set at creation (at least two of the largest cash notes). Normal and escape exits share one window, so the
+  rate never doubles. Hours are calendar hours, so up to two caps can pass around the turn of an hour. In an empty hour any single
+  note passes, so a note worth more than the cap still leaves. Up to 64 new notes per issue, entry or leave.
+- **What stays visible.** Everything in a call's arguments and in the events is public. `deposit`, `issue_cash` and `pay_exit` name
+  the account (and `issue_cash` the cash tiers it gets); `enter` and `leave` name the vault and no account; neither kind names both.
+  But: `get_holder` publishes each account's deposits, refunds, receipts and growth, so when vaults earn different rates the amount
+  an account takes out can hint at its vault; entries can be linked to deposits by time and amount; `get_vault` publishes each
+  tier's issued and paid counts, so the size of each set of holders is public; a `pay_exit` refused for lack of cash and accepted
+  right after a `leave` from vault V points to V; a `withdraw` from V just before a `leave`, or a `leave` refused for lack of
+  liquid funds, points to V and to the size of the note; a share-note request or escape exit shows the vault. The contract imposes
+  no delay between these steps. The minimum of live notes per cash tier is not a delay either: a single account can fill a tier
+  to reach it, and the last notes of a tier, which the agent cannot pay, leave only by a request and the escape delay, which opens
+  the cash list (for listed notes only while the agent is active). Batching and delays are the agent's job.
+- **Known limits, not fixed.**
+  - The agent holds the note keys and blind-signs off chain. It can sign notes for an accomplice who deposited: the per-tier count
+    limits the total paid and the exit limit bounds what the accomplice receives, but other holders of that tier can find it
+    exhausted. It can also spend an owner's note in `enter` or `leave` and never sign the new notes.
+  - A leave from a vault whose money is staked waits for the agent to bring funds back (days, not verified).
+  - Filling a list is a race around 63/64: whoever controls the order of transactions in a block can withdraw and refile requests so
+    the list never looks "not full" between them (ordering within a block on NEAR not verified). Keeping a list full costs the
+    attackers 64 notes, their request fees, and the yield those notes lose while the staking pool returns the funds; it costs the
+    other holders the yield of a vault unstaked in full. While a cash list stays full, the escape pays any cash note and the minimum
+    of live notes per tier no longer applies to it, which weakens the anonymity of those exits.
+  - What an entry or a leave leaves over stays in the cash, paid to nobody; each time less than one of the smallest notes. What is
+    set aside in an emptied vault is owned by nobody too, and still bears that vault's later losses only through the price floor.
+  - A key shared with `ona-mint` or another pool would let notes be forged: the contract can check uniqueness only among its own keys.
+  - A callback that never comes back after a refused placement or a completed withdrawal leaves NEAR on the account that belongs to no
+    compartment: `sync` corrects `placed`, not the liquid funds (no recovery method yet).
+  - Storage: a depositor's record and a request are paid by whoever creates them (the request's bytes are estimated); nullifiers and
+    owner keys are paid from the 0.002 NEAR kept per note.
+  - A guardian can list a target that is not a real staking pool; the recorded code hash only lets others check. Withdrawal
+    accounting assumes the target's transfer arrives.
 
 ## App skeleton
 Local only, model faked and every fake response labelled `mode: mock`. Mission state machine with a plan frozen before any web
@@ -529,7 +579,7 @@ What a result means. A send uses `send_tx` with `wait_until: FINAL`. A result is
 answer (below). The outcome then keeps two things apart:
 - `failure`, the status of the transaction itself, which follows the chain of promises its first receipt returned;
 - `failed_receipts`, every receipt that failed, including a sub-call a contract handled in a callback (`on_spend_payout` in the mint;
-  `on_place`, `on_done`, `on_sync` in the pool) and promises it did not wait for. `Outcome::require_all_receipts_ok()` fails if either is set.
+  `on_place`, `on_unstake`, `on_sync` in the pool) and promises it did not wait for. `Outcome::require_all_receipts_ok()` fails if either is set.
 
 Which to use: a caller that needs every effect to have happened (a transfer, a deployment, every call of `ona-crowd run`) uses
 `require_all_receipts_ok()`. A caller of a contract method whose callback handles a failed sub-call reads `failure`, then the contract's

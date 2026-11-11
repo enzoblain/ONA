@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use ona_deploy::{
-    amount, check_deployed_code, check_names, check_parent, check_roles, code_hash, deploy_actions, pool_init_args,
-    registry_init_args, MintPlan,
+    amount, check_deployed_code, check_names, check_parent, check_roles, code_hash, deploy_actions, parse_cash_tiers,
+    pool_init_args, registry_init_args, MintPlan, PoolCash,
 };
 use ona_near::{check_network, load_account_key, Action, Client};
 use ona_signer::KeyStore;
@@ -25,6 +25,15 @@ fn env_number<T: std::str::FromStr>(name: &str, default: T) -> Result<T> {
     match std::env::var(name) {
         Ok(value) => value.parse().map_err(|_| anyhow!("{name} is not a number")),
         Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow!("{name} is not valid text")),
+    }
+}
+
+/// A variable left out is `None`. A variable that is set but unreadable is an error.
+fn optional_number<T: std::str::FromStr>(name: &str) -> Result<Option<T>> {
+    match std::env::var(name) {
+        Ok(value) => value.parse().map(Some).map_err(|_| anyhow!("{name} is not a number")),
+        Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(anyhow!("{name} is not valid text")),
     }
 }
@@ -148,15 +157,17 @@ fn deploy_registry() -> Result<()> {
 
 fn deploy_pool() -> Result<()> {
     let deployer = Deployer::from_env()?;
-    let optional = |name: &str| -> Result<Option<u64>> {
-        match std::env::var(name) {
-            Ok(value) => Ok(Some(value.parse().map_err(|_| anyhow!("{name} is not a number"))?)),
-            Err(_) => Ok(None),
-        }
-    };
-    let (escape, admin) = (optional("ONA_ESCAPE_DELAY_SECS")?, optional("ONA_ADMIN_DELAY_SECS")?);
+    let (escape, admin) = (optional_number("ONA_ESCAPE_DELAY_SECS")?, optional_number("ONA_ADMIN_DELAY_SECS")?);
     let (guardian, agent) = (env("ONA_GUARDIAN_ACCOUNT")?, env("ONA_AGENT_ACCOUNT")?);
-    let args = pool_init_args(&guardian, &agent, &deployer.network, escape, admin)?;
+    let tiers_file = env("ONA_POOL_CASH_TIERS")?;
+    let tiers = parse_cash_tiers(&std::fs::read_to_string(&tiers_file).context("cannot read ONA_POOL_CASH_TIERS")?)?;
+    let cash = PoolCash {
+        tiers,
+        hourly_cap: env("ONA_CASH_HOURLY_CAP")?.parse().map_err(|_| anyhow!("ONA_CASH_HOURLY_CAP is not a number"))?,
+        max_rate_bps: optional_number("ONA_MAX_RATE_BPS")?,
+        min_live_notes: env_number("ONA_MIN_LIVE_NOTES", 5)?,
+    };
+    let args = pool_init_args(&guardian, &agent, &deployer.network, escape, admin, &cash)?;
     let funding = funding()?;
     let code = read_wasm("ONA_POOL_WASM", "target/wasm32-unknown-unknown/contract/ona_pool.wasm")?;
     let account = format!("pool.{}", deployer.parent);

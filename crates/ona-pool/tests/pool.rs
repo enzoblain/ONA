@@ -1,26 +1,40 @@
-//! The pool on the mocked NEAR VM, which runs the real BLS12-381 and ed25519 host functions. Share notes are
-//! made with `ona-token` (blst), and the exit digest is recomputed here with `sha2`, so both sides are
+//! The pool on the mocked NEAR VM, which runs the real BLS12-381 and ed25519 host functions. Notes are made
+//! with `ona-token` (blst), and every digest is recomputed here from the SPEC with `sha2`, so both sides are
 //! cross-checked. Vault calls are only inspected as receipts: no staking pool runs here.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use near_sdk::json_types::{Base64VecU8, U128};
 use near_sdk::mock::MockAction;
-use near_sdk::test_utils::{get_created_receipts, VMContextBuilder};
+use near_sdk::test_utils::{get_created_receipts, get_logs, VMContextBuilder};
 use near_sdk::{env, testing_env, AccountId, Gas, NearToken, PromiseResult};
 use ona_pool::*;
-use ona_token::{keygen, sign_blinded, sign_digest, PendingToken, SecretKey, Token, G2_LEN};
+use ona_token::{blind, keygen, sign_blinded, sign_digest, unblind, PendingToken, SecretKey, Token, G2_LEN};
 use rand::rngs::OsRng;
+use rand::RngCore;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const NEAR: u128 = 1_000_000_000_000_000_000_000_000;
+const MILLI: u128 = NEAR / 1_000;
 const NETWORK: &str = "sandbox";
-/// One note of tier 0 holds 10^6 shares, one NEAR at the initial price; tier 1 holds ten times more.
-const TIER_SHARES: [u128; 2] = [1_000_000, 10_000_000];
-/// The guardian's announcement delay used by these tests.
+/// Cash notes of 0.1, 1 and 10 NEAR.
+const CASH: [u128; 3] = [NEAR / 10, NEAR, 10 * NEAR];
+/// Share notes of 0.1 and 1 NEAR at the initial price.
+const SHARES: [u128; 2] = [100_000, 1_000_000];
+/// Added to each deposit, so the record's storage never eats into the amount the test needs.
+const PAD: u128 = NEAR / 100;
+/// Attached to each exit request: more than its storage fee.
+const REQUEST_FEE: u128 = NEAR / 100;
 const ADMIN_SECS: u64 = 7 * 86_400;
 const ADMIN_NS: u64 = ADMIN_SECS * 1_000_000_000;
+const FAR: u64 = u64::MAX / 2;
+/// The standard position: one 10-NEAR cash note entered as nine notes of 0.1 NEAR and nine of 1.
+const POSITION: [(u8, u64); 2] = [(0, 9), (1, 9)];
+const IN_POSITION: u128 = 99 * NEAR / 10;
+/// What a 1-NEAR share note at the initial price leaves as: nine cash notes of 0.1.
+const ONE_TO_CASH: [(u8, u64); 1] = [(0, 9)];
 
 fn acc(s: &str) -> AccountId {
     s.parse().unwrap()
@@ -58,22 +72,6 @@ fn sha(parts: &[&[u8]]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Written from the SPEC, independently of the contract.
-fn nullifier(vault: u32, t: &Token) -> [u8; 32] {
-    sha(&[b"ONA-POOL-NF-V1", &vault.to_le_bytes(), &[t.denom_id], &t.pk, &t.nonce])
-}
-
-fn digest(vault: u32, nf: &[u8; 32], to: &AccountId, min: u128) -> [u8; 32] {
-    sha(&[
-        b"ONA-POOL-EXIT-V1",
-        &sha(&[contract().as_bytes()]),
-        &vault.to_le_bytes(),
-        nf,
-        &sha(&[to.as_bytes()]),
-        &min.to_le_bytes(),
-    ])
-}
-
 fn panic_text(e: Box<dyn std::any::Any + Send>) -> String {
     e.downcast_ref::<String>()
         .cloned()
@@ -98,18 +96,82 @@ fn context_paying(pred: &AccountId, attached: u128, balance: u128, storage: u64,
         .build());
 }
 
+// ---- digests, written from the SPEC independently of the contract ----
+
+struct Note {
+    token: Token,
+    owner: SigningKey,
+    /// `None` for a cash note.
+    vault: Option<u32>,
+}
+
+fn nf(n: &Note) -> [u8; 32] {
+    let t = &n.token;
+    match n.vault {
+        None => sha(&[b"ONA-POOL-CASH-NF-V1", &[t.denom_id], &t.pk, &t.nonce]),
+        Some(v) => sha(&[b"ONA-POOL-NF-V1", &v.to_le_bytes(), &[t.denom_id], &t.pk, &t.nonce]),
+    }
+}
+
+fn outs_bytes(list: &[(u8, u64)]) -> Vec<u8> {
+    let mut d = (list.len() as u32).to_le_bytes().to_vec();
+    for (tier, count) in list {
+        d.push(*tier);
+        d.extend_from_slice(&count.to_le_bytes());
+    }
+    d
+}
+
+fn exit_digest(n: &Note, to: &AccountId, min: u128, expires: u64) -> [u8; 32] {
+    let c = sha(&[contract().as_bytes()]);
+    let t = sha(&[to.as_bytes()]);
+    match n.vault {
+        None => sha(&[b"ONA-POOL-CASH-EXIT-V1", &c, &nf(n), &t, &expires.to_le_bytes()]),
+        Some(v) => sha(&[
+            b"ONA-POOL-EXIT-V2",
+            &c,
+            &v.to_le_bytes(),
+            &nf(n),
+            &t,
+            &min.to_le_bytes(),
+            &expires.to_le_bytes(),
+        ]),
+    }
+}
+
+fn enter_digest_spec(n: &Note, vault: u32, list: &[(u8, u64)], expires: u64) -> [u8; 32] {
+    let c = sha(&[contract().as_bytes()]);
+    sha(&[b"ONA-POOL-ENTER-V1", &c, &nf(n), &vault.to_le_bytes(), &outs_bytes(list), &expires.to_le_bytes()])
+}
+
+fn leave_digest_spec(n: &Note, list: &[(u8, u64)], expires: u64) -> [u8; 32] {
+    let c = sha(&[contract().as_bytes()]);
+    let v = n.vault.unwrap();
+    sha(&[b"ONA-POOL-LEAVE-V1", &c, &v.to_le_bytes(), &nf(n), &outs_bytes(list), &expires.to_le_bytes()])
+}
+
+fn input(n: &Note) -> NoteInput {
+    NoteInput { tier: n.token.denom_id, pk: b64(&n.token.pk), nonce: b64(&n.token.nonce), sig: b64(&n.token.sig) }
+}
+
+fn note_json(n: &Note) -> Value {
+    json!({"tier": n.token.denom_id, "pk": n.token.pk.to_vec(), "nonce": n.token.nonce.to_vec(), "sig": n.token.sig.to_vec()})
+}
+
+fn signed(n: &Note, digest: [u8; 32]) -> Base64VecU8 {
+    b64(&sign_digest(&n.owner, &digest))
+}
+
+fn outs(list: &[(u8, u64)]) -> Vec<NoteOut> {
+    list.iter().map(|(tier, count)| NoteOut { tier: *tier, count: *count }).collect()
+}
+
 #[derive(Debug, Clone)]
 struct Call {
     to: AccountId,
     method: String,
     args: String,
     deposit: u128,
-}
-
-struct Note {
-    token: Token,
-    owner: SigningKey,
-    vault: u32,
 }
 
 struct H {
@@ -119,16 +181,54 @@ struct H {
     now: u64,
     keys: Vec<Vec<SecretKey>>,
     pks: Vec<Vec<[u8; G2_LEN]>>,
+    cash_keys: Vec<SecretKey>,
+    cash_pks: Vec<[u8; G2_LEN]>,
     transfers: Vec<(AccountId, u128)>,
     calls: Vec<Call>,
+    logs: Vec<String>,
+    /// The public methods the helpers called, with the arguments they passed.
+    public: Vec<(String, Value)>,
+    /// What each vault's staking pool holds for the pool, staked and already unstaked. With `strict`, it
+    /// refuses to unstake more than is staked or to withdraw more than is unstaked, as the standard staking
+    /// pool is expected to (not verified); otherwise it accepts any amount, as the older tests assume.
+    staked: Vec<u128>,
+    unstaked: Vec<u128>,
+    strict: bool,
+}
+
+fn new_pool(
+    escape: Option<u64>,
+    admin: Option<u64>,
+    cash_pks: &[[u8; G2_LEN]],
+    cap: u128,
+    rate: Option<u16>,
+    min_live: u64,
+) -> Pool {
+    let tiers = cash_pks.iter().zip(CASH).map(|(pk, v)| CashTierInit { value: U128(v), pk_g2: b64(pk) }).collect();
+    Pool::new(guardian(), agent(), NETWORK.into(), escape, admin, tiers, U128(cap), rate, min_live)
+}
+
+fn fresh_keys() -> Vec<[u8; G2_LEN]> {
+    (0..3).map(|_| keygen(&mut OsRng).public_key()).collect()
+}
+
+fn refused_init(f: impl FnOnce() -> Pool) -> String {
+    context(&acc("deployer.test"), NEAR, 0, 0);
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let r = catch_unwind(AssertUnwindSafe(f));
+    std::panic::set_hook(hook);
+    panic_text(r.err().expect("the pool should have been refused"))
 }
 
 impl H {
-    fn with(escape_secs: Option<u64>, max_assets: u128, hourly: u128) -> Self {
+    fn build(escape_secs: Option<u64>, max_assets: u128, hourly: u128, cash_cap: u128, min_live: u64) -> Self {
         let now = 1_000 * HOUR_NS;
         let balance = 5 * NEAR;
         context(&acc("deployer.test"), balance, 0, now);
-        let pool = Pool::new(guardian(), agent(), NETWORK.into(), escape_secs, Some(ADMIN_SECS));
+        let cash_keys: Vec<SecretKey> = (0..3).map(|_| keygen(&mut OsRng)).collect();
+        let cash_pks: Vec<[u8; G2_LEN]> = cash_keys.iter().map(|k| k.public_key()).collect();
+        let pool = new_pool(escape_secs, Some(ADMIN_SECS), &cash_pks, cash_cap, None, min_live);
         let mut h = Self {
             pool,
             balance,
@@ -136,8 +236,15 @@ impl H {
             now,
             keys: Vec::new(),
             pks: Vec::new(),
+            cash_keys,
+            cash_pks,
             transfers: Vec::new(),
             calls: Vec::new(),
+            logs: Vec::new(),
+            public: Vec::new(),
+            staked: vec![0; MAX_VAULTS as usize],
+            unstaked: vec![0; MAX_VAULTS as usize],
+            strict: false,
         };
         h.add_vault(max_assets, hourly);
         h.add_vault(max_assets, hourly);
@@ -148,6 +255,10 @@ impl H {
         h
     }
 
+    fn with(escape_secs: Option<u64>, max_assets: u128, hourly: u128) -> Self {
+        Self::build(escape_secs, max_assets, hourly, 1_000 * NEAR, 1)
+    }
+
     fn new() -> Self {
         Self::with(None, 1_000 * NEAR, 1_000 * NEAR)
     }
@@ -155,11 +266,7 @@ impl H {
     fn add_vault(&mut self, max_assets: u128, hourly: u128) -> u32 {
         let keys: Vec<SecretKey> = (0..2).map(|_| keygen(&mut OsRng)).collect();
         let pks: Vec<[u8; G2_LEN]> = keys.iter().map(|k| k.public_key()).collect();
-        let tiers = pks
-            .iter()
-            .zip(TIER_SHARES)
-            .map(|(pk, shares)| TierInit { shares: U128(shares), pk_g2: b64(pk) })
-            .collect();
+        let tiers = pks.iter().zip(SHARES).map(|(pk, s)| TierInit { shares: U128(s), pk_g2: b64(pk) }).collect();
         let id = self.pks.len() as u32;
         let got = self.call(&guardian(), |p| {
             p.add_vault("staking".into(), staking(id), b64(&[7; 32]), tiers, U128(max_assets), U128(hourly))
@@ -170,8 +277,8 @@ impl H {
         id
     }
 
-    /// Runs one method, applies its outgoing transfers and deposits, and checks that the pool still covers
-    /// storage, the vaults' liquid funds and what it owes.
+    /// Runs one method, applies its outgoing transfers and calls, keeps its logs, and checks that the pool
+    /// still covers everything it holds.
     fn call<R>(&mut self, pred: &AccountId, f: impl FnOnce(&mut Pool) -> R) -> R {
         self.call_paying(pred, 0, f)
     }
@@ -181,6 +288,7 @@ impl H {
         context_paying(pred, attached, self.balance, self.storage, self.now);
         let r = f(&mut self.pool);
         self.storage = env::storage_usage();
+        self.logs.extend(get_logs());
         self.collect();
         assert!(self.status().solvent, "the pool no longer covers what it holds");
         r
@@ -242,6 +350,7 @@ impl H {
         );
         f(&mut self.pool);
         self.storage = env::storage_usage();
+        self.logs.extend(get_logs());
         self.collect();
     }
 
@@ -258,32 +367,111 @@ impl H {
         self.view(|p| p.get_vault(id))
     }
 
-    /// A plain transfer to the pool, with no method call, such as an `ona-mint` spend.
+    fn cash_view(&mut self) -> CashView {
+        self.view(|p| p.get_cash())
+    }
+
+    fn holder(&mut self, a: &AccountId) -> HolderView {
+        self.view(|p| p.get_holder(a.clone()))
+    }
+
+    fn byte_cost(&mut self) -> u128 {
+        self.view(|_| env::storage_byte_cost().as_yoctonear())
+    }
+
+    /// What a request keeps for good from its fee: the note's mark.
+    fn mark(&mut self) -> u128 {
+        MARK_BYTES * self.byte_cost()
+    }
+
+    /// A plain transfer to the pool, with no method call.
     fn plain_transfer(&mut self, amount: u128) {
         self.balance += amount;
     }
 
-    /// The depositor pays the pool through `deposit`.
-    fn deposit(&mut self, who: &AccountId, credited: u128) {
-        self.call_paying(who, credited + DEPOSIT_STORAGE_FEE, |p| p.deposit());
+    fn deposit(&mut self, who: &AccountId, amount: u128) {
+        self.public.push(("deposit".into(), json!({})));
+        self.call_paying(who, amount + PAD, |p| p.deposit());
     }
 
-    /// Money in, shares recorded, notes signed blind by the agent.
-    fn enter(&mut self, vault: u32, tier: u8, count: u64, depositor: &AccountId) -> Vec<Note> {
-        let price = self.vault(vault).share_price.0;
-        let cost = TIER_SHARES[usize::from(tier)] * price * u128::from(count);
-        self.deposit(depositor, cost);
-        let U128(got) = self.call(&agent(), |p| p.record_entry(vault, tier, count));
-        assert_eq!(got, cost);
-        (0..count).map(|_| self.note(vault, tier)).collect()
+    /// A cash note signed blind by the agent's key for `tier`, whether issued or not.
+    fn cash_note(&self, tier: u8) -> Note {
+        let dst = cash_dst(NETWORK, contract().as_str()).into_bytes();
+        let pending = PendingToken::new(&mut OsRng, tier, &dst).unwrap();
+        let sig = sign_blinded(&self.cash_keys[usize::from(tier)], &pending.blinded).unwrap();
+        let (token, owner) = pending.finish(&sig, &self.cash_pks[usize::from(tier)]).unwrap();
+        Note { token, owner, vault: None }
     }
 
-    fn note(&self, vault: u32, tier: u8) -> Note {
+    /// A cash note whose owner key is `owner`, as a careless wallet would make.
+    fn cash_note_owned_by(&self, tier: u8, owner: &SigningKey) -> Note {
+        let pk = owner.verifying_key().to_bytes();
+        let mut nonce = [0u8; 32];
+        OsRng.fill_bytes(&mut nonce);
+        let mut msg = vec![tier];
+        msg.extend_from_slice(&pk);
+        msg.extend_from_slice(&nonce);
+        let dst = cash_dst(NETWORK, contract().as_str()).into_bytes();
+        let (r, b) = blind(&msg, &dst, &mut OsRng);
+        let sig = unblind(&sign_blinded(&self.cash_keys[usize::from(tier)], &b).unwrap(), &r).unwrap();
+        Note { token: Token { denom_id: tier, pk, nonce, sig }, owner: owner.clone(), vault: None }
+    }
+
+    fn share_note(&self, vault: u32, tier: u8) -> Note {
         let dst = note_dst(NETWORK, contract().as_str(), vault).into_bytes();
         let pending = PendingToken::new(&mut OsRng, tier, &dst).unwrap();
         let sig = sign_blinded(&self.keys[vault as usize][usize::from(tier)], &pending.blinded).unwrap();
         let (token, owner) = pending.finish(&sig, &self.pks[vault as usize][usize::from(tier)]).unwrap();
-        Note { token, owner, vault }
+        Note { token, owner, vault: Some(vault) }
+    }
+
+    /// `who` deposits, the agent issues `count` cash notes of `tier` for it and signs them.
+    fn cash(&mut self, who: &AccountId, tier: u8, count: u64) -> Vec<Note> {
+        self.deposit(who, CASH[usize::from(tier)] * u128::from(count));
+        let w = who.clone();
+        self.public.push(("issue_cash".into(), json!({"account": who.as_str(), "tier": tier, "count": count})));
+        self.call(&agent(), move |p| p.issue_cash(w, tier, count));
+        (0..count).map(|_| self.cash_note(tier)).collect()
+    }
+
+    /// A cash note becomes share notes of `vault`.
+    fn enter(&mut self, n: &Note, vault: u32, list: &[(u8, u64)]) -> Vec<Note> {
+        let (note, sig, o) = (input(n), signed(n, enter_digest_spec(n, vault, list, FAR)), outs(list));
+        self.public.push((
+            "enter".into(),
+            json!({"vault_id": vault, "note": note_json(n), "owner_sig": sig.0, "outputs": list, "expires_at": FAR}),
+        ));
+        self.call(&agent(), move |p| p.enter(vault, note, sig, o, FAR));
+        list.iter().flat_map(|(tier, count)| (0..*count).map(|_| self.share_note(vault, *tier))).collect()
+    }
+
+    /// `who` holds 9.9 NEAR of `vault`: nine notes of 0.1, then nine of 1.
+    fn position(&mut self, vault: u32, who: &AccountId) -> Vec<Note> {
+        let c = self.cash(who, 2, 1);
+        self.enter(&c[0], vault, &POSITION)
+    }
+
+    /// A share note becomes cash notes.
+    fn leave(&mut self, n: &Note, list: &[(u8, u64)]) -> Vec<Note> {
+        let vault = n.vault.unwrap();
+        let (note, sig, o) = (input(n), signed(n, leave_digest_spec(n, list, FAR)), outs(list));
+        self.public.push((
+            "leave".into(),
+            json!({"vault_id": vault, "note": note_json(n), "owner_sig": sig.0, "outputs": list, "expires_at": FAR}),
+        ));
+        self.call(&agent(), move |p| p.leave(vault, note, sig, o, FAR));
+        list.iter().flat_map(|(tier, count)| (0..*count).map(|_| self.cash_note(*tier))).collect()
+    }
+
+    fn refused_leave(&mut self, n: &Note, list: &[(u8, u64)]) -> String {
+        let vault = n.vault.unwrap();
+        let (note, sig, o) = (input(n), signed(n, leave_digest_spec(n, list, FAR)), outs(list));
+        self.refused(&agent(), move |p| p.leave(vault, note, sig, o, FAR))
+    }
+
+    fn refused_enter(&mut self, n: &Note, vault: u32, list: &[(u8, u64)]) -> String {
+        let (note, sig, o) = (input(n), signed(n, enter_digest_spec(n, vault, list, FAR)), outs(list));
+        self.refused(&agent(), move |p| p.enter(vault, note, sig, o, FAR))
     }
 
     /// Delivers the callback of the operation the vault is busy with.
@@ -295,110 +483,280 @@ impl H {
     fn place(&mut self, vault: u32, amount: u128) {
         self.call(&agent(), |p| p.place(vault, U128(amount)));
         self.reply(vault, PromiseResult::Successful(vec![]), |p, op| p.on_place(vault, U128(amount), op));
+        self.staked[vault as usize] += amount;
     }
 
-    /// The target reports what it holds for the pool.
-    fn sync(&mut self, vault: u32, total: u128) {
-        self.call(&agent(), |p| p.sync(vault));
+    /// The target reports what it holds for the pool. A change shows up on the staked part (rewards or loss).
+    fn sync_by(&mut self, who: &AccountId, vault: u32, total: u128) {
+        self.call(who, |p| p.sync(vault));
         let reply = format!("\"{total}\"").into_bytes();
         self.reply(vault, PromiseResult::Successful(reply), |p, op| p.on_sync(vault, op));
+        let v = vault as usize;
+        self.staked[v] = total.saturating_sub(self.unstaked[v]);
     }
 
-    /// Funds come back from the target to the pool.
-    fn withdraw(&mut self, vault: u32, amount: u128) {
-        self.call(&agent(), |p| p.withdraw(vault, U128(amount)));
+    /// The arguments of the last call this pool made to itself for `method`.
+    fn self_call(&self, method: &str) -> Value {
+        let c = self.calls.iter().rev().find(|c| c.to == contract() && c.method == method).expect("no such callback");
+        serde_json::from_str(&c.args).unwrap()
+    }
+
+    /// The amount of the last call to the target for `method` made after `since` calls.
+    fn target_call_after(&self, since: usize, method: &str) -> Option<u128> {
+        self.calls[since..].iter().rev().find(|c| c.to != contract() && c.method == method).map(|c| {
+            let args: Value = serde_json::from_str(&c.args).unwrap();
+            args["amount"].as_str().unwrap().parse().unwrap()
+        })
+    }
+
+    fn u128_reply(amount: u128) -> PromiseResult {
+        PromiseResult::Successful(format!("\"{amount}\"").into_bytes())
+    }
+
+    /// What the staking pool answers to `get_account_staked_balance` / `get_account_unstaked_balance`.
+    fn staked_reading(&mut self, vault: u32) -> u128 {
+        if self.strict {
+            self.staked[vault as usize]
+        } else {
+            self.vault(vault).placed.0
+        }
+    }
+
+    fn unstaked_reading(&mut self, vault: u32) -> u128 {
+        if self.strict {
+            self.unstaked[vault as usize]
+        } else {
+            self.vault(vault).placed.0
+        }
+    }
+
+    /// The staking pool runs an `unstake` of `amount`: true if it accepts.
+    fn run_unstake(&mut self, vault: u32, amount: u128) -> bool {
+        let v = vault as usize;
+        if self.strict && amount > self.staked[v] {
+            return false;
+        }
+        let moved = amount.min(self.staked[v]);
+        self.staked[v] -= moved;
+        self.unstaked[v] += moved;
+        true
+    }
+
+    /// The staking pool runs a `withdraw` of `amount`: true if it accepts, and the money arrives.
+    fn run_withdraw(&mut self, vault: u32, amount: u128) -> bool {
+        let v = vault as usize;
+        if self.strict && amount > self.unstaked[v] {
+            return false;
+        }
+        let from_unstaked = amount.min(self.unstaked[v]);
+        self.unstaked[v] -= from_unstaked;
+        self.staked[v] = self.staked[v].saturating_sub(amount - from_unstaked);
         self.balance += amount;
-        self.reply(vault, PromiseResult::Successful(vec![]), |p, op| p.on_withdraw(vault, U128(amount), op));
+        true
     }
 
-    fn holder(&mut self, a: &AccountId) -> HolderView {
-        self.view(|p| p.get_holder(a.clone()))
+    fn outcome(ok: bool) -> PromiseResult {
+        if ok {
+            PromiseResult::Successful(vec![])
+        } else {
+            PromiseResult::Failed
+        }
     }
-}
 
-fn input(n: &Note) -> NoteInput {
-    NoteInput { tier: n.token.denom_id, pk: b64(&n.token.pk), nonce: b64(&n.token.nonce), sig: b64(&n.token.sig) }
-}
+    fn sync(&mut self, vault: u32, total: u128) {
+        self.sync_by(&agent(), vault, total);
+    }
 
-/// The owner's signature on an exit of `n` from `vault` to `to`.
-fn signed(n: &Note, vault: u32, to: &AccountId, min: u128) -> Base64VecU8 {
-    b64(&sign_digest(&n.owner, &digest(vault, &nullifier(vault, &n.token), to, min)))
+    /// An `unstake`, run to the end against the staking pool mock. Returns whether the pool accepted it.
+    fn unstake_by(&mut self, who: &AccountId, vault: u32, amount: Option<u128>) -> bool {
+        let forced = *who != agent() || self.vault(vault).open;
+        let since = self.calls.len();
+        self.call(who, |p| p.unstake(vault, amount.map(U128)));
+        let asked = if forced {
+            let args = self.self_call("on_staked_read");
+            let (op, target) = (args["op"].as_u64().unwrap(), args["amount"].as_str().unwrap().parse::<u128>().unwrap());
+            let staked = self.staked_reading(vault);
+            let mark = self.calls.len();
+            self.callback(Self::u128_reply(staked), |p| p.on_staked_read(vault, op, U128(target)));
+            match self.target_call_after(mark, "unstake") {
+                Some(a) => a,
+                None => return false,
+            }
+        } else {
+            self.target_call_after(since, "unstake").unwrap()
+        };
+        let ok = self.run_unstake(vault, asked);
+        self.reply(vault, Self::outcome(ok), |p, op| p.on_unstake(vault, op, forced));
+        ok
+    }
+
+    /// A `withdraw`, run to the end against the staking pool mock. Returns whether the pool accepted it.
+    fn withdraw_by(&mut self, who: &AccountId, vault: u32, amount: Option<u128>) -> bool {
+        let forced = *who != agent() || self.vault(vault).open;
+        let since = self.calls.len();
+        self.call(who, |p| p.withdraw(vault, amount.map(U128)));
+        let asked = if forced {
+            let args = self.self_call("on_unstaked_read");
+            let (op, target) = (args["op"].as_u64().unwrap(), args["amount"].as_str().unwrap().parse::<u128>().unwrap());
+            let unstaked = self.unstaked_reading(vault);
+            let mark = self.calls.len();
+            self.callback(Self::u128_reply(unstaked), |p| p.on_unstaked_read(vault, op, U128(target)));
+            match self.target_call_after(mark, "withdraw") {
+                Some(a) => a,
+                None => return false,
+            }
+        } else {
+            self.target_call_after(since, "withdraw").unwrap()
+        };
+        let ok = self.run_withdraw(vault, asked);
+        self.reply(vault, Self::outcome(ok), |p, op| p.on_withdraw(vault, U128(asked), op));
+        ok
+    }
+
+    fn withdraw(&mut self, vault: u32, amount: u128) {
+        self.withdraw_by(&agent(), vault, Some(amount));
+    }
+
+    /// The last amount sent to a target for `method`.
+    fn last_amount(&self, method: &str) -> String {
+        self.calls.iter().rev().find(|c| c.method == method).map(|c| c.args.clone()).unwrap_or_default()
+    }
 }
 
 fn pay(h: &mut H, n: &Note, to: &AccountId) {
-    let sig = signed(n, n.vault, to, 0);
-    let (vault, note, to) = (n.vault, input(n), to.clone());
-    h.call(&agent(), move |p| p.pay_exit(vault, note, sig, to, U128(0)));
+    let (note, sig, to) = (input(n), signed(n, exit_digest(n, to, 0, FAR)), to.clone());
+    h.public.push((
+        "pay_exit".into(),
+        json!({"note": note_json(n), "owner_sig": sig.0, "to": to.as_str(), "expires_at": FAR}),
+    ));
+    h.call(&agent(), move |p| p.pay_exit(note, sig, to, FAR));
 }
 
-fn refused_exit(h: &mut H, pred: &AccountId, n: &Note, vault: u32, sig: Base64VecU8, to: &AccountId) -> String {
-    let (note, to) = (input(n), to.clone());
-    h.refused(pred, move |p| p.pay_exit(vault, note, sig, to, U128(0)))
+fn refused_pay(h: &mut H, n: &Note, to: &AccountId) -> String {
+    let (note, sig, to) = (input(n), signed(n, exit_digest(n, to, 0, FAR)), to.clone());
+    h.refused(&agent(), move |p| p.pay_exit(note, sig, to, FAR))
 }
 
-// ---- liste blanche ----
+fn request(h: &mut H, n: &Note, to: &AccountId) {
+    let until = h.now + 25 * DAY_NS;
+    request_until(h, n, to, until);
+}
+
+fn request_until(h: &mut H, n: &Note, to: &AccountId, expires: u64) {
+    let (note, sig, to, vault) = (input(n), signed(n, exit_digest(n, to, 0, expires)), to.clone(), n.vault);
+    h.call_paying(&to.clone(), REQUEST_FEE, move |p| p.request_exit(vault, note, sig, to, U128(0), expires));
+}
+
+fn escape(h: &mut H, by: &AccountId, n: &Note, to: &AccountId) {
+    let (note, sig, to, vault) = (input(n), signed(n, exit_digest(n, to, 0, FAR)), to.clone(), n.vault);
+    h.call(by, move |p| p.escape_exit(vault, note, sig, to, U128(0), FAR));
+}
+
+fn refused_escape(h: &mut H, by: &AccountId, n: &Note, to: &AccountId) -> String {
+    let (note, sig, to, vault) = (input(n), signed(n, exit_digest(n, to, 0, FAR)), to.clone(), n.vault);
+    h.refused(by, move |p| p.escape_exit(vault, note, sig, to, U128(0), FAR))
+}
+
+fn cancel(h: &mut H, n: &Note, by: &AccountId) {
+    let (vault, id) = (n.vault, b64(&nf(n)));
+    h.call(by, move |p| p.cancel_exit_request(vault, id));
+}
+
+// ---- the list of vaults ----
 
 #[test]
 fn only_the_guardian_lists_vaults_and_lending_is_not_built() {
     let mut h = H::new();
     let pk = keygen(&mut OsRng).public_key();
     let tiers = vec![TierInit { shares: U128(1), pk_g2: b64(&pk) }];
-    let t = tiers.clone();
-    let e = h.refused(&agent(), move |p| {
-        p.add_vault("staking".into(), staking(9), b64(&[7; 32]), t, U128(NEAR), U128(NEAR));
-    });
-    assert!(e.contains("only the guardian"), "{e}");
-    let t = tiers.clone();
-    let e = h.refused(&guardian(), move |p| {
-        p.add_vault("lending".into(), staking(9), b64(&[7; 32]), t, U128(NEAR), U128(NEAR));
-    });
-    assert!(e.contains("lending adapter not implemented"), "{e}");
-    let t = tiers.clone();
-    let e = h.refused(&guardian(), move |p| {
-        p.add_vault("swap".into(), staking(9), b64(&[7; 32]), t, U128(NEAR), U128(NEAR));
-    });
-    assert!(e.contains("unknown adapter"), "{e}");
-    let t = tiers;
-    let e = h.refused(&guardian(), move |p| {
-        p.add_vault("staking".into(), staking(9), b64(&[7; 31]), t, U128(NEAR), U128(NEAR));
-    });
-    assert!(e.contains("bad code hash length"), "{e}");
+    let cases = [
+        (agent(), "staking", 32usize, "only the guardian"),
+        (guardian(), "lending", 32, "lending adapter not implemented"),
+        (guardian(), "swap", 32, "unknown adapter"),
+        (guardian(), "staking", 31, "bad code hash length"),
+    ];
+    for (who, kind, hash_len, refusal) in cases {
+        let t = tiers.clone();
+        let e = h.refused(&who, move |p| {
+            p.add_vault(kind.into(), staking(9), b64(&vec![7; hash_len]), t, U128(NEAR), U128(1_000 * NEAR));
+        });
+        assert!(e.contains(refusal), "{e}");
+    }
 }
 
 #[test]
-fn the_checked_code_hash_is_published_with_the_vault() {
+fn a_target_serves_one_vault_only() {
     let mut h = H::new();
-    assert_eq!(h.vault(0).code_hash.0, vec![7; 32]);
+    let pk = keygen(&mut OsRng).public_key();
+    let e = h.refused(&guardian(), move |p| {
+        let tiers = vec![TierInit { shares: U128(SHARES[1]), pk_g2: b64(&pk) }];
+        p.add_vault("staking".into(), staking(0), b64(&[7; 32]), tiers, U128(NEAR), U128(1_000 * NEAR));
+    });
+    assert!(e.contains("this target already serves a vault"), "{e}");
 }
 
 #[test]
-fn a_key_cannot_serve_two_vaults() {
+fn a_key_serves_one_tier_of_one_vault_or_of_the_cash() {
     let mut h = H::new();
-    let reused = h.pks[0][0];
+    for reused in [h.pks[0][0], h.cash_pks[0]] {
+        let e = h.refused(&guardian(), move |p| {
+            let tiers = vec![TierInit { shares: U128(1), pk_g2: b64(&reused) }];
+            p.add_vault("staking".into(), staking(9), b64(&[7; 32]), tiers, U128(NEAR), U128(1_000 * NEAR));
+        });
+        assert!(e.contains("key already used"), "{e}");
+    }
+}
+
+#[test]
+fn the_hourly_cap_covers_two_of_the_largest_notes() {
+    let mut h = H::new();
+    let pk = keygen(&mut OsRng).public_key();
     let e = h.refused(&guardian(), move |p| {
-        let tiers = vec![TierInit { shares: U128(1), pk_g2: b64(&reused) }];
-        p.add_vault("staking".into(), staking(9), b64(&[7; 32]), tiers, U128(NEAR), U128(NEAR));
+        let tiers = vec![TierInit { shares: U128(SHARES[1]), pk_g2: b64(&pk) }];
+        p.add_vault("staking".into(), staking(9), b64(&[7; 32]), tiers, U128(NEAR), U128(2 * NEAR - 1));
     });
-    assert!(e.contains("key already used"), "{e}");
+    assert!(e.contains("the hourly cap must cover two of the largest notes"), "{e}");
+    let keys = fresh_keys();
+    let e = refused_init(move || new_pool(None, None, &keys, 20 * NEAR - 1, None, 1));
+    assert!(e.contains("the hourly cap must cover two of the largest notes"), "{e}");
+}
+
+#[test]
+fn the_pool_settings_are_bounded() {
+    let (a, b, c, d, e) = (fresh_keys(), fresh_keys(), fresh_keys(), fresh_keys(), fresh_keys());
+    assert!(refused_init(move || new_pool(Some(1), None, &a, 20 * NEAR, None, 1)).contains("escape delay"));
+    assert!(refused_init(move || new_pool(None, Some(ADMIN_SECS - 1), &b, 20 * NEAR, None, 1)).contains("admin delay"));
+    assert!(refused_init(move || new_pool(None, Some(31 * 86_400), &c, 20 * NEAR, None, 1)).contains("admin delay"));
+    let r = refused_init(move || new_pool(None, None, &d, 20 * NEAR, Some(MAX_RATE_BPS + 1), 1));
+    assert!(r.contains("rate too high"), "{r}");
+    let r = refused_init(move || new_pool(None, None, &e, 20 * NEAR, None, 0));
+    assert!(r.contains("min_live_notes must be at least 1"), "{r}");
+    let small = keygen(&mut OsRng).public_key();
+    let r = refused_init(move || {
+        let tiers = vec![CashTierInit { value: U128(4 * MILLI), pk_g2: b64(&small) }];
+        Pool::new(guardian(), agent(), NETWORK.into(), None, None, tiers, U128(NEAR), None, 1)
+    });
+    assert!(r.contains("worth more than its fees"), "{r}");
+    let mut h = H::with(Some(600), 1_000 * NEAR, 1_000 * NEAR);
+    assert_eq!(h.view(|p| p.get_config().escape_delay_ns), 600_000_000_000);
+    assert_eq!(h.view(|p| p.get_config().max_rate_bps), DEFAULT_MAX_RATE_BPS);
 }
 
 #[test]
 fn the_agent_calls_only_listed_vaults_and_only_their_methods() {
     let mut h = H::new();
-    h.enter(0, 1, 1, &alice());
+    h.position(0, &alice());
     let e = h.refused(&agent(), |p| p.place(7, U128(NEAR)));
     assert!(e.contains("unknown vault"), "{e}");
     let e = h.refused(&alice(), |p| p.place(0, U128(NEAR)));
     assert!(e.contains("only the agent"), "{e}");
 
     h.place(0, 4 * NEAR);
-    h.call(&agent(), |p| p.unstake(0, U128(NEAR)));
-    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_done(0, op));
+    h.unstake_by(&agent(), 0, Some(NEAR));
     h.withdraw(0, NEAR);
     h.sync(0, 3 * NEAR);
 
     let external: Vec<&Call> = h.calls.iter().filter(|c| c.to != contract()).collect();
-    assert_eq!(external.len(), 4);
     assert!(external.iter().all(|c| c.to == staking(0)), "only the listed target is called");
     let methods: Vec<&str> = external.iter().map(|c| c.method.as_str()).collect();
     assert_eq!(methods, ["deposit_and_stake", "unstake", "withdraw", "get_account_total_balance"]);
@@ -411,7 +769,7 @@ fn the_agent_calls_only_listed_vaults_and_only_their_methods() {
 #[test]
 fn a_vault_runs_one_operation_at_a_time() {
     let mut h = H::new();
-    h.enter(0, 1, 1, &alice());
+    h.position(0, &alice());
     h.call(&agent(), |p| p.place(0, U128(NEAR)));
     let e = h.refused(&agent(), |p| p.sync(0));
     assert!(e.contains("still running"), "{e}");
@@ -422,371 +780,98 @@ fn a_vault_runs_one_operation_at_a_time() {
 #[test]
 fn a_failed_placement_returns_to_the_vaults_liquid_funds() {
     let mut h = H::new();
-    h.enter(0, 1, 1, &alice());
+    h.position(0, &alice());
     h.call(&agent(), |p| p.place(0, U128(4 * NEAR)));
     h.balance += 4 * NEAR; // a failed call sends its deposit back
     h.reply(0, PromiseResult::Failed, |p, op| p.on_place(0, U128(4 * NEAR), op));
     let v = h.vault(0);
-    assert_eq!((v.liquid.0, v.placed.0, v.busy), (10 * NEAR, 0, false));
+    assert_eq!((v.liquid.0, v.placed.0, v.busy), (IN_POSITION, 0, false));
 }
 
-// ---- aucun transfert libre ----
+// ---- deposits and cash ----
 
 #[test]
-fn an_exit_pays_only_the_signed_depositor_and_nothing_else() {
+fn cash_is_issued_only_from_the_accounts_own_deposits() {
     let mut h = H::new();
-    let notes = h.enter(0, 0, 1, &alice());
-    h.transfers.clear();
-    pay(&mut h, &notes[0], &alice());
-    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE)]);
-    assert_eq!(h.vault(0).liquid.0, 0);
-}
-
-#[test]
-fn no_one_can_be_paid_without_a_valid_note() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 2, &alice());
-    let n = &notes[0];
-
-    // Signed by a key that is not the vault's.
-    let mut forged = h.note(1, 0);
-    forged.vault = 0;
-    let sig = signed(&forged, 0, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), &forged, 0, sig, &alice());
-    assert!(e.contains("invalid note"), "{e}");
-
-    // A note of vault 0 presented to vault 1, with a fresh owner signature for vault 1.
-    let sig = signed(n, 1, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), n, 1, sig, &alice());
-    assert!(e.contains("invalid note"), "{e}");
-
-    // The agent changes the recipient the owner signed.
-    let sig = signed(n, 0, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), n, 0, sig, &bob());
-    assert!(e.contains("bad owner signature"), "{e}");
-
-    // Nobody but the agent, while it is active.
-    let sig = signed(n, 0, &alice(), 0);
-    let e = refused_exit(&mut h, &mallory(), n, 0, sig, &alice());
-    assert!(e.contains("only the agent"), "{e}");
-
-    // A minimum above what the note is worth.
-    let sig = signed(n, 0, &alice(), NEAR);
-    let (note, s) = (input(n), sig);
-    let e = h.refused(&agent(), move |p| p.pay_exit(0, note, s, alice(), U128(NEAR)));
-    assert!(e.contains("below the owner's minimum"), "{e}");
-}
-
-#[test]
-fn exits_go_only_to_an_account_that_deposited() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 1, &alice());
-    let sig = signed(&notes[0], 0, &mallory(), 0);
-    let e = refused_exit(&mut h, &agent(), &notes[0], 0, sig, &mallory());
-    assert!(e.contains("only to an account that deposited"), "{e}");
-}
-
-#[test]
-fn only_money_paid_through_deposit_can_be_given_to_a_vault() {
-    let mut h = H::new();
-    // The pool's own funding and a plain transfer are not deposits.
     h.plain_transfer(20 * NEAR);
-    let e = h.refused(&agent(), |p| {
-        p.record_entry(0, 1, 1);
-    });
-    assert!(e.contains("not enough unassigned funds"), "{e}");
+    h.deposit(&alice(), NEAR);
+    let e = h.refused(&agent(), |p| p.issue_cash(alice(), 1, 2));
+    assert!(e.contains("more than this account's deposits not turned into cash"), "{e}");
+    let e = h.refused(&agent(), |p| p.issue_cash(bob(), 0, 1));
+    assert!(e.contains("not a depositor"), "{e}");
+    let e = h.refused(&alice(), |p| p.issue_cash(alice(), 1, 1));
+    assert!(e.contains("only the agent"), "{e}");
+    h.call(&agent(), |p| p.issue_cash(alice(), 1, 1));
+    assert_eq!(h.cash_view().liquid.0, NEAR);
+    assert_eq!(h.holder(&alice()).issued.0, NEAR);
+    let e = h.refused(&agent(), |p| p.issue_cash(alice(), 1, 1));
+    assert!(e.contains("more than this account's deposits not turned into cash"), "{e}");
     let e = h.refused(&alice(), |p| p.deposit());
     assert!(e.contains("deposit too small"), "{e}");
 }
 
 #[test]
-fn nobody_can_declare_a_depositor_for_someone_else() {
-    // There is no method that names a depositor: `deposit` credits its own caller only.
+fn no_cash_is_issued_to_an_account_that_asked_for_a_refund() {
     let mut h = H::new();
-    h.deposit(&agent(), 10 * NEAR);
-    h.deposit(&guardian(), 10 * NEAR);
-    assert_eq!(h.holder(&alice()).deposited.0, 0);
-    assert_eq!(h.holder(&agent()).deposited.0, 10 * NEAR);
-    assert_eq!(h.status().unassigned.0, 20 * NEAR);
-    // So notes paid for by the agent cannot be sent to an account that never deposited.
-    h.call(&agent(), |p| p.record_entry(0, 1, 1));
-    let note = h.note(0, 1);
-    let sig = signed(&note, 0, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), &note, 0, sig, &alice());
-    assert!(e.contains("only to an account that deposited"), "{e}");
+    h.deposit(&alice(), 2 * NEAR);
+    h.call(&alice(), |p| p.request_refund());
+    let e = h.refused(&agent(), |p| p.issue_cash(alice(), 1, 1));
+    assert!(e.contains("this account asked for a refund"), "{e}");
 }
 
 #[test]
-fn a_withdrawal_in_flight_cannot_be_given_to_a_vault() {
+fn a_deposit_pays_for_the_storage_of_its_record() {
     let mut h = H::new();
-    h.enter(0, 1, 1, &alice());
-    h.place(0, 10 * NEAR);
-    h.call(&agent(), |p| p.withdraw(0, U128(10 * NEAR)));
-    assert_eq!(h.vault(0).withdrawing.0, 10 * NEAR);
-    h.balance += 10 * NEAR; // the transfer lands before the callback
-    let e = h.refused(&agent(), |p| {
-        p.record_entry(1, 1, 1);
-    });
-    assert!(e.contains("not enough unassigned funds"), "{e}");
-    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_withdraw(0, U128(10 * NEAR), op));
-    let v = h.vault(0);
-    assert_eq!((v.withdrawing.0, v.liquid.0, v.placed.0), (0, 10 * NEAR, 0));
-}
-
-// ---- double dépense ----
-
-#[test]
-fn a_note_is_paid_once() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 2, &alice());
-    pay(&mut h, &notes[0], &alice());
-    let sig = signed(&notes[0], 0, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), &notes[0], 0, sig, &alice());
-    assert!(e.contains("note already spent"), "{e}");
-    let nf = nullifier(0, &notes[0].token);
-    assert!(h.view(|p| p.is_spent(b64(&nf))));
-    pay(&mut h, &notes[1], &alice());
+    let before = h.storage;
+    h.deposit(&alice(), NEAR);
+    let added = u128::from(h.storage - before);
+    assert!(added > 0);
+    let cost = added * h.byte_cost();
+    assert_eq!(h.holder(&alice()).deposited.0, NEAR + PAD - cost, "the new record's storage comes off the deposit");
+    h.deposit(&alice(), NEAR);
+    assert_eq!(h.holder(&alice()).deposited.0, 2 * (NEAR + PAD) - cost, "a known depositor adds no storage");
 }
 
 #[test]
-fn exits_never_exceed_the_notes_recorded() {
+fn a_refund_pays_back_only_the_accounts_own_deposits_never_turned_into_cash() {
+    // A newcomer whose own vault never grew must not take a share of someone else's fresh deposit.
     let mut h = H::new();
-    h.enter(0, 0, 1, &alice());
-    h.enter(0, 1, 1, &alice());
-    // A note the agent signed without recording it.
-    let extra = h.note(0, 0);
-    let first = h.note(0, 0);
-    pay(&mut h, &first, &alice());
-    let sig = signed(&extra, 0, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), &extra, 0, sig, &alice());
-    assert!(e.contains("more exits than notes issued"), "{e}");
-}
-
-// ---- prix de part et commission ----
-
-#[test]
-fn the_share_price_follows_what_the_vault_holds() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 2, &alice());
-    assert_eq!(h.vault(0).share_price.0, INITIAL_PRICE);
-    h.place(0, 2 * NEAR);
-    h.sync(0, 2 * NEAR + NEAR / 5);
-    let price = h.vault(0).share_price.0;
-    assert_eq!(price, INITIAL_PRICE / 10 * 11, "2.2 NEAR for 2 million shares");
-
-    // A later entry pays the new price, so it does not take the earlier gains.
-    let later = h.enter(0, 0, 1, &bob());
-    assert_eq!(h.holder(&bob()).deposited.0, NEAR / 10 * 11);
-
-    h.withdraw(0, 2 * NEAR + NEAR / 5);
-    h.transfers.clear();
-    pay(&mut h, &notes[0], &alice());
-    pay(&mut h, &later[0], &bob());
-    let worth = NEAR / 10 * 11 - EXIT_STORAGE_FEE;
-    assert_eq!(h.transfers, vec![(alice(), worth), (bob(), worth)]);
-}
-
-#[test]
-fn the_agent_fee_is_zero_by_default() {
-    let mut h = H::new();
-    assert_eq!(h.view(|p| p.get_config().fee_bps), 0);
-    h.enter(0, 0, 2, &alice());
-    h.place(0, 2 * NEAR);
-    h.sync(0, 3 * NEAR);
-    assert_eq!(h.vault(0).fee_owed.0, 0);
-}
-
-#[test]
-fn a_fee_is_charged_only_on_gains_above_the_highest_price() {
-    let mut h = H::new();
-    h.enter(0, 0, 2, &alice());
-    h.place(0, 2 * NEAR);
-    h.sync(0, 2 * NEAR + NEAR / 5);
-    let e = h.refused(&alice(), |p| p.set_fee_bps(1_000));
-    assert!(e.contains("only the guardian"), "{e}");
-    let e = h.refused(&guardian(), |p| p.set_fee_bps(MAX_FEE_BPS + 1));
-    assert!(e.contains("fee too high"), "{e}");
-    h.call(&guardian(), |p| p.set_fee_bps(1_000));
-    assert_eq!(h.vault(0).fee_owed.0, 0, "gains made before the fee was set are not charged");
-
-    h.sync(0, 2 * NEAR + 2 * NEAR / 5);
-    assert_eq!(h.vault(0).fee_owed.0, NEAR / 50, "10 % of a 0.2 NEAR gain");
-
-    h.sync(0, 2 * NEAR);
-    h.sync(0, 2 * NEAR + 2 * NEAR / 5 - NEAR / 50);
-    assert_eq!(h.vault(0).fee_owed.0, NEAR / 50, "climbing back after a loss is not charged again");
-
-    h.withdraw(0, NEAR);
-    h.transfers.clear();
-    h.call(&agent(), |p| p.claim_fees(0));
-    assert_eq!(h.transfers, vec![(agent(), NEAR / 50)]);
-    assert_eq!(h.vault(0).fee_owed.0, 0);
-}
-
-// ---- séquestre et sortie de secours ----
-
-#[test]
-fn the_escape_opens_only_after_seven_days_without_the_agent() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 2, &alice());
-    h.place(0, NEAR);
-
-    h.now += DEFAULT_ESCAPE_DELAY_NS - 1;
-    let sig = signed(&notes[0], 0, &alice(), 0);
-    let note = input(&notes[0]);
-    let e = h.refused(&mallory(), move |p| p.escape_exit(0, note, sig, alice(), U128(0)));
-    assert!(e.contains("the agent is still active"), "{e}");
-    let e = h.refused(&mallory(), |p| p.withdraw(0, U128(NEAR)));
-    assert!(e.contains("only the agent while it is active"), "{e}");
-
-    h.now += 1;
-    assert!(h.view(|p| p.escape_open()));
-    // Anyone can bring the placed funds back, then pay a holder what the note is worth.
-    h.call(&mallory(), |p| p.unstake(0, U128(NEAR)));
-    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_done(0, op));
-    h.call(&mallory(), |p| p.withdraw(0, U128(NEAR)));
-    h.balance += NEAR;
-    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_withdraw(0, U128(NEAR), op));
-    h.transfers.clear();
-    for n in &notes {
-        let sig = signed(n, 0, &alice(), 0);
-        let note = input(n);
-        h.call(&mallory(), move |p| p.escape_exit(0, note, sig, alice(), U128(0)));
-    }
-    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE); 2]);
-}
-
-#[test]
-fn only_placements_syncs_and_paid_exits_count_as_agent_activity() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 2, &alice());
-    h.now += DEFAULT_ESCAPE_DELAY_NS;
-    assert!(h.view(|p| p.escape_open()));
-
-    // Work that moves nothing for holders does not close the escape.
-    h.deposit(&bob(), NEAR);
-    h.call(&agent(), |p| p.record_entry(1, 0, 1));
-    h.call(&agent(), |p| p.claim_fees(0));
-    h.call(&guardian(), |p| p.set_agent(acc("agent2.test")));
-    h.call(&guardian(), |p| p.set_agent(agent()));
-    h.now += ADMIN_NS;
-    assert!(h.view(|p| p.escape_open()), "entries, fees and a new agent do not restart the delay");
-
-    pay(&mut h, &notes[0], &alice());
-    assert!(!h.view(|p| p.escape_open()), "a paid exit does");
-    h.now += DEFAULT_ESCAPE_DELAY_NS;
-    h.call(&agent(), |p| p.sync(0));
-    assert!(!h.view(|p| p.escape_open()), "so does a sync");
-    h.now += DEFAULT_ESCAPE_DELAY_NS;
-    h.place(0, NEAR / 2);
-    assert!(!h.view(|p| p.escape_open()), "and a placement");
-    let _ = notes;
-}
-
-#[test]
-fn an_active_agent_that_does_not_pay_cannot_keep_a_holder_waiting() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 1, &alice());
-    h.place(0, NEAR); // everything is placed
-    let n = &notes[0];
-    let note = input(n);
-    let sig = signed(n, 0, &alice(), 0);
-    // A request pays its storage and needs a valid note signed for an account that deposited.
-    let (nt, s) = (note.clone(), sig.clone());
-    let e = h.refused(&mallory(), move |p| p.request_exit(0, nt, s, alice(), U128(0)));
-    assert!(e.contains("attach 0.001 NEAR"), "{e}");
-    let (nt, s) = (note.clone(), signed(n, 0, &mallory(), 0));
-    let e = h.refused_paying(&mallory(), REQUEST_STORAGE_FEE, move |p| p.request_exit(0, nt, s, mallory(), U128(0)));
-    assert!(e.contains("only to an account that deposited"), "{e}");
-    let (nt, s) = (note.clone(), sig.clone());
-    h.call_paying(&mallory(), REQUEST_STORAGE_FEE, move |p| p.request_exit(0, nt, s, alice(), U128(0)));
-
-    // The agent keeps syncing every day, so the general escape stays closed.
-    for _ in 0..6 {
+    h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    h.sync(0, IN_POSITION + NEAR);
+    let m = mallory();
+    h.position(1, &m);
+    h.call(&m, |p| p.request_refund());
+    for _ in 0..7 {
         h.now += DAY_NS;
-        h.sync(0, NEAR);
+        h.sync(0, IN_POSITION + NEAR);
     }
-    h.now += DAY_NS - 1;
-    let (nt, s) = (note.clone(), sig.clone());
-    let e = h.refused(&mallory(), move |p| p.escape_exit(0, nt, s, alice(), U128(0)));
-    assert!(e.contains("the agent is still active"), "{e}");
-    let e = h.refused(&mallory(), |p| p.withdraw(0, U128(NEAR)));
-    assert!(e.contains("only the agent while it is active"), "{e}");
-
-    h.now += 1;
-    assert!(!h.view(|p| p.escape_open()));
-    // The overdue request stops placements in this vault and lets anyone bring its funds back.
     h.deposit(&bob(), NEAR);
-    h.call(&agent(), |p| p.record_entry(0, 0, 1));
-    let e = h.refused(&agent(), |p| p.place(0, U128(NEAR)));
-    assert!(e.contains("overdue"), "{e}");
-    let e = h.refused(&agent(), |p| p.unstake(0, U128(NEAR)));
-    assert!(e.contains("the escape is open on this vault"), "the agent cannot restart the lock");
-    h.call(&mallory(), |p| p.unstake(0, U128(NEAR)));
-    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_done(0, op));
-    h.call(&mallory(), |p| p.withdraw(0, U128(NEAR)));
-    h.balance += NEAR;
-    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_withdraw(0, U128(NEAR), op));
-    h.transfers.clear();
-    h.call(&mallory(), move |p| p.escape_exit(0, note, sig, alice(), U128(0)));
-    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE)]);
-    // Once paid, the request no longer blocks the vault.
-    h.place(0, NEAR);
+    let own = h.holder(&m).refundable.0;
+    assert!(own < PAD, "only mallory's own leftover");
+    let e = h.refused(&m, move |p| p.refund_deposit(U128(own + 1)));
+    assert!(e.contains("more than this account's deposits not turned into cash"), "{e}");
+    h.call(&m, move |p| p.refund_deposit(U128(own)));
+    assert!(h.holder(&bob()).refundable.0 >= NEAR, "bob's deposit is untouched");
+    h.call(&agent(), |p| p.issue_cash(bob(), 1, 1));
 }
 
 #[test]
-fn a_depositor_takes_back_money_never_placed_once_the_escape_opens() {
+fn a_depositor_takes_back_money_never_turned_into_cash_once_the_escape_opens() {
     let mut h = H::new();
     h.deposit(&alice(), 5 * NEAR);
-    h.enter(0, 0, 2, &alice()); // 2 NEAR given to a vault, 5 still unassigned
+    h.cash(&alice(), 1, 2);
     let e = h.refused(&alice(), |p| p.refund_deposit(U128(NEAR)));
     assert!(e.contains("the agent is still active"), "{e}");
     h.now += DEFAULT_ESCAPE_DELAY_NS;
     let e = h.refused(&mallory(), |p| p.refund_deposit(U128(NEAR)));
     assert!(e.contains("not a depositor"), "{e}");
-    let e = h.refused(&alice(), |p| p.refund_deposit(U128(5 * NEAR + 1)));
-    assert!(e.contains("more than this account's share"), "{e}");
+    let left = h.holder(&alice()).refundable.0;
+    assert!(left >= 5 * NEAR && left < 5 * NEAR + 2 * PAD);
     h.transfers.clear();
-    h.call(&alice(), |p| p.refund_deposit(U128(5 * NEAR)));
-    assert_eq!(h.transfers, vec![(alice(), 5 * NEAR)]);
+    h.call(&alice(), move |p| p.refund_deposit(U128(left)));
+    assert_eq!(h.transfers, vec![(alice(), left)]);
     assert_eq!(h.status().unassigned.0, 0);
-    let me = h.holder(&alice());
-    assert_eq!((me.refunded.0, me.withdrawn.0), (5 * NEAR, 0));
-    assert_eq!(me.exit_limit.0, 2 * NEAR, "what is left to exit is what went to the vault");
-}
-
-#[test]
-fn a_refund_never_exceeds_the_accounts_share() {
-    let mut h = H::new();
-    h.deposit(&alice(), NEAR);
-    h.deposit(&bob(), 5 * NEAR);
-    h.now += DEFAULT_ESCAPE_DELAY_NS;
-    let e = h.refused(&alice(), |p| p.refund_deposit(U128(2 * NEAR)));
-    assert!(e.contains("more than this account's share"), "{e}");
-    h.call(&alice(), |p| p.refund_deposit(U128(NEAR)));
-    let e = h.refused(&alice(), |p| p.refund_deposit(U128(1)));
-    assert!(e.contains("more than this account's share"), "{e}");
-    assert_eq!(h.holder(&bob()).refundable.0, 5 * NEAR);
-}
-
-#[test]
-fn an_account_whose_money_was_placed_cannot_take_anothers_unassigned_money_and_exit_too() {
-    let mut h = H::new();
-    let x = acc("x.test");
-    let y = acc("y.test");
-    let notes = h.enter(0, 1, 1, &x); // X's 10 NEAR went to vault 0
-    h.deposit(&y, 10 * NEAR); // Y's 10 NEAR were never placed
-    h.now += DEFAULT_ESCAPE_DELAY_NS;
-    // X gets only its share of what is unassigned, not all of Y's money.
-    assert_eq!(h.holder(&x).refundable.0, 5 * NEAR);
-    let e = h.refused(&x, |p| p.refund_deposit(U128(10 * NEAR)));
-    assert!(e.contains("more than this account's share"), "{e}");
-    h.call(&x, |p| p.refund_deposit(U128(5 * NEAR)));
-    // And what X took back comes off what it can still exit.
-    assert_eq!(h.holder(&x).exit_limit.0, 5 * NEAR);
-    let (note, sig) = (input(&notes[0]), signed(&notes[0], 0, &x, 0));
-    let e = h.refused(&mallory(), move |p| p.escape_exit(0, note, sig, x.clone(), U128(0)));
-    assert!(e.contains("over this account's exit limit"), "{e}");
 }
 
 #[test]
@@ -807,668 +892,1085 @@ fn a_refund_request_opens_refunds_even_while_the_agent_syncs_daily() {
     assert!(e.contains("the agent is still active"), "{e}");
     h.now += 1;
     assert!(!h.view(|p| p.escape_open()));
-    h.transfers.clear();
     h.call(&alice(), |p| p.refund_deposit(U128(3 * NEAR)));
-    assert_eq!(h.transfers, vec![(alice(), 3 * NEAR)]);
 }
 
+// ---- the exit limit ----
+
 #[test]
-fn a_new_agent_waits_for_the_admin_delay_and_the_escape_is_open_meanwhile() {
+fn money_going_round_does_not_raise_the_exit_limit() {
+    // 10 NEAR deposited and paid back twenty times over a year: the limit grows on the net balance, not on
+    // the sum of deposits.
     let mut h = H::new();
-    let notes = h.enter(0, 0, 2, &alice());
-    h.place(0, NEAR / 2);
-    assert!(!h.view(|p| p.escape_open()));
-    h.call(&guardian(), |p| p.set_agent(acc("agent2.test")));
-    assert!(h.view(|p| p.escape_open()), "holders can leave before the change");
-    assert_eq!(h.view(|p| p.get_config().pending_agent), Some(acc("agent2.test")));
-    // The old agent still runs things, the new one cannot yet.
-    let e = h.refused(&acc("agent2.test"), |p| p.place(0, U128(NEAR / 4)));
-    assert!(e.contains("only the agent"), "{e}");
-    let (note, sig) = (input(&notes[0]), signed(&notes[0], 0, &alice(), 0));
-    h.call(&mallory(), move |p| p.escape_exit(0, note, sig, alice(), U128(0)));
-
-    h.now += ADMIN_NS;
-    assert_eq!(h.view(|p| p.get_config().agent), acc("agent2.test"));
-    let e = h.refused(&agent(), |p| p.place(0, U128(NEAR / 4)));
-    assert!(e.contains("only the agent"), "{e}");
-    h.call(&acc("agent2.test"), |p| p.sync(0));
-    assert!(!h.view(|p| p.escape_open()), "the new agent's work closes it");
-}
-
-#[test]
-fn a_new_vault_waits_for_the_admin_delay_and_the_escape_is_open_meanwhile() {
-    let mut h = H::new();
-    h.enter(0, 0, 1, &alice());
-    h.place(0, NEAR / 2);
-    let id = h.add_vault(1_000 * NEAR, 1_000 * NEAR);
-    assert!(h.view(|p| p.escape_open()));
-    h.deposit(&bob(), NEAR);
-    let e = h.refused(&agent(), move |p| {
-        p.record_entry(id, 0, 1);
-    });
-    assert!(e.contains("vault not active yet"), "{e}");
-    h.now += ADMIN_NS;
-    h.sync(0, NEAR / 2);
-    assert!(!h.view(|p| p.escape_open()));
-    h.call(&agent(), move |p| p.record_entry(id, 0, 1));
-}
-
-#[test]
-fn the_admin_delay_is_at_least_seven_days() {
-    let _h = H::new();
-    context(&acc("deployer.test"), NEAR, 0, 0);
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let r = catch_unwind(|| Pool::new(guardian(), agent(), NETWORK.into(), None, Some(7 * 86_400 - 1)));
-    std::panic::set_hook(hook);
-    assert!(panic_text(r.err().unwrap()).contains("admin delay must be between 7 and 30 days"));
-}
-
-#[test]
-fn an_exit_that_could_not_be_paid_cannot_be_requested() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 6, &alice());
-    let n = &notes[0];
-    // A minimum above what the note is worth.
-    let (note, sig) = (input(n), signed(n, 0, &alice(), NEAR));
-    let e = h.refused_paying(&alice(), REQUEST_STORAGE_FEE, move |p| p.request_exit(0, note, sig, alice(), U128(NEAR)));
-    assert!(e.contains("this exit could not be paid"), "{e}");
-    // At most four waiting requests per account and vault.
-    for n in &notes[..4] {
-        let (note, sig) = (input(n), signed(n, 0, &alice(), 0));
-        h.call_paying(&alice(), REQUEST_STORAGE_FEE, move |p| p.request_exit(0, note, sig, alice(), U128(0)));
+    for _ in 0..20 {
+        let c = h.cash(&alice(), 2, 1);
+        pay(&mut h, &c[0], &alice());
+        h.now += YEAR_NS / 20;
+        h.sync(0, 0);
     }
-    let (note, sig) = (input(&notes[4]), signed(&notes[4], 0, &alice(), 0));
-    let e = h.refused_paying(&alice(), REQUEST_STORAGE_FEE, move |p| p.request_exit(0, note, sig, alice(), U128(0)));
-    assert!(e.contains("too many exit requests for this account"), "{e}");
-    // The account can withdraw a request, nobody else can.
-    let nf = b64(&nullifier(0, &notes[0].token));
-    let other = nf.clone();
-    let e = h.refused(&mallory(), move |p| p.cancel_exit_request(0, other));
-    assert!(e.contains("no such request"), "{e}");
-    h.call(&alice(), move |p| p.cancel_exit_request(0, nf));
-    assert_eq!(h.vault(0).requests, 3);
+    let me = h.holder(&alice());
+    assert!(me.exit_limit.0 < NEAR, "only the small leftovers ever grew: {}", me.exit_limit.0);
+    // So the agent cannot pay alice someone else's cash.
+    let other = h.cash(&bob(), 2, 1);
+    let e = refused_pay(&mut h, &other[0], &alice());
+    assert!(e.contains("over this account's exit limit"), "{e}");
 }
 
 #[test]
-fn a_request_that_can_no_longer_be_paid_does_not_block_the_vault() {
+fn the_exit_limit_grows_with_time_on_money_still_in_the_pool() {
     let mut h = H::new();
-    let notes = h.enter(0, 0, 1, &alice());
-    h.place(0, NEAR);
-    let (note, sig) = (input(&notes[0]), signed(&notes[0], 0, &alice(), 0));
-    h.call_paying(&alice(), REQUEST_STORAGE_FEE, move |p| p.request_exit(0, note, sig, alice(), U128(0)));
-    // The vault loses everything: the note is now worthless.
-    h.sync(0, 0);
+    h.cash(&alice(), 2, 1);
+    let base = h.holder(&alice()).deposited.0;
+    h.now += YEAR_NS;
+    let limit = h.holder(&alice()).exit_limit.0;
+    assert_eq!(limit, base + 2 * NEAR, "20 % a year on the 10 NEAR of cash, nothing on the leftover");
+}
+
+#[test]
+fn money_never_turned_into_cash_earns_nothing() {
+    // 100 NEAR parked for a year, then refunded: no limit is left to receive someone else's cash.
+    let mut h = H::new();
+    let m = mallory();
+    h.deposit(&m, 100 * NEAR);
+    h.call(&m, |p| p.request_refund());
+    for _ in 0..365 {
+        h.now += DAY_NS;
+        h.sync(0, 0);
+    }
+    let left = h.holder(&m).refundable.0;
+    h.call(&m, move |p| p.refund_deposit(U128(left)));
+    assert_eq!(h.holder(&m).exit_limit.0, 0);
+}
+
+#[test]
+fn the_exit_limit_ignores_share_prices() {
+    // Rewards left on a few shares must not lift anyone's limit.
+    let mut h = H::new();
+    let x = acc("x.test");
+    h.position(0, &x);
+    h.place(0, IN_POSITION);
+    let limit = h.holder(&x).exit_limit.0;
+    h.sync(0, IN_POSITION + 5 * NEAR);
+    assert!(h.vault(0).share_price.0 > INITIAL_PRICE);
+    assert_eq!(h.holder(&x).exit_limit.0, limit, "a price does not move a limit");
+    let extra = h.cash(&bob(), 2, 2);
+    pay(&mut h, &extra[0], &x); // up to its own deposit
+    let e = refused_pay(&mut h, &extra[1], &x);
+    assert!(e.contains("over this account's exit limit"), "{e}");
+}
+
+#[test]
+fn the_exit_limit_is_rounded_up() {
+    let mut h = H::new();
+    h.cash(&alice(), 1, 1);
+    let base = h.holder(&alice()).deposited.0;
+    h.now += 1;
+    let year = 10_000 * u128::from(YEAR_NS);
+    let exact = NEAR * u128::from(DEFAULT_MAX_RATE_BPS);
+    assert_ne!(exact % year, 0);
+    assert_eq!(h.holder(&alice()).exit_limit.0, base + exact / year + 1, "the growth is rounded up, not down");
+}
+
+// ---- entering and leaving ----
+
+#[test]
+fn an_entry_turns_a_cash_note_into_share_notes_at_the_vault_price() {
+    let mut h = H::new();
+    let c = h.cash(&alice(), 2, 1);
+    let shares = h.enter(&c[0], 0, &POSITION);
+    let v = h.vault(0);
+    assert_eq!((v.liquid.0, v.total_shares.0, v.share_price.0), (IN_POSITION, 9_900_000, INITIAL_PRICE));
+    assert_eq!((v.tiers[0].issued, v.tiers[1].issued), (9, 9));
+    assert_eq!(h.cash_view().liquid.0, 10 * NEAR - IN_POSITION - NOTE_STORAGE_FEE);
+    assert_eq!(h.cash_view().outstanding.0, 0);
+    let e = h.refused_enter(&c[0], 0, &POSITION);
+    assert!(e.contains("note already spent"), "{e}");
+    assert_eq!(shares.len(), 18);
+}
+
+#[test]
+fn an_entry_or_a_leave_follows_exactly_what_the_owner_signed() {
+    let mut h = H::new();
+    let c = h.cash(&alice(), 2, 1);
+    let sig = signed(&c[0], enter_digest_spec(&c[0], 0, &POSITION, FAR));
+    for (vault, list) in [(1u32, POSITION.to_vec()), (0, vec![(0, 9), (1, 8)])] {
+        let (note, s) = (input(&c[0]), sig.clone());
+        let e = h.refused(&agent(), move |p| p.enter(vault, note, s, outs(&list), FAR));
+        assert!(e.contains("bad owner signature"), "{e}");
+    }
+    let e = h.refused_enter(&c[0], 0, &[(1, 8)]);
+    assert!(e.contains("too much left over"), "{e}");
+    let e = h.refused_enter(&c[0], 0, &[(1, 10)]);
+    assert!(e.contains("worth more than the note"), "{e}");
+}
+
+#[test]
+fn an_owner_signature_expires() {
+    let mut h = H::new();
+    let c = h.cash(&alice(), 2, 1);
+    let at = h.now - 1;
+    let (note, sig) = (input(&c[0]), signed(&c[0], enter_digest_spec(&c[0], 0, &POSITION, at)));
+    let e = h.refused(&agent(), move |p| p.enter(0, note, sig, outs(&POSITION), at));
+    assert!(e.contains("expired"), "{e}");
+    let shares = h.enter(&c[0], 0, &POSITION);
+    let n = &shares[9];
+    let (note, sig) = (input(n), signed(n, leave_digest_spec(n, &ONE_TO_CASH, at)));
+    let e = h.refused(&agent(), move |p| p.leave(0, note, sig, outs(&ONE_TO_CASH), at));
+    assert!(e.contains("expired"), "{e}");
+    let cash = h.cash(&alice(), 1, 1);
+    let (note, sig) = (input(&cash[0]), signed(&cash[0], exit_digest(&cash[0], &alice(), 0, at)));
+    let e = h.refused(&agent(), move |p| p.pay_exit(note, sig, alice(), at));
+    assert!(e.contains("expired"), "{e}");
+}
+
+#[test]
+fn an_entry_at_a_stale_price_is_refused() {
+    // An entry at a price that ignores unread rewards would take them from the holders.
+    let mut h = H::new();
+    h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    h.now += SYNC_FRESH_NS + 1;
+    let c = h.cash(&acc("x.test"), 2, 1);
+    let e = h.refused_enter(&c[0], 0, &POSITION);
+    assert!(e.contains("sync this vault first"), "{e}");
+    h.sync_by(&mallory(), 0, IN_POSITION + NEAR);
+    assert!(h.vault(0).share_price.0 > INITIAL_PRICE);
+    let e = h.refused(&mallory(), |p| p.sync(0));
+    assert!(e.contains("read less than an hour ago"), "{e}");
+}
+
+#[test]
+fn a_leave_is_paid_at_once_from_the_vaults_liquid_funds() {
+    let mut h = H::new();
+    let shares = h.position(0, &alice());
+    let cash_before = h.cash_view().liquid.0;
+    let n = &shares[9];
+    let cash = h.leave(n, &ONE_TO_CASH);
+    let v = h.vault(0);
+    assert_eq!(v.total_shares.0, 9_900_000 - SHARES[1]);
+    assert_eq!(v.liquid.0, IN_POSITION - NEAR);
+    assert_eq!(h.cash_view().liquid.0, cash_before + NEAR - NOTE_STORAGE_FEE);
+    assert_eq!(h.cash_view().outstanding.0, 9 * CASH[0]);
+    assert!(h.cash_view().liquid.0 >= h.cash_view().outstanding.0, "the cash is always fully backed");
+    h.logs.clear();
+    pay(&mut h, &cash[0], &alice());
+    assert!(h.logs.iter().all(|l| !l.contains("vault")), "{:?}", h.logs);
+}
+
+#[test]
+fn a_holder_cannot_dodge_a_loss_by_leaving_before_it_is_read() {
+    // With the money staked, a leave paid from fresh cash would pass a later loss on to those who stay.
+    let mut h = H::new();
+    let alices = h.position(0, &alice());
+    h.position(0, &bob());
+    h.place(0, 2 * IN_POSITION);
+    h.cash(&acc("carol.test"), 2, 3); // fresh cash in the compartment
+    let e = h.refused_leave(&alices[9], &ONE_TO_CASH);
+    assert!(e.contains("not enough liquid funds in this vault"), "{e}");
+    // The loss is read before any money comes back: alice leaves at the new price like everyone.
+    h.sync(0, IN_POSITION);
+    h.withdraw(0, IN_POSITION);
+    let price = h.vault(0).share_price.0;
+    assert_eq!(price, INITIAL_PRICE / 2);
+    h.leave(&alices[9], &[(0, 4)]);
+}
+
+#[test]
+fn leaving_moves_no_yield_to_those_who_stay() {
+    // A leave used to leave its money staked against a fixed debt, so the shares left behind took its yield.
+    let mut h = H::with(None, 100_000 * NEAR, 100_000 * NEAR);
+    let small = h.cash(&mallory(), 1, 1);
+    let m = h.enter(&small[0], 0, &[(0, 9)]);
+    let mut big = h.position(0, &alice());
+    big.extend(h.position(0, &alice()));
+    for n in big.iter().filter(|n| n.token.denom_id == 1) {
+        h.leave(n, &ONE_TO_CASH);
+    }
+    assert_eq!(h.vault(0).share_price.0, INITIAL_PRICE, "a leave does not move the price");
+    let left = h.vault(0).liquid.0;
+    h.place(0, left);
+    h.sync(0, left + left / 100);
+    let price = h.vault(0).share_price.0;
+    assert!(price <= INITIAL_PRICE / 100 * 101, "those who stay gain 1 %, not more: {price}");
+    let mallory_value = m.len() as u128 * SHARES[0] * price;
+    assert!(mallory_value <= 9 * CASH[0] / 100 * 101 + 9);
+}
+
+#[test]
+fn a_loss_of_half_halves_the_price_and_every_holder_is_paid() {
+    let mut h = H::new();
+    let a = h.position(0, &alice());
+    let b = h.position(0, &bob());
+    h.place(0, 2 * IN_POSITION);
+    h.sync(0, IN_POSITION);
+    h.withdraw(0, IN_POSITION);
+    assert_eq!(h.vault(0).share_price.0, INITIAL_PRICE / 2);
+    for n in a.iter().chain(b.iter()).filter(|n| n.token.denom_id == 1) {
+        h.leave(n, &[(0, 4)]);
+    }
+    let v = h.vault(0);
+    assert_eq!(v.share_price.0, INITIAL_PRICE / 2, "the first to leave were not paid more");
+    assert_eq!(v.liquid.0, v.total_shares.0 * v.share_price.0, "what is left pays exactly the notes left");
+}
+
+#[test]
+fn gains_on_few_shares_go_to_their_holders() {
+    let mut h = H::new();
+    let c = h.cash(&alice(), 1, 1);
+    h.enter(&c[0], 0, &[(0, 9)]);
+    h.place(0, 9 * CASH[0]);
+    h.sync(0, 9 * CASH[0] + 5 * NEAR);
+    assert_eq!(h.vault(0).share_price.0, (9 * CASH[0] + 5 * NEAR) / (9 * SHARES[0]));
+}
+
+#[test]
+fn what_is_left_in_an_emptied_vault_belongs_to_nobody() {
+    let mut h = H::new();
+    let c = h.cash(&alice(), 1, 1);
+    let notes = h.enter(&c[0], 0, &[(0, 9)]);
+    h.now += DEFAULT_ESCAPE_DELAY_NS;
+    for n in &notes {
+        escape(&mut h, &mallory(), n, &alice());
+    }
+    assert_eq!(h.vault(0).total_shares.0, 0);
+    h.sync_by(&mallory(), 0, NEAR / 2); // rewards found at the target afterwards
+    h.sync(1, 0);
+    h.now += HOUR_NS;
+    h.sync(0, NEAR / 2);
+    let c = h.cash(&bob(), 2, 1);
+    h.enter(&c[0], 0, &POSITION);
+    let v = h.vault(0);
+    assert_eq!(v.share_price.0, INITIAL_PRICE, "the newcomer does not take what was left");
+}
+
+// ---- notes and owners ----
+
+#[test]
+fn a_note_named_in_an_exit_request_can_only_exit() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 2, 1);
+    request(&mut h, &notes[0], &alice());
+    cancel(&mut h, &notes[0], &alice());
+    let e = h.refused_enter(&notes[0], 0, &POSITION);
+    assert!(e.contains("a note named in an exit request can only exit"), "{e}");
+    let shares = h.position(0, &alice());
+    request(&mut h, &shares[9], &alice());
+    cancel(&mut h, &shares[9], &alice());
+    let e = h.refused_leave(&shares[9], &ONE_TO_CASH);
+    assert!(e.contains("a note named in an exit request can only exit"), "{e}");
+    pay(&mut h, &notes[0], &alice());
+}
+
+#[test]
+fn an_owner_key_serves_one_note_only() {
+    let mut h = H::new();
+    h.cash(&alice(), 1, 2);
+    let owner = SigningKey::generate(&mut OsRng);
+    let first = h.cash_note_owned_by(1, &owner);
+    let second = h.cash_note_owned_by(1, &owner);
+    pay(&mut h, &first, &alice());
+    let e = refused_pay(&mut h, &second, &alice());
+    assert!(e.contains("this owner key already served another note"), "{e}");
+}
+
+#[test]
+fn the_agent_waits_for_enough_live_notes_in_a_tier() {
+    let mut h = H::build(None, 1_000 * NEAR, 1_000 * NEAR, 1_000 * NEAR, 3);
+    let a = h.cash(&alice(), 1, 2);
+    let e = refused_pay(&mut h, &a[0], &alice());
+    assert!(e.contains("too few live notes in this tier"), "{e}");
+    let tens = h.cash(&alice(), 2, 1);
+    let e = h.refused_enter(&tens[0], 0, &POSITION);
+    assert!(e.contains("too few live notes in this tier"), "{e}");
+    h.cash(&bob(), 1, 1);
+    pay(&mut h, &a[0], &alice());
+    let e = refused_pay(&mut h, &a[1], &alice());
+    assert!(e.contains("too few live notes in this tier"), "two left: {e}");
+    // Without the agent, the escape pays anyway.
+    h.now += DEFAULT_ESCAPE_DELAY_NS;
+    escape(&mut h, &mallory(), &a[1], &alice());
+}
+
+#[test]
+fn a_cash_exit_pays_the_signed_depositor_and_names_no_vault() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 1, 1);
+    h.transfers.clear();
+    h.logs.clear();
+    pay(&mut h, &notes[0], &alice());
+    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE)]);
+    assert!(h.logs.iter().all(|l| !l.contains("vault")), "{:?}", h.logs);
+}
+
+#[test]
+fn no_one_can_be_paid_without_a_valid_note() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 1, 2);
+    let n = &notes[0];
+    h.position(0, &alice());
+    let mut forged = h.share_note(0, 1);
+    forged.vault = None;
+    let e = refused_pay(&mut h, &forged, &alice());
+    assert!(e.contains("invalid note"), "{e}");
+    let (note, sig) = (input(n), signed(n, exit_digest(n, &alice(), 0, FAR)));
+    let e = h.refused(&agent(), move |p| p.pay_exit(note, sig, bob(), FAR));
+    assert!(e.contains("bad owner signature"), "{e}");
+    let (note, sig) = (input(n), signed(n, exit_digest(n, &alice(), 0, FAR)));
+    let e = h.refused(&mallory(), move |p| p.pay_exit(note, sig, alice(), FAR));
+    assert!(e.contains("only the agent"), "{e}");
+    pay(&mut h, n, &alice());
+    let e = refused_pay(&mut h, n, &alice());
+    assert!(e.contains("note already spent"), "{e}");
+    assert!(h.view(|p| p.is_spent(b64(&nf(&notes[0])))));
+}
+
+#[test]
+fn exits_go_only_to_an_account_that_deposited() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 1, 1);
+    let e = refused_pay(&mut h, &notes[0], &mallory());
+    assert!(e.contains("only to an account that deposited"), "{e}");
+}
+
+#[test]
+fn exits_never_exceed_the_notes_issued() {
+    let mut h = H::new();
+    let issued = h.cash(&alice(), 1, 1);
+    h.cash(&bob(), 2, 1);
+    let extra = h.cash_note(1);
+    pay(&mut h, &issued[0], &alice());
+    let e = refused_pay(&mut h, &extra, &alice());
+    assert!(e.contains("more exits than notes issued"), "{e}");
+}
+
+#[test]
+fn a_note_key_of_small_order_is_refused() {
+    // The neutral point as owner key, with R = neutral and S = 0, signs anything.
+    let mut h = H::new();
+    h.cash(&alice(), 1, 1);
+    let mut pk = [0u8; 32];
+    pk[0] = 1;
+    let nonce = [7u8; 32];
+    let mut msg = vec![1u8];
+    msg.extend_from_slice(&pk);
+    msg.extend_from_slice(&nonce);
+    let dst = cash_dst(NETWORK, contract().as_str()).into_bytes();
+    let (r, b) = blind(&msg, &dst, &mut OsRng);
+    let sig = unblind(&sign_blinded(&h.cash_keys[1], &b).unwrap(), &r).unwrap();
+    let mut owner_sig = [0u8; 64];
+    owner_sig[0] = 1;
+    let note = NoteInput { tier: 1, pk: b64(&pk), nonce: b64(&nonce), sig: b64(&sig) };
+    let e = h.refused(&agent(), move |p| p.pay_exit(note, b64(&owner_sig), alice(), FAR));
+    assert!(e.contains("bad owner signature"), "{e}");
+}
+
+#[test]
+fn the_refused_keys_are_exactly_points_of_small_order() {
+    let mut checked = 0;
+    for k in WEAK_KEYS {
+        if let Ok(key) = VerifyingKey::from_bytes(&k) {
+            assert!(key.is_weak(), "{k:?}");
+            checked += 1;
+        }
+    }
+    assert!(checked >= 8, "every small-order point is in the list: {checked}");
+}
+
+// ---- requests and the escape ----
+
+#[test]
+fn only_the_paid_account_files_its_exit_request() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 1, 1);
+    let n = &notes[0];
+    let (note, sig) = (input(n), signed(n, exit_digest(n, &alice(), 0, FAR)));
+    let e = h.refused_paying(&mallory(), REQUEST_FEE, move |p| p.request_exit(None, note, sig, alice(), U128(0), FAR));
+    assert!(e.contains("filed by the account it pays"), "{e}");
+    let (note, sig) = (input(n), signed(n, exit_digest(n, &alice(), 0, FAR)));
+    let e = h.refused(&alice(), move |p| p.request_exit(None, note, sig, alice(), U128(0), FAR));
+    assert!(e.contains("attach the storage fee"), "{e}");
+}
+
+#[test]
+fn a_request_fee_goes_back_to_whoever_paid_it() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 1, 2);
+    let mark = h.mark();
+    request(&mut h, &notes[0], &alice());
+    assert_eq!(h.status().held_fees.0, REQUEST_FEE);
+    h.transfers.clear();
+    pay(&mut h, &notes[0], &alice());
+    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE), (alice(), REQUEST_FEE - mark)]);
+    request(&mut h, &notes[1], &alice());
+    h.transfers.clear();
+    cancel(&mut h, &notes[1], &alice());
+    assert_eq!(h.transfers, vec![(alice(), REQUEST_FEE - mark)]);
+    assert_eq!(h.status().held_fees.0, 0);
+}
+
+#[test]
+fn a_request_made_again_waits_again_and_three_withdrawals_end_it() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 1, 1);
+    request(&mut h, &notes[0], &alice());
+    cancel(&mut h, &notes[0], &alice());
     for _ in 0..7 {
         h.now += DAY_NS;
         h.sync(0, 0);
     }
-    assert!(!h.view(|p| p.escape_open()));
-    h.deposit(&bob(), NEAR);
-    let e = h.refused(&mallory(), |p| p.withdraw(0, U128(1)));
-    assert!(e.contains("only the agent while it is active"), "an unpayable request opens nothing");
-    // Placing in it is still allowed (entries are not: its price is below the floor).
-    let e = h.refused(&agent(), |p| p.place(0, U128(1)));
-    assert!(e.contains("amount above the vault's liquid funds"), "{e}");
-}
-
-fn request(h: &mut H, n: &Note, to: &AccountId) {
-    let (note, sig, to) = (input(n), signed(n, n.vault, to, 0), to.clone());
-    let vault = n.vault;
-    h.call_paying(&to.clone(), REQUEST_STORAGE_FEE, move |p| p.request_exit(vault, note, sig, to, U128(0)));
+    request(&mut h, &notes[0], &alice());
+    assert!(!h.cash_view().open, "a new request waits the whole delay");
+    let e = refused_escape(&mut h, &mallory(), &notes[0], &alice());
+    assert!(e.contains("the agent is still active"), "{e}");
+    cancel(&mut h, &notes[0], &alice());
+    request(&mut h, &notes[0], &alice());
+    cancel(&mut h, &notes[0], &alice());
+    let n = &notes[0];
+    let until = h.now + DAY_NS;
+    let (note, sig) = (input(n), signed(n, exit_digest(n, &alice(), 0, until)));
+    let e = h.refused_paying(&alice(), REQUEST_FEE, move |p| p.request_exit(None, note, sig, alice(), U128(0), until));
+    assert!(e.contains("withdrawn too many times"), "{e}");
 }
 
 #[test]
-fn an_agent_recycling_a_full_request_list_does_not_keep_an_honest_holder_out() {
+fn a_request_that_can_no_longer_be_paid_is_removed_by_anyone() {
     let mut h = H::new();
-    let crowd: Vec<AccountId> = (0..16).map(|i| acc(&format!("c{i}.test"))).collect();
-    let mut first = Vec::new();
-    for c in &crowd {
-        let notes = h.enter(0, 0, 4, c);
-        for n in &notes {
-            request(&mut h, n, c);
-        }
-        first.push(notes);
-    }
-    assert_eq!(h.vault(0).requests, MAX_REQUESTS as u32);
-    let honest = h.enter(0, 0, 1, &alice());
-    let (note, sig) = (input(&honest[0]), signed(&honest[0], 0, &alice(), 0));
-    let e = h.refused_paying(&alice(), REQUEST_STORAGE_FEE, move |p| p.request_exit(0, note, sig, alice(), U128(0)));
-    assert!(e.contains("too many exit requests waiting"), "{e}");
+    let c = acc("c.test");
+    let notes = h.cash(&c, 1, 2);
+    let soon = h.now + DAY_NS;
+    request_until(&mut h, &notes[0], &c, soon);
+    request(&mut h, &notes[1], &c);
+    // The limit is checked over all the account's waiting requests.
+    let x = acc("x.test");
+    let own = h.cash(&x, 1, 1);
+    let other = h.cash(&bob(), 1, 1);
+    request(&mut h, &own[0], &x);
+    let until = h.now + DAY_NS;
+    let (note, sig, to) = (input(&other[0]), signed(&other[0], exit_digest(&other[0], &x, 0, until)), x.clone());
+    let e = h.refused_paying(&x, REQUEST_FEE, move |p| p.request_exit(None, note, sig, to, U128(0), until));
+    assert!(e.contains("waiting exits exceed its exit limit"), "{e}");
+    let id = b64(&nf(&notes[0]));
+    let early = id.clone();
+    let e = h.refused(&mallory(), move |p| p.drop_request(None, early));
+    assert!(e.contains("can still be paid"), "{e}");
+    h.now += DAY_NS + 1;
+    let mark = h.mark();
+    h.transfers.clear();
+    h.call(&mallory(), move |p| p.drop_request(None, id));
+    assert_eq!(h.transfers, vec![(c.clone(), REQUEST_FEE - mark)], "the fee goes back to whoever paid it");
+    assert_eq!(h.cash_view().requests, 2);
+}
 
-    // Every day one request is withdrawn and made again, and the agent keeps syncing.
-    for day in 0..7 {
+#[test]
+fn the_escape_opens_only_after_seven_days_without_the_agent() {
+    let mut h = H::new();
+    let cash = h.cash(&alice(), 1, 2);
+    let shares = h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    h.now += DEFAULT_ESCAPE_DELAY_NS - 1;
+    let e = refused_escape(&mut h, &mallory(), &cash[0], &alice());
+    assert!(e.contains("the agent is still active"), "{e}");
+    let e = h.refused(&mallory(), |p| p.unstake(0, None));
+    assert!(e.contains("only the agent while it is active"), "{e}");
+
+    h.now += 1;
+    assert!(h.view(|p| p.escape_open()));
+    h.transfers.clear();
+    escape(&mut h, &mallory(), &cash[0], &alice());
+    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE)]);
+    // With the agent gone no cash can be signed, so share notes leave their vault directly.
+    h.unstake_by(&mallory(), 0, Some(1));
+    assert_eq!(h.last_amount("unstake"), format!("{{\"amount\":\"{IN_POSITION}\"}}"), "everything, not what the caller chose");
+    h.withdraw_by(&mallory(), 0, None);
+    h.sync_by(&mallory(), 0, 0);
+    h.transfers.clear();
+    h.logs.clear();
+    escape(&mut h, &mallory(), &shares[9], &alice());
+    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE)]);
+    assert!(h.logs.iter().any(|l| l.contains("\"event\":\"share_exit\"")));
+}
+
+#[test]
+fn others_withdraw_at_most_once_an_hour() {
+    let mut h = H::new();
+    h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    h.now += DEFAULT_ESCAPE_DELAY_NS;
+    h.withdraw_by(&mallory(), 0, None);
+    h.sync_by(&mallory(), 0, NEAR); // rewards still at the target
+    let e = h.refused(&bob(), |p| p.withdraw(0, None));
+    assert!(e.contains("withdrawn by someone else less than an hour ago"), "{e}");
+    h.now += HOUR_NS;
+    h.withdraw_by(&bob(), 0, None);
+}
+
+#[test]
+fn normal_and_escape_exits_share_one_hourly_window() {
+    let mut h = H::build(None, 1_000 * NEAR, 1_000 * NEAR, 20 * NEAR, 1);
+    let notes = h.cash(&alice(), 2, 3);
+    pay(&mut h, &notes[0], &alice());
+    pay(&mut h, &notes[1], &alice());
+    h.call(&guardian(), |p| p.set_agent(acc("agent2.test")));
+    request(&mut h, &notes[2], &alice());
+    let e = refused_escape(&mut h, &mallory(), &notes[2], &alice());
+    assert!(e.contains("hourly limit reached"), "the escape does not double the rate: {e}");
+    h.now += HOUR_NS;
+    escape(&mut h, &mallory(), &notes[2], &alice());
+}
+
+#[test]
+fn only_placements_syncs_and_paid_exits_count_as_agent_activity() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 1, 2);
+    h.position(0, &bob());
+    h.now += DEFAULT_ESCAPE_DELAY_NS;
+    assert!(h.view(|p| p.escape_open()));
+    h.cash(&bob(), 1, 1);
+    h.call(&agent(), |p| p.claim_fees(0));
+    assert!(h.view(|p| p.escape_open()), "issues and fees do not restart the delay");
+    pay(&mut h, &notes[0], &alice());
+    assert!(!h.view(|p| p.escape_open()), "a paid exit does");
+    h.now += DEFAULT_ESCAPE_DELAY_NS;
+    h.call(&agent(), |p| p.sync(0));
+    assert!(!h.view(|p| p.escape_open()), "so does a sync");
+    h.now += DEFAULT_ESCAPE_DELAY_NS;
+    h.sync_by(&agent(), 0, 0);
+    h.place(0, NEAR);
+    assert!(!h.view(|p| p.escape_open()), "and a placement");
+}
+
+#[test]
+fn an_active_agent_that_does_not_pay_cannot_keep_a_cash_holder_waiting() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 1, 1);
+    request(&mut h, &notes[0], &alice());
+    for _ in 0..6 {
         h.now += DAY_NS;
-        let (c, n) = (&crowd[day], &first[day][0]);
-        let nf = b64(&nullifier(0, &n.token));
-        h.call(c, move |p| p.cancel_exit_request(0, nf));
-        request(&mut h, n, c);
         h.sync(0, 0);
     }
+    h.now += DAY_NS - 1;
+    let e = refused_escape(&mut h, &mallory(), &notes[0], &alice());
+    assert!(e.contains("the agent is still active"), "{e}");
+    h.now += 1;
     assert!(!h.view(|p| p.escape_open()));
+    assert!(h.cash_view().open);
+    let mark = h.mark();
     h.transfers.clear();
-    let (note, sig) = (input(&honest[0]), signed(&honest[0], 0, &alice(), 0));
-    h.call(&mallory(), move |p| p.escape_exit(0, note, sig, alice(), U128(0)));
+    escape(&mut h, &mallory(), &notes[0], &alice());
+    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE), (alice(), REQUEST_FEE - mark)]);
+    assert!(!h.cash_view().open, "once paid, the request opens nothing");
+}
+
+#[test]
+fn a_share_holder_the_agent_ignores_can_open_its_vault() {
+    let mut h = H::new();
+    let shares = h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    let n = &shares[9];
+    request(&mut h, n, &alice());
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, IN_POSITION);
+    }
+    assert!(h.vault(0).open);
+    let e = h.refused(&agent(), |p| p.place(0, U128(1)));
+    assert!(e.contains("open to holders"), "{e}");
+    h.unstake_by(&mallory(), 0, None);
+    assert_eq!(h.last_amount("unstake"), format!("{{\"amount\":\"{NEAR}\"}}"), "only what the request needs");
+    h.withdraw_by(&mallory(), 0, None);
+    h.transfers.clear();
+    escape(&mut h, &mallory(), n, &alice());
+    assert_eq!(h.transfers[0], (alice(), NEAR - EXIT_STORAGE_FEE));
+}
+
+#[test]
+fn funds_brought_back_for_a_waiting_request_are_kept_for_it() {
+    // The agent used to let a partner's note leave with the funds a third party had just brought back.
+    let mut h = H::new();
+    let a = h.position(0, &alice());
+    let m = h.position(0, &mallory());
+    let total = 2 * IN_POSITION;
+    h.place(0, total);
+    request(&mut h, &a[9], &alice());
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, total);
+    }
+    assert!(h.vault(0).open);
+    h.unstake_by(&bob(), 0, None);
+    h.now += 2 * DAY_NS;
+    h.sync(0, total);
+    h.withdraw_by(&bob(), 0, None);
+    assert_eq!(h.vault(0).liquid.0, NEAR);
+    let e = h.refused_leave(&m[9], &ONE_TO_CASH);
+    assert!(e.contains("kept for the exit requests waiting on this vault"), "{e}");
+    h.transfers.clear();
+    escape(&mut h, &bob(), &a[9], &alice());
+    assert_eq!(h.transfers[0], (alice(), NEAR - EXIT_STORAGE_FEE));
+}
+
+#[test]
+fn while_the_agent_is_active_the_escape_serves_only_holders_who_asked() {
+    let mut h = H::new();
+    let a = h.position(0, &alice());
+    let m = h.position(0, &mallory());
+    let total = 2 * IN_POSITION;
+    h.place(0, total);
+    request(&mut h, &a[9], &alice());
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, total);
+    }
+    h.unstake_by(&bob(), 0, None);
+    h.now += 2 * DAY_NS;
+    h.sync(0, total);
+    h.withdraw_by(&bob(), 0, None);
+    let e = refused_escape(&mut h, &bob(), &m[9], &mallory());
+    assert!(e.contains("only notes with an exit request leave by the escape"), "{e}");
+    escape(&mut h, &bob(), &a[9], &alice());
+}
+
+#[test]
+fn the_agents_own_unstake_does_not_hold_back_the_one_the_contract_fixes() {
+    let mut h = H::new();
+    let a = h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    request(&mut h, &a[9], &alice());
+    for _ in 0..6 {
+        h.now += DAY_NS;
+        h.sync(0, IN_POSITION);
+    }
+    h.now += DAY_NS - 2 * HOUR_NS;
+    h.unstake_by(&agent(), 0, Some(1)); // just before the request is overdue
+    h.now += 2 * HOUR_NS;
+    h.sync(0, IN_POSITION);
+    assert!(h.vault(0).open);
+    h.unstake_by(&bob(), 0, None);
+    assert_eq!(h.last_amount("unstake"), format!("{{\"amount\":\"{NEAR}\"}}"));
+}
+
+#[test]
+fn the_last_notes_of_a_tier_leave_by_request_and_escape_with_an_active_agent() {
+    // Below the minimum of live notes the agent cannot pay; the owner asks, waits the delay and leaves.
+    let mut h = H::build(None, 1_000 * NEAR, 1_000 * NEAR, 1_000 * NEAR, 3);
+    let a = h.cash(&alice(), 1, 2);
+    let e = refused_pay(&mut h, &a[0], &alice());
+    assert!(e.contains("too few live notes in this tier"), "{e}");
+    request(&mut h, &a[0], &alice());
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, 0);
+    }
+    assert!(!h.view(|p| p.escape_open()), "the agent is active");
+    assert!(h.cash_view().open);
+    let e = refused_escape(&mut h, &mallory(), &a[1], &alice());
+    assert!(e.contains("only notes with an exit request"), "the open cash list does not pay every note: {e}");
+    escape(&mut h, &mallory(), &a[0], &alice());
+}
+
+#[test]
+fn a_request_list_kept_full_by_partners_does_not_trap_a_holder() {
+    // 16 partner accounts fill the cash list with requests the active agent never pays.
+    let mut h = H::new();
+    for i in 0..16 {
+        let c = acc(&format!("c{i}.test"));
+        for n in h.cash(&c, 0, 4) {
+            request(&mut h, &n, &c);
+        }
+    }
+    assert_eq!(h.cash_view().requests, MAX_REQUESTS as u32);
+    let mine = h.cash(&alice(), 1, 1);
+    let until = h.now + DAY_NS;
+    let (note, sig) = (input(&mine[0]), signed(&mine[0], exit_digest(&mine[0], &alice(), 0, until)));
+    let e = h.refused_paying(&alice(), REQUEST_FEE, move |p| p.request_exit(None, note, sig, alice(), U128(0), until));
+    assert!(e.contains("too many exit requests waiting"), "{e}");
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, 0);
+    }
+    assert!(!h.view(|p| p.escape_open()), "the agent is active");
+    h.transfers.clear();
+    escape(&mut h, &mallory(), &mine[0], &alice());
+    assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE)], "a list full for the delay lets anyone out");
+}
+
+#[test]
+fn a_vault_list_kept_full_by_partners_does_not_trap_a_share_holder() {
+    // 16 partners fill a vault's list while the active agent keeps everything staked: the forced unstake must
+    // bring back more than the partners' requests, or Alice's unlisted note can never leave.
+    let mut h = H::new();
+    let a = h.position(0, &alice());
+    let mut total = IN_POSITION;
+    let mut partners = Vec::new();
+    for i in 0..16 {
+        let c = acc(&format!("c{i}.test"));
+        let n = h.position(0, &c);
+        total += IN_POSITION;
+        partners.push((c, n));
+    }
+    h.place(0, total);
+    for (c, n) in &partners {
+        for k in 0..4 {
+            request(&mut h, &n[k], c);
+        }
+    }
+    assert_eq!(h.vault(0).requests, MAX_REQUESTS as u32);
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, total);
+    }
+    assert!(!h.view(|p| p.escape_open()), "agent active");
+    assert!(h.vault(0).open);
+    h.unstake_by(&bob(), 0, None);
+    assert_eq!(h.last_amount("unstake"), format!("{{\"amount\":\"{total}\"}}"), "everything comes back");
+    h.now += 2 * DAY_NS;
+    h.sync(0, total);
+    h.withdraw_by(&bob(), 0, None);
+    h.transfers.clear();
+    escape(&mut h, &bob(), &a[0], &alice());
+    assert_eq!(h.transfers, vec![(alice(), CASH[0] - EXIT_STORAGE_FEE)]);
+}
+
+#[test]
+fn a_list_no_longer_full_stops_opening_the_escape_to_everyone() {
+    let mut h = H::new();
+    let mut listed = Vec::new();
+    for i in 0..16 {
+        let c = acc(&format!("c{i}.test"));
+        for n in h.cash(&c, 0, 4) {
+            request(&mut h, &n, &c);
+            listed.push((c.clone(), n));
+        }
+    }
+    for (c, n) in listed.iter().take(31) {
+        cancel(&mut h, n, c);
+    }
+    assert_eq!(h.cash_view().requests, 33);
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, 0);
+    }
+    let mine = h.cash(&alice(), 1, 1);
+    let e = refused_escape(&mut h, &mallory(), &mine[0], &alice());
+    assert!(e.contains("only notes with an exit request"), "{e}");
+    // The holders who asked still leave.
+    let (c, n) = &listed[40];
+    escape(&mut h, &mallory(), n, c);
+}
+
+#[test]
+fn a_request_whose_owner_key_served_another_note_can_be_removed() {
+    let mut h = H::new();
+    h.cash(&alice(), 1, 2);
+    let owner = SigningKey::generate(&mut OsRng);
+    let first = h.cash_note_owned_by(1, &owner);
+    let second = h.cash_note_owned_by(1, &owner);
+    request(&mut h, &first, &alice());
+    pay(&mut h, &second, &alice());
+    let id = b64(&nf(&first));
+    h.call(&mallory(), move |p| p.drop_request(None, id));
+    assert_eq!(h.cash_view().requests, 0);
+    // And a request cannot wait forever.
+    let n = h.cash_note(1);
+    let far = h.now + MAX_REQUEST_LIFE_NS + 1;
+    let (note, sig) = (input(&n), signed(&n, exit_digest(&n, &alice(), 0, far)));
+    let e = h.refused_paying(&alice(), REQUEST_FEE, move |p| p.request_exit(None, note, sig, alice(), U128(0), far));
+    assert!(e.contains("a request lasts at most 30 days"), "{e}");
+}
+
+#[test]
+fn the_agent_fee_never_takes_funds_kept_for_a_request() {
+    let mut h = H::new();
+    let a = h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    h.call(&guardian(), |p| p.set_fee_bps(2_000));
+    h.now += ADMIN_NS;
+    h.sync(0, IN_POSITION);
+    h.sync(0, IN_POSITION + NEAR);
+    assert!(h.vault(0).fee_owed.0 > 0);
+    request(&mut h, &a[9], &alice());
+    h.withdraw(0, NEAR);
+    let before = h.vault(0).fee_owed.0;
+    h.transfers.clear();
+    h.call(&agent(), |p| p.claim_fees(0));
+    assert!(h.transfers.is_empty(), "the 1 NEAR back is kept for alice's request");
+    assert_eq!(h.vault(0).fee_owed.0, before);
+}
+
+#[test]
+fn the_agent_pays_a_listed_request() {
+    let mut h = H::new();
+    let notes = h.cash(&alice(), 1, 1);
+    request(&mut h, &notes[0], &alice());
+    let id = b64(&nf(&notes[0]));
+    let other = id.clone();
+    let e = h.refused(&mallory(), move |p| p.pay_request(None, other));
+    assert!(e.contains("only the agent"), "{e}");
+    h.transfers.clear();
+    h.call(&agent(), move |p| p.pay_request(None, id));
+    assert_eq!(h.transfers[0], (alice(), NEAR - EXIT_STORAGE_FEE));
+    // A listed share note is paid under its own event name.
+    let shares = h.position(0, &bob());
+    request(&mut h, &shares[9], &bob());
+    let id = b64(&nf(&shares[9]));
+    h.logs.clear();
+    h.call(&agent(), move |p| p.pay_request(Some(0), id));
+    assert!(h.logs.iter().any(|l| l.contains("\"event\":\"share_exit\"")), "{:?}", h.logs);
+    assert!(h.logs.iter().all(|l| !l.contains("escape")), "{:?}", h.logs);
+}
+
+#[test]
+fn a_strict_staking_pool_still_returns_everything_after_the_agent_unstaked_one_yocto() {
+    // The staking pool refuses to unstake more than is staked or withdraw more than is unstaked. An agent that
+    // unstakes 1 yocto before going silent must not make the forced unstake and withdraw fail.
+    let mut h = H::new();
+    h.strict = true;
+    let a = h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    assert!(h.unstake_by(&agent(), 0, Some(1)));
+    h.now += DEFAULT_ESCAPE_DELAY_NS;
+    assert!(h.unstake_by(&mallory(), 0, None), "asks for what is staked, not for `placed`");
+    assert_eq!(h.last_amount("unstake"), format!("{{\"amount\":\"{}\"}}", IN_POSITION - 1));
+    h.now += 2 * DAY_NS;
+    assert!(h.withdraw_by(&mallory(), 0, None), "asks for what is unstaked");
+    assert_eq!(h.last_amount("withdraw"), format!("{{\"amount\":\"{IN_POSITION}\"}}"));
+    h.sync_by(&mallory(), 0, 0);
+    h.transfers.clear();
+    escape(&mut h, &mallory(), &a[9], &alice());
     assert_eq!(h.transfers, vec![(alice(), NEAR - EXIT_STORAGE_FEE)]);
 }
 
 #[test]
-fn a_withdrawn_request_keeps_its_first_date() {
+fn a_strict_staking_pool_returns_everything_when_a_vault_list_stays_full() {
     let mut h = H::new();
-    let notes = h.enter(0, 0, 1, &alice());
-    request(&mut h, &notes[0], &alice());
-    h.now += 6 * DAY_NS;
-    let nf = b64(&nullifier(0, &notes[0].token));
-    h.call(&alice(), move |p| p.cancel_exit_request(0, nf));
-    request(&mut h, &notes[0], &alice());
-    h.sync(0, 0);
-    h.now += DAY_NS;
-    // Seven days after the first request, not after the second.
-    let (note, sig) = (input(&notes[0]), signed(&notes[0], 0, &alice(), 0));
-    h.call(&mallory(), move |p| p.escape_exit(0, note, sig, alice(), U128(0)));
+    h.strict = true;
+    let a = h.position(0, &alice());
+    let mut total = IN_POSITION;
+    let mut partners = Vec::new();
+    for i in 0..16 {
+        let c = acc(&format!("c{i}.test"));
+        let n = h.position(0, &c);
+        total += IN_POSITION;
+        partners.push((c, n));
+    }
+    h.place(0, total);
+    assert!(h.unstake_by(&agent(), 0, Some(1)));
+    for (c, n) in &partners {
+        for k in 0..4 {
+            request(&mut h, &n[k], c);
+        }
+    }
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, total);
+    }
+    assert!(h.unstake_by(&bob(), 0, None));
+    h.now += 2 * DAY_NS;
+    h.sync(0, total);
+    assert!(h.withdraw_by(&bob(), 0, None));
+    h.transfers.clear();
+    escape(&mut h, &bob(), &a[0], &alice());
+    assert_eq!(h.transfers, vec![(alice(), CASH[0] - EXIT_STORAGE_FEE)]);
 }
 
 #[test]
-fn sixty_four_small_notes_of_one_account_do_not_block_the_vault() {
+fn a_failed_unstake_does_not_start_the_interval_and_others_cannot_choose_the_amount() {
+    // A failed call, or one of 1 yocto, by anyone used to block unstaking for three days.
     let mut h = H::new();
-    let small = acc("small.test");
-    let notes = h.enter(0, 0, 64, &small);
-    for n in &notes[..4] {
-        request(&mut h, n, &small);
-    }
-    for n in &notes[4..8] {
-        let (note, sig, to) = (input(n), signed(n, 0, &small, 0), small.clone());
-        let e = h.refused_paying(&small, REQUEST_STORAGE_FEE, move |p| p.request_exit(0, note, sig, to, U128(0)));
-        assert!(e.contains("too many exit requests for this account"), "{e}");
-    }
-    assert_eq!(h.vault(0).requests, 4);
-    // Others can still ask, and the agent can still place.
-    let other = h.enter(0, 0, 1, &bob());
-    request(&mut h, &other[0], &bob());
-    h.place(0, NEAR);
-}
-
-#[test]
-fn the_agent_cannot_unstake_while_the_escape_is_open() {
-    let mut h = H::new();
-    h.enter(0, 1, 1, &alice());
-    h.place(0, 10 * NEAR);
+    h.position(0, &alice());
+    h.place(0, IN_POSITION);
     h.now += DEFAULT_ESCAPE_DELAY_NS;
-    let e = h.refused(&agent(), |p| p.unstake(0, U128(NEAR)));
-    assert!(e.contains("the escape is open on this vault"), "{e}");
-    h.call(&mallory(), |p| p.unstake(0, U128(NEAR)));
+    h.call(&mallory(), |p| p.unstake(0, Some(U128(1))));
+    assert_eq!(h.self_call("on_staked_read")["amount"], json!(IN_POSITION.to_string()), "not what the caller chose");
+    // The staking pool does not answer: the vault is freed and no interval starts.
+    h.reply(0, PromiseResult::Failed, |p, op| p.on_staked_read(0, op, U128(IN_POSITION)));
+    assert!(!h.vault(0).busy);
+    assert!(h.unstake_by(&alice(), 0, None));
+    assert_eq!(h.last_amount("unstake"), format!("{{\"amount\":\"{IN_POSITION}\"}}"));
+    let e = h.refused(&mallory(), |p| p.unstake(0, None));
+    assert!(e.contains("unstaked too recently"), "{e}");
+    h.now += UNSTAKE_INTERVAL_NS;
+    h.unstake_by(&mallory(), 0, None);
+}
+
+#[test]
+fn no_placement_while_an_announcement_is_pending_and_others_bring_back_only_what_is_needed() {
+    // After an announcement, anyone used to unstake everything while the agent staked it again.
+    let mut h = H::new();
+    h.position(0, &alice());
+    h.place(0, 5 * NEAR);
+    h.call(&guardian(), |p| p.set_agent(acc("agent2.test")));
+    assert!(h.view(|p| p.escape_open()));
+    let e = h.refused(&mallory(), |p| p.unstake(0, None));
+    assert!(e.contains("nothing to bring back"), "no request waits, so nothing is unstaked: {e}");
+    let e = h.refused(&agent(), |p| p.place(0, U128(NEAR)));
+    assert!(e.contains("announcement is pending") || e.contains("open to holders"), "{e}");
+    h.now += ADMIN_NS;
+    h.sync_by(&acc("agent2.test"), 0, 5 * NEAR);
+    h.call(&acc("agent2.test"), |p| p.place(0, U128(NEAR)));
+}
+
+#[test]
+fn a_new_fee_waits_and_never_charges_gains_read_before_it() {
+    let mut h = H::new();
+    h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    let e = h.refused(&guardian(), |p| p.set_fee_bps(MAX_FEE_BPS + 1));
+    assert!(e.contains("fee too high"), "{e}");
+    let e = h.refused(&alice(), |p| p.set_fee_bps(1_000));
+    assert!(e.contains("only the guardian"), "{e}");
+    h.call(&guardian(), |p| p.set_fee_bps(2_000));
+    assert_eq!(h.view(|p| p.get_config().fee_bps), 0);
+    assert_eq!(h.view(|p| p.get_config().pending_fee_bps), Some(2_000));
+    h.now += ADMIN_NS; // 1 NEAR of rewards earned meanwhile, read only now
+    h.sync(0, IN_POSITION + NEAR);
+    assert_eq!(h.vault(0).fee_owed.0, 0, "gains read by a sync started before the change keep the old rate");
+    let before = h.vault(0).share_price.0;
+    h.sync(0, IN_POSITION + 2 * NEAR);
+    let gain = (IN_POSITION + 2 * NEAR) / 9_900_000 - before;
+    let fee = h.vault(0).fee_owed.0;
+    assert!(fee > 0 && fee <= gain * 9_900_000 / 5, "20 % at most of the new gain");
+}
+
+#[test]
+fn the_agent_fee_is_zero_by_default() {
+    let mut h = H::new();
+    h.position(0, &alice());
+    h.place(0, IN_POSITION);
+    h.sync(0, IN_POSITION + NEAR);
+    assert_eq!(h.vault(0).fee_owed.0, 0);
+}
+
+#[test]
+fn leaves_count_in_the_vaults_hourly_window_and_one_large_note_still_passes() {
+    let mut h = H::with(None, 1_000 * NEAR, 2 * NEAR);
+    let shares = h.position(0, &alice());
+    let ones: Vec<&Note> = shares.iter().filter(|n| n.token.denom_id == 1).collect();
+    h.leave(ones[0], &ONE_TO_CASH);
+    h.leave(ones[1], &ONE_TO_CASH);
+    let e = h.refused_leave(ones[2], &ONE_TO_CASH);
+    assert!(e.contains("hourly limit reached"), "{e}");
+    // In a new hour, one note worth more than the cap still leaves.
+    h.place(0, 7 * NEAR);
+    h.now += HOUR_NS;
+    h.sync(0, 7 * NEAR * 3);
+    h.withdraw(0, 7 * NEAR * 3);
+    let price = h.vault(0).share_price.0;
+    assert!(SHARES[1] * price > 2 * NEAR);
+    let value = SHARES[1] * price - NOTE_STORAGE_FEE;
+    let count = (value / CASH[1]) as u64;
+    let small = ((value - u128::from(count) * CASH[1]) / CASH[0]) as u64;
+    h.leave(ones[2], &[(1, count), (0, small)]);
 }
 
 #[test]
 fn a_late_sync_answer_does_not_overwrite_the_balance() {
     let mut h = H::new();
-    h.enter(0, 1, 1, &alice());
+    h.position(0, &alice());
     h.call(&agent(), |p| p.sync(0));
     let stale = h.vault(0).busy_op;
     h.now += BUSY_TIMEOUT_NS;
-    h.place(0, 10 * NEAR);
+    h.place(0, IN_POSITION);
     h.callback(PromiseResult::Successful(b"\"0\"".to_vec()), |p| p.on_sync(0, stale));
-    assert_eq!(h.vault(0).placed.0, 10 * NEAR);
-}
-
-#[test]
-fn unstake_is_limited_to_once_per_interval_per_vault() {
-    let mut h = H::new();
-    h.enter(0, 1, 1, &alice());
-    h.place(0, 10 * NEAR);
-    h.call(&agent(), |p| p.unstake(0, U128(NEAR)));
-    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_done(0, op));
-    let e = h.refused(&agent(), |p| p.unstake(0, U128(NEAR)));
-    assert!(e.contains("unstaked too recently"), "{e}");
-    h.now += UNSTAKE_INTERVAL_NS;
-    h.call(&agent(), |p| p.unstake(0, U128(NEAR)));
+    assert_eq!(h.vault(0).placed.0, IN_POSITION);
 }
 
 #[test]
 fn a_late_callback_does_not_free_the_operation_that_replaced_it() {
     let mut h = H::new();
-    h.enter(0, 1, 1, &alice());
+    h.position(0, &alice());
     h.call(&agent(), |p| p.place(0, U128(NEAR)));
     let first = h.vault(0).busy_op;
     h.now += BUSY_TIMEOUT_NS;
     h.call(&agent(), |p| p.sync(0));
-    // The placement's callback arrives late: the vault stays busy with the sync.
     h.callback(PromiseResult::Successful(vec![]), |p| p.on_place(0, U128(NEAR), first));
     assert!(h.vault(0).busy);
-    let e = h.refused(&agent(), |p| p.sync(0));
-    assert!(e.contains("still running"), "{e}");
 }
 
 #[test]
-fn escape_exits_have_their_own_hourly_window() {
-    let mut h = H::with(None, 1_000 * NEAR, 2 * NEAR);
-    let notes = h.enter(0, 0, 4, &alice());
-    pay(&mut h, &notes[0], &alice());
-    pay(&mut h, &notes[1], &alice());
-    let sig = signed(&notes[2], 0, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), &notes[2], 0, sig, &alice());
-    assert!(e.contains("hourly limit reached"), "{e}");
-    // A guardian announcement opens the escape in the same hour; normal exits did not use up its window.
-    h.call(&guardian(), |p| p.set_fee_bps(0));
-    h.call(&guardian(), |p| p.set_agent(agent()));
-    for n in &notes[2..] {
-        let (note, sig) = (input(n), signed(n, 0, &alice(), 0));
-        h.call(&mallory(), move |p| p.escape_exit(0, note, sig, alice(), U128(0)));
-    }
-}
-
-#[test]
-fn the_escape_delay_is_configurable_within_bounds() {
-    let h = H::with(Some(600), 1_000 * NEAR, 1_000 * NEAR);
-    let mut h = h;
-    assert_eq!(h.view(|p| p.get_config().escape_delay_ns), 600_000_000_000);
-    h.now += 600_000_000_000;
-    assert!(h.view(|p| p.escape_open()));
-
-    context(&acc("deployer.test"), NEAR, 0, 0);
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let r = catch_unwind(|| Pool::new(guardian(), agent(), NETWORK.into(), Some(1), None));
-    let s = catch_unwind(|| Pool::new(guardian(), agent(), NETWORK.into(), None, Some(31 * 86_400)));
-    std::panic::set_hook(hook);
-    assert!(panic_text(r.err().unwrap()).contains("escape delay must be between one minute and 30 days"));
-    assert!(panic_text(s.err().unwrap()).contains("admin delay must be between 7 and 30 days"));
-}
-
-#[test]
-fn a_returned_exit_is_kept_for_its_holder() {
+fn a_returned_payout_is_kept_for_its_holder() {
     let mut h = H::new();
-    let notes = h.enter(0, 0, 1, &alice());
+    let notes = h.cash(&alice(), 1, 1);
     pay(&mut h, &notes[0], &alice());
     let amount = NEAR - EXIT_STORAGE_FEE;
     h.balance += amount;
-    h.callback(PromiseResult::Failed, |p| p.on_exit_payout(alice(), U128(amount)));
+    h.callback(PromiseResult::Failed, |p| p.on_payout(alice(), U128(amount)));
     assert_eq!(h.holder(&alice()).owed.0, amount);
     h.transfers.clear();
     h.call(&alice(), |p| p.claim_owed());
     assert_eq!(h.transfers, vec![(alice(), amount)]);
-    let e = h.refused(&alice(), |p| p.claim_owed());
-    assert!(e.contains("nothing owed"), "{e}");
-}
-
-// ---- plafonds ----
-
-#[test]
-fn placements_and_exits_have_separate_hourly_limits_per_vault() {
-    let mut h = H::with(None, 1_000 * NEAR, 3 * NEAR);
-    let notes = h.enter(0, 0, 7, &alice());
-    h.place(0, 3 * NEAR);
-    let e = h.refused(&agent(), |p| p.place(0, U128(NEAR)));
-    assert!(e.contains("hourly limit reached"), "{e}");
-    // Placing up to the limit does not hold up exits.
-    for n in &notes[..3] {
-        pay(&mut h, n, &alice());
-    }
-    let sig = signed(&notes[3], 0, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), &notes[3], 0, sig, &alice());
-    assert!(e.contains("hourly limit reached"), "{e}");
-    h.now += HOUR_NS;
-    pay(&mut h, &notes[3], &alice());
-    // Vault 1 has its own windows.
-    h.enter(1, 0, 3, &bob());
-    h.place(1, 3 * NEAR);
 }
 
 #[test]
-fn a_vault_has_a_cap_on_its_assets() {
-    let mut h = H::with(None, 5 * NEAR, 1_000 * NEAR);
-    h.enter(0, 0, 5, &alice());
-    h.deposit(&alice(), NEAR);
-    let e = h.refused(&agent(), |p| {
-        p.record_entry(0, 0, 1);
-    });
-    assert!(e.contains("vault cap reached"), "{e}");
-}
-
-#[test]
-fn each_account_exits_at_most_its_deposits_plus_gains() {
+fn a_new_agent_waits_for_the_admin_delay() {
     let mut h = H::new();
-    let notes = h.enter(0, 0, 2, &alice());
-    // Bob's notes, credited to bob, are presented for alice.
-    let bobs = h.enter(0, 0, 1, &bob());
-    pay(&mut h, &notes[0], &alice());
-    pay(&mut h, &notes[1], &alice());
-    assert_eq!(h.holder(&alice()).exit_limit.0, 0);
-    let sig = signed(&bobs[0], 0, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), &bobs[0], 0, sig, &alice());
-    assert!(e.contains("over this account's exit limit"), "{e}");
-}
-
-#[test]
-fn gains_raise_the_exit_limit_by_the_best_growth_of_any_vault() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 2, &alice());
-    h.place(0, 2 * NEAR);
-    h.sync(0, 2 * NEAR + NEAR / 5);
-    assert_eq!(h.holder(&alice()).exit_limit.0, 2 * NEAR + NEAR / 5);
-    h.withdraw(0, 2 * NEAR + NEAR / 5);
-    pay(&mut h, &notes[0], &alice());
-    pay(&mut h, &notes[1], &alice());
-    assert_eq!(h.holder(&alice()).exit_limit.0, 0);
-}
-
-#[test]
-fn a_vault_worth_nothing_blocks_no_one_else() {
-    let mut h = H::new();
-    let lost = h.enter(1, 0, 1, &bob());
-    let notes = h.enter(0, 0, 1, &alice());
-    h.place(1, NEAR);
-    h.sync(1, 0);
-    assert_eq!(h.vault(1).share_price.0, 0);
-    // Limits still compute, entries into the empty vault stop, and other vaults still pay.
-    let limit = h.holder(&alice()).exit_limit.0;
-    assert_eq!(limit, NEAR * (INITIAL_PRICE / PRICE_FLOOR), "the low price is floored");
-    h.deposit(&bob(), NEAR);
-    let e = h.refused(&agent(), |p| {
-        p.record_entry(1, 0, 1);
-    });
-    assert!(e.contains("share price too low"), "{e}");
-    pay(&mut h, &notes[0], &alice());
-    // A note of the empty vault is refused as worthless, by the agent or through the escape.
-    let sig = signed(&lost[0], 1, &bob(), 0);
-    let e = refused_exit(&mut h, &agent(), &lost[0], 1, sig, &bob());
-    assert!(e.contains("note worth too little"), "{e}");
-    h.now += 2 * DEFAULT_ESCAPE_DELAY_NS;
-    let (note, sig) = (input(&lost[0]), signed(&lost[0], 1, &bob(), 0));
-    let e = h.refused(&mallory(), move |p| p.escape_exit(1, note, sig, bob(), U128(0)));
-    assert!(e.contains("note worth too little"), "{e}");
-    assert_eq!(h.holder(&bob()).deposited.0, 2 * NEAR);
-}
-
-#[test]
-fn a_frozen_vault_takes_nothing_new_but_still_pays_out() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 1, &alice());
-    h.call(&guardian(), |p| p.freeze_vault(0));
-    h.deposit(&alice(), NEAR);
-    let e = h.refused(&agent(), |p| {
-        p.record_entry(0, 0, 1);
-    });
-    assert!(e.contains("vault frozen"), "{e}");
-    let e = h.refused(&agent(), |p| p.place(0, U128(NEAR)));
-    assert!(e.contains("vault frozen"), "{e}");
-    pay(&mut h, &notes[0], &alice());
-}
-
-// ---- changer de vault ----
-
-/// Written from the SPEC, independently of the contract.
-fn switch_digest_spec(from: u32, nf: &[u8; 32], to_vault: u32, outputs: &[(u8, u64)]) -> [u8; 32] {
-    let mut parts: Vec<Vec<u8>> = vec![
-        b"ONA-POOL-SWITCH-V1".to_vec(),
-        sha(&[contract().as_bytes()]).to_vec(),
-        from.to_le_bytes().to_vec(),
-        nf.to_vec(),
-        to_vault.to_le_bytes().to_vec(),
-        (outputs.len() as u32).to_le_bytes().to_vec(),
-    ];
-    for (tier, count) in outputs {
-        parts.push(vec![*tier]);
-        parts.push(count.to_le_bytes().to_vec());
-    }
-    let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
-    sha(&refs)
-}
-
-fn outs(list: &[(u8, u64)]) -> Vec<SwitchOut> {
-    list.iter().map(|(tier, count)| SwitchOut { tier: *tier, count: *count }).collect()
-}
-
-fn switch_sig(n: &Note, to_vault: u32, list: &[(u8, u64)]) -> Base64VecU8 {
-    b64(&sign_digest(&n.owner, &switch_digest_spec(n.vault, &nullifier(n.vault, &n.token), to_vault, list)))
-}
-
-fn switch(h: &mut H, n: &Note, to_vault: u32, list: &[(u8, u64)]) -> u128 {
-    let (note, sig, o, from) = (input(n), switch_sig(n, to_vault, list), outs(list), n.vault);
-    h.call(&agent(), move |p| p.switch_vault(from, note, sig, to_vault, o)).0
-}
-
-fn refused_switch(h: &mut H, n: &Note, to_vault: u32, signed_for: &[(u8, u64)], sent: &[(u8, u64)]) -> String {
-    let (note, sig, o, from) = (input(n), switch_sig(n, to_vault, signed_for), outs(sent), n.vault);
-    h.refused(&agent(), move |p| {
-        p.switch_vault(from, note, sig, to_vault, o);
-    })
-}
-
-#[test]
-fn a_switch_keeps_the_value_and_pays_no_one() {
-    let mut h = H::new();
-    let notes = h.enter(0, 1, 1, &alice()); // 10 NEAR in vault 0
-    h.enter(1, 0, 1, &bob()); // vault 1 already has a holder
-    let before = h.holder(&alice());
-    h.transfers.clear();
-    h.calls.clear();
-    let moved = switch(&mut h, &notes[0], 1, &[(0, 10)]);
-    assert_eq!(moved, 10 * NEAR, "ten 1-NEAR notes for one 10-NEAR note");
-    assert!(h.transfers.is_empty() && h.calls.is_empty(), "nothing is paid and nothing leaves the pool");
-    let after = h.holder(&alice());
-    assert_eq!(
-        (after.deposited.0, after.withdrawn.0, after.refunded.0, after.exit_limit.0),
-        (before.deposited.0, before.withdrawn.0, before.refunded.0, before.exit_limit.0),
-        "the account's counters do not change"
-    );
-    let (a, b) = (h.vault(0), h.vault(1));
-    assert_eq!((a.owes.0, b.due.0), (10 * NEAR, 10 * NEAR));
-    assert_eq!((a.total_shares.0, b.share_price.0), (0, INITIAL_PRICE), "prices are unchanged");
-    assert_eq!(b.tiers[0].issued, 11);
-}
-
-#[test]
-fn the_new_notes_cannot_be_worth_more_and_the_rest_goes_to_the_reserve() {
-    let mut h = H::new();
-    let notes = h.enter(0, 0, 2, &alice());
-    h.place(0, 2 * NEAR);
-    h.sync(0, 2 * NEAR + NEAR / 5); // 1.1 NEAR a note in vault 0
-    let e = refused_switch(&mut h, &notes[0], 1, &[(0, 2)], &[(0, 2)]);
-    assert!(e.contains("worth more than the note"), "{e}");
-    let limit = h.holder(&alice()).exit_limit.0;
-    let moved = switch(&mut h, &notes[0], 1, &[(0, 1)]);
-    assert_eq!(moved, NEAR);
-    // The 0.1 NEAR left over goes to the reserve: no price jumps, so no exit limit grows.
-    assert_eq!(h.vault(0).share_price.0, INITIAL_PRICE / 10 * 11);
-    assert_eq!(h.view(|p| p.get_debt(0, SWITCH_RESERVE)).0, NEAR / 10);
-    assert_eq!(h.holder(&alice()).exit_limit.0, limit);
-}
-
-#[test]
-fn a_switch_cannot_leave_more_than_one_small_note_over() {
-    let mut h = H::new();
-    let notes = h.enter(0, 1, 1, &alice()); // one 10-NEAR note
-    let e = refused_switch(&mut h, &notes[0], 1, &[(0, 1)], &[(0, 1)]);
-    assert!(e.contains("too much left over"), "{e}");
-    assert_eq!(switch(&mut h, &notes[0], 1, &[(0, 10)]), 10 * NEAR);
-}
-
-#[test]
-fn debts_are_kept_per_pair_of_vaults() {
-    let mut h = H::new();
-    let notes = h.enter(0, 1, 1, &alice());
-    switch(&mut h, &notes[0], 1, &[(1, 1)]);
-    let e = h.refused(&agent(), |p| p.settle_switch(1, 0, U128(NEAR)));
-    assert!(e.contains("owes nothing"), "{e}");
-    let e = h.refused(&agent(), |p| p.settle_switch(0, SWITCH_RESERVE, U128(1)));
-    assert!(e.contains("owes nothing"), "{e}");
-    assert_eq!(h.view(|p| p.get_debt(0, 1)).0, 10 * NEAR);
-}
-
-#[test]
-fn a_vault_owing_switched_value_must_settle_before_placing() {
-    let mut h = H::new();
-    let notes = h.enter(0, 1, 2, &alice());
-    switch(&mut h, &notes[0], 1, &[(1, 1)]);
-    let e = h.refused(&agent(), |p| p.place(0, U128(NEAR)));
-    assert!(e.contains("settle switches out of this vault first"), "{e}");
-    h.call(&agent(), |p| p.settle_switch(0, 1, U128(10 * NEAR)));
-    h.place(0, NEAR);
-}
-
-#[test]
-fn an_overdue_creditor_opens_the_vault_that_owes_it() {
-    let mut h = H::new();
-    let notes = h.enter(0, 1, 1, &alice());
-    h.place(0, 10 * NEAR); // the money sits in vault 0's target
-    switch(&mut h, &notes[0], 1, &[(1, 1)]);
-    let new_note = h.note(1, 1);
-    request(&mut h, &new_note, &alice());
-    for _ in 0..7 {
-        h.now += DAY_NS;
-        h.sync(0, 10 * NEAR);
-    }
-    assert!(!h.view(|p| p.escape_open()));
-    // Vault 1 is overdue and vault 0 owes it: vault 0's funds can be brought back by anyone, not the agent.
-    let e = h.refused(&agent(), |p| p.unstake(0, U128(10 * NEAR)));
-    assert!(e.contains("the escape is open on this vault"), "{e}");
-    h.call(&mallory(), |p| p.unstake(0, U128(10 * NEAR)));
-    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_done(0, op));
-    h.call(&mallory(), |p| p.withdraw(0, U128(10 * NEAR)));
-    h.balance += 10 * NEAR;
-    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_withdraw(0, U128(10 * NEAR), op));
-    h.call(&mallory(), |p| p.settle_switch(0, 1, U128(10 * NEAR)));
-    let (note, sig) = (input(&new_note), signed(&new_note, 1, &alice(), 0));
-    h.call(&mallory(), move |p| p.escape_exit(1, note, sig, alice(), U128(0)));
-}
-
-#[test]
-fn a_new_holder_never_pays_the_debt_of_an_emptied_vault() {
-    let mut h = H::new();
-    let notes = h.enter(0, 1, 1, &alice()); // alice is vault 0's only holder
-    h.place(0, 10 * NEAR);
-    switch(&mut h, &notes[0], 1, &[(1, 1)]); // vault 0 now owes vault 1 10 NEAR and has no shares
-    h.sync(0, 9 * NEAR); // vault 0 loses 1 NEAR
-    assert_eq!(h.vault(0).share_price.0, INITIAL_PRICE, "an empty vault shows the initial price");
-    h.deposit(&bob(), 10 * NEAR);
-    let e = h.refused(&agent(), |p| {
-        p.record_entry(0, 1, 1);
-    });
-    assert!(e.contains("this vault owes more than it holds"), "{e}");
-    // Nor can a switch bring value into it.
-    let others = h.enter(1, 1, 1, &bob());
-    let e = refused_switch(&mut h, &others[0], 0, &[(1, 1)], &[(1, 1)]);
-    assert!(e.contains("this vault owes more than it holds"), "{e}");
-}
-
-#[test]
-fn an_overdue_vault_opens_nothing_on_a_vault_that_owes_it_nothing() {
-    let mut h = H::new();
-    h.enter(0, 1, 1, &alice());
-    h.place(0, 10 * NEAR);
-    let other = h.enter(1, 1, 1, &bob());
-    request(&mut h, &other[0], &bob());
-    for _ in 0..7 {
-        h.now += DAY_NS;
-        h.sync(0, 10 * NEAR);
-    }
-    assert!(!h.view(|p| p.escape_open()));
-    let e = h.refused(&mallory(), |p| p.unstake(0, U128(NEAR)));
-    assert!(e.contains("only the agent while it is active"), "{e}");
-    let e = h.refused(&mallory(), |p| p.withdraw(0, U128(NEAR)));
-    assert!(e.contains("only the agent while it is active"), "{e}");
-    // Vault 1 itself is open.
-    h.call(&mallory(), |p| p.sync(1));
-}
-
-#[test]
-fn notes_received_by_a_switch_are_valued_at_the_price_rounded_up() {
-    let mut h = H::new();
-    let notes = h.enter(0, 1, 1, &alice());
-    h.enter(1, 0, 1, &bob());
-    h.place(1, NEAR);
-    h.sync(1, NEAR + 1); // vault 1's price is 10^18 + 10^-6 yocto a share
-    assert_eq!(switch(&mut h, &notes[0], 1, &[(0, 9)]), 9 * (NEAR + 1_000_000));
-}
-
-#[test]
-fn deposits_and_switches_count_the_same_against_a_vault_cap() {
-    let mut h = H::with(None, 10 * NEAR, 1_000 * NEAR);
-    let notes = h.enter(0, 1, 1, &alice());
-    switch(&mut h, &notes[0], 1, &[(1, 1)]);
-    h.deposit(&bob(), NEAR);
-    let e = h.refused(&agent(), |p| {
-        p.record_entry(1, 0, 1);
-    });
-    assert!(e.contains("vault cap reached"), "{e}");
-    let more = h.enter(0, 0, 1, &bob());
-    let e = refused_switch(&mut h, &more[0], 1, &[(0, 1)], &[(0, 1)]);
-    assert!(e.contains("vault cap reached"), "{e}");
-}
-
-#[test]
-fn a_switched_note_cannot_be_spent_again() {
-    let mut h = H::new();
-    let notes = h.enter(0, 1, 1, &alice());
-    switch(&mut h, &notes[0], 1, &[(1, 1)]);
-    let e = refused_switch(&mut h, &notes[0], 1, &[(1, 1)], &[(1, 1)]);
-    assert!(e.contains("note already spent"), "{e}");
-    let sig = signed(&notes[0], 0, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), &notes[0], 0, sig, &alice());
-    assert!(e.contains("note already spent"), "{e}");
-}
-
-#[test]
-fn a_switch_goes_only_to_a_listed_active_vault_with_the_owners_consent() {
-    let mut h = H::new();
-    let notes = h.enter(0, 1, 1, &alice());
-    let n = &notes[0];
-    let e = refused_switch(&mut h, n, 9, &[(0, 1)], &[(0, 1)]);
-    assert!(e.contains("unknown vault"), "{e}");
-    let e = refused_switch(&mut h, n, 0, &[(0, 1)], &[(0, 1)]);
-    assert!(e.contains("choose another vault"), "{e}");
-    let fresh = h.add_vault(1_000 * NEAR, 1_000 * NEAR);
-    let e = refused_switch(&mut h, n, fresh, &[(0, 1)], &[(0, 1)]);
-    assert!(e.contains("vault not active yet"), "{e}");
-    // The agent cannot change what the owner signed for.
-    let e = refused_switch(&mut h, n, 1, &[(0, 1)], &[(1, 1)]);
-    assert!(e.contains("bad owner signature"), "{e}");
-    // Only the agent submits it.
-    let (note, sig, o) = (input(n), switch_sig(n, 1, &[(0, 1)]), outs(&[(0, 1)]));
-    let e = h.refused(&alice(), move |p| {
-        p.switch_vault(0, note, sig, 1, o);
-    });
+    h.call(&guardian(), |p| p.set_agent(acc("agent2.test")));
+    assert_eq!(h.view(|p| p.get_config().pending_agent), Some(acc("agent2.test")));
+    let e = h.refused(&acc("agent2.test"), |p| p.issue_cash(alice(), 0, 1));
+    assert!(e.contains("only the agent"), "{e}");
+    h.now += ADMIN_NS;
+    assert_eq!(h.view(|p| p.get_config().agent), acc("agent2.test"));
+    let e = h.refused(&agent(), |p| p.issue_cash(alice(), 0, 1));
     assert!(e.contains("only the agent"), "{e}");
 }
 
 #[test]
-fn switched_notes_exit_from_the_new_vault_after_settlement_within_the_same_limit() {
+fn a_new_vault_waits_for_the_admin_delay() {
     let mut h = H::new();
-    let notes = h.enter(0, 1, 1, &alice());
-    switch(&mut h, &notes[0], 1, &[(1, 1)]);
-    let new_note = h.note(1, 1);
-    // Before settlement the new vault has no liquid funds to pay with.
-    let sig = signed(&new_note, 1, &alice(), 0);
-    let e = refused_exit(&mut h, &agent(), &new_note, 1, sig, &alice());
-    assert!(e.contains("not enough liquid funds"), "{e}");
-    let e = h.refused(&mallory(), |p| p.settle_switch(0, 1, U128(NEAR)));
-    assert!(e.contains("only the agent while it is active"), "{e}");
-    let e = h.refused(&agent(), |p| p.settle_switch(0, 1, U128(11 * NEAR)));
-    assert!(e.contains("more than is owed"), "{e}");
-    h.call(&agent(), |p| p.settle_switch(0, 1, U128(10 * NEAR)));
-    let (a, b) = (h.vault(0), h.vault(1));
-    assert_eq!((a.owes.0, a.liquid.0, b.due.0, b.liquid.0), (0, 0, 0, 10 * NEAR));
-    h.transfers.clear();
-    pay(&mut h, &new_note, &alice());
-    assert_eq!(h.transfers, vec![(alice(), 10 * NEAR - EXIT_STORAGE_FEE)]);
-    assert_eq!(h.holder(&alice()).exit_limit.0, 0, "a switch never raised the limit");
+    let id = h.add_vault(1_000 * NEAR, 1_000 * NEAR);
+    let c = h.cash(&bob(), 2, 1);
+    let e = h.refused_enter(&c[0], id, &POSITION);
+    assert!(e.contains("announcement is pending") || e.contains("not active yet"), "{e}");
+    h.now += ADMIN_NS;
+    h.enter(&c[0], id, &POSITION);
 }
 
 #[test]
-fn a_note_with_a_pending_request_cannot_be_switched_and_the_escape_keeps_working() {
+fn deposit_cash_entry_gains_leave_and_exit_never_show_an_account_with_a_vault() {
     let mut h = H::new();
-    let notes = h.enter(0, 1, 2, &alice());
-    request(&mut h, &notes[0], &alice());
-    let e = refused_switch(&mut h, &notes[0], 1, &[(1, 1)], &[(1, 1)]);
-    assert!(e.contains("withdraw the exit request on this note first"), "{e}");
-    let nf = b64(&nullifier(0, &notes[0].token));
-    h.call(&alice(), move |p| p.cancel_exit_request(0, nf));
-    switch(&mut h, &notes[0], 1, &[(1, 1)]);
-    // During the escape anyone can settle, then the switched note leaves from the new vault.
-    h.now += DEFAULT_ESCAPE_DELAY_NS;
-    h.call(&mallory(), |p| p.settle_switch(0, 1, U128(10 * NEAR)));
-    let new_note = h.note(1, 1);
-    let (note, sig) = (input(&new_note), signed(&new_note, 1, &alice(), 0));
-    h.call(&mallory(), move |p| p.escape_exit(1, note, sig, alice(), U128(0)));
+    h.logs.clear();
+    h.public.clear();
+    let cash = h.cash(&alice(), 2, 1);
+    let shares = h.enter(&cash[0], 0, &POSITION);
+    h.place(0, IN_POSITION);
+    h.now += DAY_NS;
+    h.sync(0, IN_POSITION + IN_POSITION / 50); // 2 % of gains
+    h.withdraw(0, IN_POSITION + IN_POSITION / 50);
+    let price = h.vault(0).share_price.0;
+    let value = SHARES[1] * price - NOTE_STORAGE_FEE;
+    let count = (value / CASH[1]) as u64;
+    let small = ((value - u128::from(count) * CASH[1]) / CASH[0]) as u64;
+    let list: Vec<(u8, u64)> = [(1u8, count), (0u8, small)].into_iter().filter(|(_, c)| *c > 0).collect();
+    let back = h.leave(&shares[9], &list);
+    h.transfers.clear();
+    for n in &back {
+        pay(&mut h, n, &alice());
+    }
+    let received: u128 = h.transfers.iter().map(|(_, a)| a).sum();
+    assert_eq!(received, back.iter().map(|n| CASH[usize::from(n.token.denom_id)] - EXIT_STORAGE_FEE).sum::<u128>());
+    // The arguments of every public call: an account and a vault never travel together.
+    for (method, args) in &h.public {
+        let text = args.to_string();
+        let names_account = text.contains("alice");
+        let names_vault = args.get("vault_id").is_some();
+        assert!(!(names_account && names_vault), "{method}: {text}");
+        if method == "pay_exit" {
+            assert!(!names_vault, "{text}");
+        }
+        if method == "enter" || method == "leave" {
+            assert!(!names_account, "{text}");
+        }
+    }
+    assert!(h.public.iter().any(|(m, _)| m == "pay_exit"));
+    for log in &h.logs {
+        let names_account = log.contains("alice");
+        let names_vault = log.contains("\"vault\"");
+        assert!(!(names_account && names_vault), "{log}");
+        if log.contains("\"event\":\"exit\"") {
+            assert!(!names_vault, "{log}");
+        }
+    }
+    for event in ["enter", "leave", "exit"] {
+        assert!(h.logs.iter().any(|l| l.contains(&format!("\"event\":\"{event}\""))), "{event}");
+    }
 }

@@ -137,7 +137,11 @@ checks that the account holds no access key and that the code it runs has the SH
 | `ONA_REGISTRY_OWNER_1`, `ONA_REGISTRY_OWNER_2`, `ONA_AGGREGATOR_ACCOUNT` | registry only |
 | `ONA_AGENT_ACCOUNT` | pool only: the account allowed to place funds and pay exits, different from the guardian |
 | `ONA_ESCAPE_DELAY_SECS` | optional, pool only, seconds without agent activity before anyone can pay exits, from 60 to 30 days, default 7 days |
-| `ONA_ADMIN_DELAY_SECS` | optional, pool only, seconds before a new agent or vault takes effect, from 7 to 30 days, default 7 days |
+| `ONA_ADMIN_DELAY_SECS` | optional, pool only, seconds before a new agent, vault or fee takes effect, from 7 to 30 days, default 7 days |
+| `ONA_POOL_CASH_TIERS` | pool only: a JSON file listing the cash notes, `[{"value": "<yoctoNEAR>", "pk_g2": "<base64 of the 96-byte compressed key>"}]`, 1 to 8 tiers, each key used once, each value above 0.004 NEAR |
+| `ONA_CASH_HOURLY_CAP` | pool only: most yoctoNEAR the cash exits may pay per hour, at least two of the largest cash notes |
+| `ONA_MAX_RATE_BPS` | optional, pool only: yearly growth of each account's exit limit in basis points, at most 10000, default 2000 |
+| `ONA_MIN_LIVE_NOTES` | optional, pool only: live notes a cash tier must have before the agent spends or pays one of them, at least 1, default 5 |
 | `ONA_FUNDING_NEAR` | optional, NEAR sent to the new account, default 5 |
 | `ONA_BASE_VALUE_MILLI_NEAR` | optional, mint only, value of the lowest tier, default 100 |
 | `ONA_CIRCULATION_CAP`, `ONA_HOURLY_REDEEM_CAP` | optional, mint only, per tier, default 1000 and 100 |
@@ -150,11 +154,11 @@ cargo run -p ona-deploy -- pool
 ```
 
 The pool starts with no vault. The guardian then lists each staking pool with `add_vault`, giving the SHA-256 of the code it checked
-there and one share-note key per tier; creating and holding those keys for the agent is not built yet. Lending vaults are refused.
-A new vault or agent takes effect only after the admin delay, and anyone can leave in the meantime. Depositors pay the pool through
-its `deposit` method, at least 0.1 NEAR; a plain transfer is never credited to anyone. A holder can move notes to another listed
-vault without an exit (`switch_vault`, submitted by the agent); the agent then moves the funds inside the pool with `settle_switch`.
-Nothing new to configure.
+there and one share-note key per tier; creating and holding those keys, and the cash keys, for the agent is not built yet. Lending
+vaults are refused, and a staking pool can serve one vault only. A new vault, agent or fee takes effect only after the admin delay,
+and anyone can leave in the meantime. Depositors pay the pool through its `deposit` method, at least 0.1 NEAR; a plain transfer is
+never credited to anyone. The agent turns deposits into cash notes (`issue_cash`), cash into a vault's shares (`enter`), shares back
+into cash (`leave`, from the vault's liquid funds, which is also how a holder changes vault), and pays cash notes (`pay_exit`).
 
 ## Run the signer
 

@@ -170,17 +170,71 @@ pub fn registry_init_args(owners: [&str; 2], aggregator: &str) -> Result<Value> 
 }
 
 /// A delay left out keeps the contract's default of 7 days.
+/// The pool's cash tiers: `(value in yoctoNEAR, compressed G2 public key)`, from 1 to 8, each key used once.
+pub struct PoolCash {
+    pub tiers: Vec<(u128, [u8; G2_LEN])>,
+    /// Most the cash exits may pay per hour, at least two of the largest notes.
+    pub hourly_cap: u128,
+    /// Yearly growth of exit limits in basis points; `None` keeps the contract's 20 %.
+    pub max_rate_bps: Option<u16>,
+    /// Live notes a tier must keep after an entry or exit, so one note never moves alone.
+    pub min_live_notes: u64,
+}
+
+/// Reads the cash tiers file: a JSON list of `{"value": "<yoctoNEAR>", "pk_g2": "<base64, 96 bytes>"}`.
+pub fn parse_cash_tiers(text: &str) -> Result<Vec<(u128, [u8; G2_LEN])>> {
+    let list: Vec<Value> = serde_json::from_str(text).map_err(|_| anyhow!("cash tiers must be a JSON list"))?;
+    list.iter()
+        .map(|t| {
+            let value =
+                t["value"].as_str().and_then(|v| v.parse().ok()).ok_or_else(|| anyhow!("a cash tier needs a value"))?;
+            let pk = t["pk_g2"]
+                .as_str()
+                .and_then(|k| B64.decode(k).ok())
+                .and_then(|k| <[u8; G2_LEN]>::try_from(k).ok())
+                .ok_or_else(|| anyhow!("a cash tier needs a 96-byte pk_g2 in base64"))?;
+            Ok((value, pk))
+        })
+        .collect()
+}
+
 pub fn pool_init_args(
     guardian: &str,
     agent: &str,
     network: &str,
     escape_delay_secs: Option<u64>,
     admin_delay_secs: Option<u64>,
+    cash: &PoolCash,
 ) -> Result<Value> {
     if guardian.is_empty() || agent.is_empty() || guardian == agent {
         bail!("the pool needs a guardian and a different agent");
     }
-    let mut args = json!({"guardian": guardian, "agent": agent, "network": network});
+    if cash.tiers.is_empty() || cash.tiers.len() > MAX_TIERS {
+        bail!("the pool needs between 1 and 8 cash tiers");
+    }
+    let keys: std::collections::BTreeSet<_> = cash.tiers.iter().map(|(_, k)| k.to_vec()).collect();
+    if keys.len() != cash.tiers.len() {
+        bail!("each cash tier needs its own key");
+    }
+    let largest = cash.tiers.iter().map(|(v, _)| *v).max().unwrap_or(0);
+    if cash.hourly_cap < largest.saturating_mul(2) {
+        bail!("the cash hourly cap must cover two of the largest notes");
+    }
+    if cash.max_rate_bps.is_some_and(|r| r > 10_000) {
+        bail!("the exit limit rate is at most 10000 basis points");
+    }
+    if cash.min_live_notes == 0 {
+        bail!("the minimum of live notes per tier must be at least 1");
+    }
+    let tiers: Vec<Value> =
+        cash.tiers.iter().map(|(v, k)| json!({"value": v.to_string(), "pk_g2": B64.encode(k)})).collect();
+    let mut args = json!({
+        "guardian": guardian, "agent": agent, "network": network,
+        "cash_tiers": tiers, "cash_hourly_cap": cash.hourly_cap.to_string(), "min_live_notes": cash.min_live_notes,
+    });
+    if let Some(rate) = cash.max_rate_bps {
+        args["max_rate_bps"] = json!(rate);
+    }
     if let Some(secs) = escape_delay_secs {
         args["escape_delay_secs"] = json!(secs);
     }
@@ -351,13 +405,43 @@ mod tests {
         assert_eq!(registry_init_args(["a1", "b1"], "x1").unwrap()["owners"], json!(["a1", "b1"]));
     }
 
+    fn cash() -> PoolCash {
+        PoolCash { tiers: vec![(10, [1; 96]), (100, [2; 96])], hourly_cap: 200, max_rate_bps: None, min_live_notes: 5 }
+    }
+
     #[test]
     fn the_pool_needs_a_guardian_and_a_different_agent() {
-        assert!(pool_init_args("g", "g", "testnet", None, None).is_err());
-        assert!(pool_init_args("", "a", "testnet", None, None).is_err());
-        let args = pool_init_args("g", "a", "testnet", None, None).unwrap();
-        assert_eq!(args, json!({"guardian": "g", "agent": "a", "network": "testnet"}));
-        let args = pool_init_args("g", "a", "testnet", Some(600), Some(120)).unwrap();
+        assert!(pool_init_args("g", "g", "testnet", None, None, &cash()).is_err());
+        assert!(pool_init_args("", "a", "testnet", None, None, &cash()).is_err());
+        let args = pool_init_args("g", "a", "testnet", None, None, &cash()).unwrap();
+        assert_eq!((args["guardian"].clone(), args["agent"].clone()), (json!("g"), json!("a")));
+        assert_eq!(args["cash_hourly_cap"], json!("200"));
+        assert_eq!(args["cash_tiers"][1]["value"], json!("100"));
+        assert_eq!(args["min_live_notes"], json!(5));
+        assert!(args.get("max_rate_bps").is_none());
+        let args = pool_init_args("g", "a", "testnet", Some(600), Some(120), &cash()).unwrap();
         assert_eq!((args["escape_delay_secs"].clone(), args["admin_delay_secs"].clone()), (json!(600), json!(120)));
+    }
+
+    #[test]
+    fn the_pool_cash_tiers_are_checked_before_deploying() {
+        let mut c = cash();
+        c.hourly_cap = 199;
+        assert!(pool_init_args("g", "a", "testnet", None, None, &c).is_err(), "cap below two large notes");
+        let mut c = cash();
+        c.tiers[1].1 = [1; 96];
+        assert!(pool_init_args("g", "a", "testnet", None, None, &c).is_err(), "a key used twice");
+        let mut c = cash();
+        c.max_rate_bps = Some(10_001);
+        assert!(pool_init_args("g", "a", "testnet", None, None, &c).is_err());
+        let mut c = cash();
+        c.min_live_notes = 0;
+        assert!(pool_init_args("g", "a", "testnet", None, None, &c).is_err());
+        let c = PoolCash { tiers: vec![], hourly_cap: 1, max_rate_bps: None, min_live_notes: 1 };
+        assert!(pool_init_args("g", "a", "testnet", None, None, &c).is_err());
+        let text = format!("[{{\"value\":\"7\",\"pk_g2\":\"{}\"}}]", "AQ".repeat(64));
+        assert_eq!(parse_cash_tiers(&text).unwrap()[0].0, 7);
+        assert!(parse_cash_tiers("[{\"value\":\"7\",\"pk_g2\":\"AQ==\"}]").is_err());
+        assert!(parse_cash_tiers("{}").is_err());
     }
 }
