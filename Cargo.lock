@@ -1986,6 +1986,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ona-crowd"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bs58 0.5.1",
+ "ed25519-dalek",
+ "ona-deploy",
+ "ona-near",
+ "ona-token",
+ "rand",
+ "rand_chacha",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ona-deploy"
 version = "0.0.1"
 dependencies = [

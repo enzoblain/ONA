@@ -171,6 +171,55 @@ cargo test -p ona-anchor
 
 When a program uses it, it will sign `anchor` with the account named as aggregator in `ona-registry`, through `ona-near`.
 
+## Simulate a crowd
+
+At launch the pool is empty, so a real user has no one to hide among. `ona-crowd` creates fake users from a seed and runs the agent's
+rules over them: at least `k` requests per vault before a batch, a minimum wait before placing, a minimum stay before any exit, batches
+at a random moment within a window, and every amount in whole notes. Exit payments go one note at a time back to the account that
+deposited, and never above what that account deposited (the cap is deposits plus gains; no gains are
+simulated). How much each account puts in and takes out is public; what should stay private is which vault it chose and when the
+agent placed for it.
+
+```
+cargo run -p ona-crowd -- simulate crowd.json out/
+```
+
+`crowd.json` needs at least the list of vaults; every other field has a default (see `Config` in `crates/ona-crowd/src/lib.rs`):
+
+```
+{"seed": 1, "users": 50, "vaults": [{"kind": "staking", "contract": "staking.example.testnet"}]}
+```
+
+It writes `out/timeline.json` (only what the chain shows), `out/truth.json` (which vault each user chose, kept apart to measure
+privacy) and `out/keys.json` (the fake users' private keys, readable by its owner only, never printed; an existing file is not
+replaced). For each depositor account, it counts the vaults and the placement batches still possible from the public timeline and
+the pool's public rules, and how many accounts have only one possible vault. Batches are assigned jointly, since each holds exactly
+the notes of its members. The figures are an upper bound on privacy: the elimination never removes the true vault, but a stronger
+observer can remove more. Accounts never placed are counted apart. A fixed seed lets anyone rebuild every key and the ground truth,
+so it is for demos and tests only.
+
+`ona-crowd parades crowd.json [seeds]` compares the agent without countermeasures to a liquid reserve, net settlement at fixed times,
+rebalancing noise, and their combinations, over seeds 1 to 10 by default. Results and how to read them are in
+[crates/ona-crowd/PARADES.md](../crates/ona-crowd/PARADES.md): without countermeasures the vault of most users can be deduced, and only
+the three together bring simple timing guesses near blind guessing.
+
+`ona-crowd run crowd.json out/` also plays the timeline on a local node or testnet. **It has never run.** It ignores the configured
+seed and draws a secret one from the system, never stored. It refuses mainnet, by name and by the chain id the node reports, and
+lending vaults (no adapter yet). Every fake account is funded by the same account, so the crowd is recognizable on chain. The `ona-pool` contract is not used yet, so the agent account stands in for it with its own funds:
+placement calls `deposit_and_stake` on a staking pool, withdrawal calls `unstake` (the funds stay locked for some epochs and are not
+withdrawn), exit payments are transfers. The agent account is funded with what it places plus what it pays out. Deposits are real `deposit` calls on the mint, whose token secrets are written to
+`out/tokens.txt` first. Each denomination must equal one tier of the mint exactly; the mint from `ona-deploy` doubles its tiers, so it
+cannot serve 1, 10 and 100 at once.
+
+| Variable | Value |
+|---|---|
+| `ONA_RPC_URL`, `ONA_NETWORK` | NEAR RPC endpoint and network name |
+| `ONA_MINT` | account of the deployed mint |
+| `ONA_CROWD_FUNDER_ACCOUNT`, `ONA_CROWD_FUNDER_KEY_FILE` | account that funds the fake users and the agent, and its key in a file readable by its owner only |
+| `ONA_CROWD_AGENT_ACCOUNT`, `ONA_CROWD_AGENT_KEY_FILE` | account that places, withdraws and pays, and its key |
+| `ONA_CROWD_UNIT_MILLI_NEAR` | optional, value of one unit of the asset, default 100 |
+| `ONA_CROWD_SPEED` | optional, simulated seconds per real second, default 1; 0 plays without waiting |
+
 ## Not available yet
 
 No NEAR testnet deployment, tested real model connection, Tor, enclave, anchoring program, desktop app or iOS app. See the status table in the [README](../README.md).
