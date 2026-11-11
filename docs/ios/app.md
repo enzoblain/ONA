@@ -154,7 +154,19 @@ Vérifié le 2026-11-11 (macOS, Xcode 27.0 bêta, simulateur iPhone 17 iOS 27.0)
 - Bout en bout, réseau local : app iPhone (simulateur) ↔ app Tauri (branche `fix/inspection`) ↔ `ona-core`. Appairage
   v1, conversation, plan, cabinet-b, paiement de 0,6 NEAR vérifié en v2 puis confirmé, relevé reçu. Un appairage v0
   restant dans le Trousseau du simulateur a été oublié comme prévu.
-- Pas vérifié : par Tor en v1, avec l'app Mac, sur un vrai iPhone (Secure Enclave, Face ID).
+- **Par Tor, le 2026-11-11** (même Mac, réseau de l'école) : app iPhone (simulateur, Arti 0.48.0) ↔ `.onion` de l'app
+  Tauri en mode Tor (serveur sur 127.0.0.1 seulement) ↔ `ona-core`. Mission complète : appairage v1, conversation, plan,
+  cabinet-b, paiement de 0,6 NEAR vérifié en v2 puis confirmé, relevé reçu. Une seule série.
+  - **Premières connexions lentes.** Deux appairages sur trois ont expiré (« L'ordinateur n'a pas répondu à temps »,
+    limite de 60 s par requête) avant que le troisième passe. Reproduit sur le Mac avec le pont Arti seul : la première
+    requête vers le `.onion` a attendu plus de 60 s, la suivante a répondu en 2 s ; un autre essai, 11 s puis 1 à 2 s. La
+    requête n'arrive pas à l'ordinateur pendant cette attente : le code d'appairage n'est pas consommé, on peut réessayer.
+    Piste : une limite plus courte pour l'ouverture du circuit et un nouvel essai automatique (pas fait).
+  - **Côté app bureau.** Au premier lancement de la soirée, l'app a affiché son QR alors que le service n'était pas
+    encore publié sur Tor : un client Tor du Mac obtenait « No more HSDir available » pendant au moins 5 minutes. L'app
+    considère l'adresse publiée dès que le fichier `hostname` existe, et ce fichier reste d'une session à l'autre.
+    Relancé, le service répondait en moins de 20 s.
+- Pas vérifié : avec l'app Mac, sur un vrai iPhone (Secure Enclave, Face ID).
 
 ## Pas encore fait
 
