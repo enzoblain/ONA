@@ -6,8 +6,8 @@ stdin and through the C bridge (`OnaCoreBridge`, `ona_core_dispatch`, which pass
 
 Status: the commands run end to end only against a fake contract and a fake agent (`crates/ona-core/tests/pool.rs`). The
 transport to the real pool agent is not built: with a real wallet, `pool_execute` answers `no connection to the pool agent
-yet`, no agent call is made and no note is spent (the notes it prepared for the operation stay in the wallet, shown as
-`awaiting_signature`). The pool contract has never been deployed.
+yet`, no agent call is made, no note is spent, and the notes it had prepared for the operation are forgotten. The pool contract
+has never been deployed.
 
 **Do not send a deposit from a NEAR wallet while there is no agent:** nobody could turn it into cash notes, and the money would
 wait in the contract until the account asks for a refund (`request_refund`, then `refund_deposit` after the escape delay).
@@ -79,12 +79,19 @@ first step fails, the reply is an error.
 Request: `{"cmd":"pool_recover"}`. To run after an interruption or an `outcome unknown` error, and at start-up.
 
 For each `spending` note it asks the contract whether the note is spent (`is_spent`): a spent note is marked spent; an unspent
-one whose owner signature has expired is held again (the operation can no longer happen); others keep waiting. Then it asks the
-agent for the blind signatures of every note still `awaiting_signature` (a lost answer, a deposit whose cash was never finished)
-and keeps those that check. Reply: `spent`, `held_again`, `still_spending`, `signatures_recovered`, `awaiting_signature`.
+one whose owner signature expired more than 10 minutes ago (a margin for this computer's clock running ahead of the chain's) is
+held again, since the operation can no longer happen; others keep waiting. Then it asks the agent for the blind signatures of
+every note still `awaiting_signature` (a lost answer, a deposit whose cash was never finished) and keeps those that check.
 
-`is_spent` names a nullifier to the RPC endpoint. A spent nullifier is public anyway; asking about one that is not spent yet tells
-the endpoint something about a later spend.
+Reply: `spent`, `held_again`, `still_spending`, `signatures_recovered`, `awaiting_signature`, and `waiting` (the vault and tier of
+each note still waiting for a signature). If the agent cannot be reached, the reply is still a success with what the chain told,
+plus `agent_error`.
+
+With a second RPC endpoint (`ONA_RPC_URL_2`, run by another operator), each `is_spent` is read from both, and a disagreement is an
+error that decides nothing. With one endpoint only, that endpoint is trusted: a lying endpoint could make a spent note look unspent
+(it is then held again after its deadline, and the contract refuses it if used) or an unspent note look spent (it is then marked
+spent, and its value is lost to the wallet). `is_spent` names a nullifier to the endpoint: a spent nullifier is public anyway;
+asking about one that is not spent yet tells the endpoint something about a later spend.
 
 ## What happens to the notes
 
@@ -92,7 +99,8 @@ Each note has a fresh owner key. Its secrets are saved in the encrypted wallet b
 an owner signature leaves, the note is marked `spending`, with the signature's deadline. Then:
 
 - the agent reports success: the note is `spent` and the new notes are kept;
-- the agent reports a certain refusal (nothing sent, or refused by the chain): the note is `held` again;
+- the agent reports a certain refusal (nothing sent, or refused by the chain): the note is `held` again, and the new notes made
+  for the operation are forgotten;
 - the outcome is unknown (sent, no answer): the note stays `spending` and its new notes stay `awaiting_signature`, until
   `pool_recover` finds out.
 

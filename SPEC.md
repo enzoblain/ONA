@@ -544,18 +544,22 @@ note kept by the wallet is paid by the contract.
 - **Notes and signatures.** Every note has a fresh owner key. Owner signatures follow ENTER-V1, LEAVE-V1 and CASH-EXIT-V1 and
   expire 24 hours after they are made, so the agent can batch them. A note is marked spending, with that deadline, before its
   signature leaves. The agent's answer is one of: success (the note is spent, its new notes kept); a certain refusal (nothing sent,
-  or refused by the chain: the note is held again); an unknown outcome (sent, no answer: the note stays spending and its new notes
-  stay waiting for their signatures). A failure after some steps of an execution succeeded returns those steps with the error.
-- **Recovery.** `pool_recover` asks the contract `is_spent` for each spending note: spent → spent; unspent and past its signature's
-  deadline → held again; otherwise it keeps waiting. Then it asks the agent for the blind signatures of every note still waiting
-  for one, and keeps those that check. `is_spent` names a nullifier to the RPC endpoint: a spent one is public anyway, an unspent
-  one says something about a later spend.
+  or refused by the chain: the note is held again and the new notes made for it are forgotten, since no signature can come); an
+  unknown outcome (sent, no answer: the note stays spending and its new notes stay waiting for their signatures). A failure after
+  some steps of an execution succeeded returns those steps with the error.
+- **Recovery.** `pool_recover` asks the contract `is_spent` for each spending note: spent → spent; unspent and more than 10 minutes
+  past its signature's deadline (a margin for this computer's clock running ahead of the chain's) → held again; otherwise it keeps
+  waiting. Then it asks the agent for the blind signatures of every note still waiting for one, and keeps those that check. When the
+  agent cannot be reached it still reports what the chain told and lists the notes that wait (`agent_error`). With a second RPC
+  endpoint (`ONA_RPC_URL_2`) each `is_spent` must agree on both, or nothing is decided; with one, that endpoint is trusted (a lying
+  one can have a spent note held again, which the contract then refuses, or an unspent note marked spent, its value lost to the
+  wallet). `is_spent` names a nullifier to the RPC endpoint: a spent one is public anyway, an unspent one says something about a
+  later spend.
 - **What leaves the computer.** `pool_portfolio` and every preparation read `get_config`, `get_cash` and `get_vault` for every vault,
   on final blocks, whatever the user holds; nothing goes to the relay. `exit_cash` also reads `get_holder` for the paid account,
   `pool_recover` `is_spent` for its spending notes. The agent receives the signed notes it must submit.
 - **Not built.** The transport to the agent (`PoolAgent`): with a real wallet the agent is `NoAgent`, every execution answers
-  `no connection to the pool agent yet` and no agent call is made; the notes prepared for it stay in the wallet, waiting for a
-  signature. A deposit sent from a wallet now could not become cash and would wait for a refund. Configuring a pool wallet through
+  `no connection to the pool agent yet`, no agent call is made and the notes prepared for it are forgotten. A deposit sent from a wallet now could not become cash and would wait for a refund. Configuring a pool wallet through
   the C bridge. Checking on chain that the user's deposit arrived before asking for cash. The contract's minimum of live notes per
   tier and its waiting rules are not planned around: the agent may refuse, and the note is then held again. Tested against a fake
   contract and a fake agent only.

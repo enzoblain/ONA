@@ -10,8 +10,8 @@ use std::rc::Rc;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ona_core::pool::{
-    AgentError, PoolAgent, PoolChain, PoolClient, SignedNote, EXIT_STORAGE_FEE, NOTE_STORAGE_FEE, PREPARATION_LIFE_NS,
-    SIGNATURE_LIFE_NS,
+    AgentError, PoolAgent, PoolChain, PoolClient, SignedNote, CLOCK_MARGIN_NS, EXIT_STORAGE_FEE, NOTE_STORAGE_FEE,
+    PREPARATION_LIFE_NS, SIGNATURE_LIFE_NS,
 };
 use ona_core::Core;
 use ona_token::{g2_to_raw, keygen, sign_blinded, verify_digest, verify_token, SecretKey, Token, G1_LEN};
@@ -50,6 +50,10 @@ struct VaultState {
     keys: Vec<SecretKey>,
     liquid: u128,
     total_shares: u128,
+    /// Owned by no share, as the contract sets aside when a vault empties.
+    orphan: u128,
+    /// A share price the view reports instead of the real one, to test absurd figures.
+    shown_price: Option<u128>,
 }
 
 #[derive(Default)]
@@ -93,7 +97,7 @@ fn price(v: &VaultState) -> u128 {
     if v.total_shares == 0 {
         INITIAL_PRICE
     } else {
-        v.liquid / v.total_shares
+        (v.liquid - v.orphan) / v.total_shares
     }
 }
 
@@ -101,7 +105,7 @@ fn price_up(v: &VaultState) -> u128 {
     if v.total_shares == 0 {
         INITIAL_PRICE
     } else {
-        v.liquid / v.total_shares + u128::from(v.liquid % v.total_shares != 0)
+        (v.liquid - v.orphan).div_ceil(v.total_shares)
     }
 }
 
@@ -121,8 +125,9 @@ impl PoolChain for Chain {
                 let v = &f.vaults[args["vault_id"].as_u64().unwrap() as usize];
                 Ok(json!({
                     "tiers": v.keys.iter().zip(SHARES).map(|(k, s)| json!({"shares": s.to_string(), "pk_raw": raw(k)})).collect::<Vec<_>>(),
-                    "liquid": v.liquid.to_string(), "placed": "0", "fee_owed": "0", "orphan": "0",
-                    "total_shares": v.total_shares.to_string(), "share_price": price(v).to_string(), "frozen": false,
+                    "liquid": v.liquid.to_string(), "placed": "0", "fee_owed": "0", "orphan": v.orphan.to_string(),
+                    "total_shares": v.total_shares.to_string(),
+                    "share_price": v.shown_price.unwrap_or_else(|| price(v)).to_string(), "frozen": false,
                 }))
             }
             "get_holder" => {
@@ -243,11 +248,18 @@ impl PoolAgent for Agent {
         let lose = f.start()?;
         let nf = nf_of(note, None);
         let digest = sha(&[b"ONA-POOL-ENTER-V1", &c(), &nf, &vault.to_le_bytes(), &outs_bytes(outputs), &note.expires_at.to_le_bytes()]);
-        f.check(note, None, digest, now);
         let value = CASH[usize::from(note.tier)];
         let shares: u128 = outputs.iter().map(|(t, n)| SHARES[usize::from(*t)] * u128::from(*n)).sum();
-        let cost = shares * price_up(&f.vaults[vault as usize]);
-        assert!(cost + NOTE_STORAGE_FEE <= value, "the new notes are worth at most the note");
+        let pu = price_up(&f.vaults[vault as usize]);
+        let cost = shares * pu;
+        if cost + NOTE_STORAGE_FEE > value {
+            return Err(AgentError::Refused("the new notes are worth more than the note".into()));
+        }
+        // As the contract: what is left must be less than one of the vault's smallest notes.
+        if value - NOTE_STORAGE_FEE - cost >= SHARES[0] * pu {
+            return Err(AgentError::Refused("too much left over: ask for more notes".into()));
+        }
+        f.check(note, None, digest, now);
         f.cash_liquid -= cost + NOTE_STORAGE_FEE;
         let v = &mut f.vaults[vault as usize];
         v.liquid += cost;
@@ -320,7 +332,15 @@ impl World {
         remove_wallet(&path);
         let fake = Rc::new(RefCell::new(FakePool {
             cash_keys: (0..3).map(|_| keygen(&mut OsRng)).collect(),
-            vaults: (0..2).map(|_| VaultState { keys: (0..3).map(|_| keygen(&mut OsRng)).collect(), liquid: 0, total_shares: 0 }).collect(),
+            vaults: (0..2)
+                .map(|_| VaultState {
+                    keys: (0..3).map(|_| keygen(&mut OsRng)).collect(),
+                    liquid: 0,
+                    total_shares: 0,
+                    orphan: 0,
+                    shown_price: None,
+                })
+                .collect(),
             cash_liquid: 0,
             nullifiers: BTreeSet::new(),
             owner_keys: BTreeSet::new(),
@@ -617,8 +637,116 @@ fn recovery_holds_an_unspent_note_again_only_after_its_signature_expired() {
     assert_eq!(r["still_spending"], 1, "the agent may still submit it");
     w.now.set(w.now.get() + SIGNATURE_LIFE_NS + 1);
     let r = w.ok(json!({"cmd": "pool_recover"}));
-    assert_eq!(r["held_again"], 1, "past its deadline the operation can no longer happen");
+    assert_eq!(r["still_spending"], 1, "just past its deadline, this clock may be ahead of the chain's");
+    assert_eq!(r["agent_error"], json!(null), "the agent answered");
+    w.now.set(w.now.get() + CLOCK_MARGIN_NS);
+    let r = w.ok(json!({"cmd": "pool_recover"}));
+    assert_eq!(r["held_again"], 1, "past its deadline and the margin the operation can no longer happen");
     assert_eq!(w.cash_value(), (10 * NEAR).to_string());
+}
+
+/// Answers every view like the real chain, except `is_spent`, which it inverts.
+struct Lying(Shared);
+
+impl PoolChain for Lying {
+    fn view(&self, method: &str, args: Value) -> Result<Value, String> {
+        let honest = Chain(self.0.clone()).view(method, args)?;
+        Ok(if method == "is_spent" { json!(!honest.as_bool().unwrap()) } else { honest })
+    }
+
+    fn mode(&self) -> &'static str {
+        "mock"
+    }
+}
+
+#[test]
+fn recovery_refuses_to_decide_when_two_rpc_endpoints_disagree() {
+    let mut w = World::new("two-rpc");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (10 * NEAR).to_string()}));
+    w.fail_on(1, Fail::AnswerLost);
+    let p = w.prepare(json!({"op": "enter", "vault": 0, "amount": (10 * NEAR).to_string()}));
+    w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    w.core = Core::new();
+    let now = w.now.clone();
+    let client = PoolClient::new(
+        Wallet::open(&w.path, &KEY).unwrap(),
+        Box::new(Chain(w.fake.clone())),
+        Box::new(Agent(w.fake.clone(), w.now.clone())),
+        POOL,
+    )
+    .with_clock(Box::new(move || now.get()))
+    .with_second_chain(Box::new(Lying(w.fake.clone())));
+    w.core.set_pool(client);
+    let e = w.error(json!({"cmd": "pool_recover"}));
+    assert!(e.contains("the two RPC endpoints disagree"), "{e}");
+    assert_eq!(w.portfolio()["cash"]["spending_value"], (10 * NEAR).to_string(), "nothing decided on one endpoint's word");
+}
+
+#[test]
+fn recovery_without_the_agent_reports_what_the_chain_says_and_what_waits() {
+    let mut w = World::new("recover-noagent");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (10 * NEAR).to_string()}));
+    w.fail_on(1, Fail::AnswerLost);
+    let p = w.prepare(json!({"op": "enter", "vault": 0, "amount": (10 * NEAR).to_string()}));
+    w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    w.core = Core::new();
+    let client = PoolClient::new(Wallet::open(&w.path, &KEY).unwrap(), Box::new(Chain(w.fake.clone())), Box::new(ona_core::pool::NoAgent), POOL);
+    w.core.set_pool(client);
+    let r = w.ok(json!({"cmd": "pool_recover"}));
+    assert_eq!(r["spent"], 1, "the chain's answer is kept");
+    assert_eq!(r["awaiting_signature"], 27);
+    assert_eq!(r["waiting"][0], json!({"vault": 0, "tier": 0}));
+    assert_eq!(r["agent_error"], "no connection to the pool agent yet");
+}
+
+#[test]
+fn a_certain_refusal_leaves_no_note_waiting_for_a_signature() {
+    let mut w = World::new("refused-clean");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (10 * NEAR).to_string()}));
+    w.fail_on(1, Fail::Refused);
+    let p = w.prepare(json!({"op": "enter", "vault": 0, "amount": (10 * NEAR).to_string()}));
+    w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    let portfolio = w.portfolio();
+    assert_eq!(portfolio["vaults"].as_array().unwrap().len(), 0, "the 27 share notes made for the entry are forgotten");
+    w.restart();
+    assert_eq!(w.portfolio()["vaults"].as_array().unwrap().len(), 0, "also after a restart");
+    // A refused deposit leaves no cash note waiting either.
+    let p = w.prepare(json!({"op": "deposit", "account": "carol.test", "amount": (10 * NEAR).to_string()}));
+    w.fake.borrow_mut().holders.remove("carol.test");
+    w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    assert_eq!(w.portfolio()["cash"]["awaiting_signature"], 0);
+}
+
+#[test]
+fn an_entry_is_priced_without_what_no_share_owns() {
+    let mut w = World::new("orphan");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (20 * NEAR).to_string()}));
+    {
+        // The vault holds 5 NEAR for 4 million shares, plus 1 NEAR owned by no share: the price is 1.25e18, not 1.5e18.
+        let mut f = w.fake.borrow_mut();
+        let v = &mut f.vaults[0];
+        v.liquid = 6 * NEAR;
+        v.orphan = NEAR;
+        v.total_shares = 4_000_000;
+    }
+    let p = w.prepare(json!({"op": "enter", "vault": 0, "amount": (10 * NEAR).to_string()}));
+    let shares: u128 = p["summary"]["shares_value"].as_str().unwrap().parse().unwrap();
+    let left: u128 = p["summary"]["left_in_cash"].as_str().unwrap().parse().unwrap();
+    assert!(left < SHARES[0] * (INITIAL_PRICE / 4 * 5), "at the right price little is left over");
+    assert_eq!(shares + left + NOTE_STORAGE_FEE, 10 * NEAR);
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+}
+
+#[test]
+fn an_absurd_figure_from_the_contract_is_an_error_not_a_crash() {
+    let mut w = World::new("absurd");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (10 * NEAR).to_string()}));
+    w.run(json!({"op": "enter", "vault": 0, "amount": (10 * NEAR).to_string()}));
+    w.fake.borrow_mut().vaults[0].shown_price = Some(u128::MAX / 2);
+    let e = w.error(json!({"cmd": "pool_prepare", "op": "exit", "from": 0, "amount": "all"}));
+    assert!(e.contains("too large"), "{e}");
+    let e = w.error(json!({"cmd": "pool_portfolio"}));
+    assert!(e.contains("too large"), "{e}");
 }
 
 #[test]
@@ -670,7 +798,7 @@ fn without_an_agent_nothing_is_spent() {
     assert_eq!(reply["ok"], false);
     assert_eq!(reply["error"], "no connection to the pool agent yet");
     let p = send(&mut core, json!({"cmd": "pool_portfolio"}));
-    assert_eq!(p["cash"]["awaiting_signature"], 1, "the note made for the deposit waits in the wallet");
+    assert_eq!(p["cash"]["awaiting_signature"], 0, "nothing was sent, so nothing is left waiting");
     drop(core);
     remove_wallet(&path);
 }

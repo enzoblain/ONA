@@ -74,6 +74,7 @@ contract for a refund.
 | `ONA_WALLET_KEY_FILE` | a file holding the wallet key as 64 hex characters, readable by its owner only |
 | `ONA_POOL` | the pool contract account |
 | `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only) |
+| `ONA_RPC_URL_2` | optional, a second NEAR RPC endpoint run by another operator: `pool_recover` decides a note's fate only when both agree. Without it the first endpoint is trusted |
 | `ONA_POOL_RECOMMENDED_NEAR` | optional, the deposit amounts the app recommends, whole NEAR separated by commas, each at least 0.1 NEAR; default `100,500,2000`. A deposit of another amount is still allowed, with a warning |
 
 A fake relay on localhost, for front-end work:

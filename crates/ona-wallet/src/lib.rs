@@ -44,6 +44,7 @@ const RELEASED: u8 = 3;
 const NOTE_PENDING: u8 = 4;
 const NOTE_HELD: u8 = 5;
 const NOTE_STATUS: u8 = 6;
+const NOTE_DROPPED: u8 = 7;
 /// Stands for "no vault" in a note record: a cash note.
 const CASH: u32 = u32::MAX;
 
@@ -396,6 +397,16 @@ impl Wallet {
                     self.spending.remove(&nf);
                 }
             }
+            NOTE_DROPPED => {
+                let (vault, blinded) = split_vault(data)?;
+                if blinded.len() != G1_LEN {
+                    return Err("bad note record".into());
+                }
+                self.note_pending.retain(|(v, p)| {
+                    *v != vault
+                        || PendingToken::from_secret_bytes(p).map(|t| t.blinded[..] != *blinded).unwrap_or(true)
+                });
+            }
             NOTE_PENDING => {
                 let (vault, secret) = split_vault(data)?;
                 self.note_pending.push((vault, secret.to_vec()));
@@ -545,6 +556,18 @@ impl Wallet {
     }
 
     /// Pool notes waiting for the agent's blind signature, with their vault.
+    /// Forgets a note waiting for its signature, once the operation that would have signed it is certainly
+    /// refused: no signature can ever come for it.
+    pub fn drop_note_pending(&mut self, vault: Option<u32>, blinded: &[u8; G1_LEN]) -> Result<(), String> {
+        if !self.notes_pending()?.iter().any(|(v, p)| *v == vault && &p.blinded == blinded) {
+            return Err("no pending note with this blinded point".into());
+        }
+        let mut record = vec![NOTE_DROPPED];
+        record.extend_from_slice(&vault_code(vault)?.to_le_bytes());
+        record.extend_from_slice(blinded);
+        self.append(record)
+    }
+
     pub fn notes_pending(&self) -> Result<Vec<(Option<u32>, PendingToken)>, String> {
         self.note_pending
             .iter()

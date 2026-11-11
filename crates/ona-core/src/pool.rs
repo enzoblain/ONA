@@ -41,6 +41,9 @@ pub const MAX_OUTPUTS: u64 = 64;
 pub const DEPOSIT_MARGIN: u128 = 10_000_000_000_000_000_000_000;
 /// How long the owner's signatures of an execution stay valid: long enough for the agent to batch them.
 pub const SIGNATURE_LIFE_NS: u64 = 24 * 3_600_000_000_000;
+/// Allowance for this computer's clock running ahead of the chain's: a spending note is held again only this long
+/// after its signature's deadline. A design margin.
+pub const CLOCK_MARGIN_NS: u64 = 10 * 60_000_000_000;
 /// How long a preparation can be executed, and keeps its notes reserved.
 pub const PREPARATION_LIFE_NS: u64 = 5 * 60_000_000_000;
 /// Deposit amounts the app recommends unless configured otherwise, in NEAR: common amounts hide better.
@@ -195,6 +198,17 @@ fn overflow() -> String {
     "a value read from the pool is too large".into()
 }
 
+/// `*total += value`, refusing an overflow.
+fn plus(total: &mut u128, value: u128) -> Result<(), String> {
+    *total = total.checked_add(value).ok_or_else(overflow)?;
+    Ok(())
+}
+
+/// `fee * count`, refusing an overflow.
+fn times(fee: u128, count: usize) -> Result<u128, String> {
+    fee.checked_mul(count as u128).ok_or_else(overflow)
+}
+
 /// A tier as read from the contract: shares per note (vaults) or value per note (cash), and its key.
 struct Tier {
     size: u128,
@@ -327,6 +341,8 @@ struct Prepared {
 pub struct PoolClient {
     wallet: Wallet,
     chain: Box<dyn PoolChain>,
+    /// A second RPC endpoint, run by another operator, that `pool_recover` must agree with.
+    second: Option<Box<dyn PoolChain>>,
     agent: Box<dyn PoolAgent>,
     contract: String,
     clock: Box<dyn Fn() -> u64>,
@@ -371,6 +387,7 @@ impl PoolClient {
         Self {
             wallet,
             chain,
+            second: None,
             agent,
             contract: contract.into(),
             clock: Box::new(system_clock),
@@ -382,6 +399,12 @@ impl PoolClient {
     /// Replaces the clock (nanoseconds since 1970), for tests.
     pub fn with_clock(mut self, clock: Box<dyn Fn() -> u64>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Adds a second RPC endpoint that `pool_recover`'s chain reads must agree with.
+    pub fn with_second_chain(mut self, chain: Box<dyn PoolChain>) -> Self {
+        self.second = Some(chain);
         self
     }
 
@@ -408,8 +431,19 @@ impl PoolClient {
             Err(std::env::VarError::NotPresent) => None,
             Err(_) => return Err("ONA_POOL_RECOMMENDED_NEAR is not valid text".into()),
         };
+        let second = match std::env::var("ONA_RPC_URL_2") {
+            Ok(url) => {
+                ona_near::check_rpc_url(&url).map_err(|e| format!("ONA_RPC_URL_2: {e}"))?;
+                Some(url)
+            }
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return Err("ONA_RPC_URL_2 is not valid text".into()),
+        };
         let wallet = Wallet::open(Path::new(&file), &key)?;
-        let client = Self::new(wallet, Box::new(NearPool::new(&rpc, &pool)), Box::new(NoAgent), &pool);
+        let mut client = Self::new(wallet, Box::new(NearPool::new(&rpc, &pool)), Box::new(NoAgent), &pool);
+        if let Some(url) = second {
+            client = client.with_second_chain(Box::new(NearPool::new(&url, &pool)));
+        }
         Ok(Some(match recommended {
             Some(r) => client.with_recommended(r),
             None => client,
@@ -569,15 +603,15 @@ impl PoolClient {
                 for (n, value) in &chosen {
                     let budget = value.checked_sub(NOTE_STORAGE_FEE).ok_or("a cash note is worth less than its fee")?;
                     let (outputs, left) = split(budget, &v.tiers, v.price_up)?;
-                    cost += budget - left;
-                    rest += left;
+                    plus(&mut cost, budget - left)?;
+                    plus(&mut rest, left)?;
                     reserved.push(n.nf);
                     steps.push(Step::Enter { nf: n.nf, vault: id, outputs });
                 }
                 summary["vault"] = json!(id);
                 summary["shares_value"] = json!(cost.to_string());
                 summary["left_in_cash"] = json!(rest.to_string());
-                summary["fees"] = json!({"storage": (NOTE_STORAGE_FEE * chosen.len() as u128).to_string()});
+                summary["fees"] = json!({"storage": times(NOTE_STORAGE_FEE, chosen.len())?.to_string()});
                 (Some(id), steps)
             }
             "exit" | "switch" => {
@@ -593,9 +627,9 @@ impl PoolClient {
                 for (n, value) in &chosen {
                     let budget = value.checked_sub(NOTE_STORAGE_FEE).ok_or("a share note is worth less than its fee")?;
                     let (outputs, left) = split(budget, &state.cash, 1)?;
-                    fees += NOTE_STORAGE_FEE;
-                    rest += left;
-                    cash_out += budget - left;
+                    plus(&mut fees, NOTE_STORAGE_FEE)?;
+                    plus(&mut rest, left)?;
+                    plus(&mut cash_out, budget - left)?;
                     let mut then_enter = None;
                     if let Some(to) = to_vault {
                         let b = state.vault(to)?;
@@ -605,12 +639,12 @@ impl PoolClient {
                         let mut plans = Vec::new();
                         for (tier, count) in &outputs {
                             for _ in 0..*count {
-                                let cash = state.cash[usize::from(*tier)].size;
+                                let cash = state.cash.get(usize::from(*tier)).ok_or("unknown cash tier")?.size;
                                 let budget = cash.checked_sub(NOTE_STORAGE_FEE).ok_or("a cash note is worth less than its fee")?;
                                 let (shares, left) = split(budget, &b.tiers, b.price_up)?;
-                                fees += NOTE_STORAGE_FEE;
-                                rest += left;
-                                new_shares += budget - left;
+                                plus(&mut fees, NOTE_STORAGE_FEE)?;
+                                plus(&mut rest, left)?;
+                                plus(&mut new_shares, budget - left)?;
                                 plans.push(shares);
                             }
                         }
@@ -650,7 +684,7 @@ impl PoolClient {
                 summary["to"] = json!(to);
                 summary["received"] = json!(received.to_string());
                 summary["exit_limit"] = json!(limit.to_string());
-                summary["fees"] = json!({"storage": (EXIT_STORAGE_FEE * chosen.len() as u128).to_string()});
+                summary["fees"] = json!({"storage": times(EXIT_STORAGE_FEE, chosen.len())?.to_string()});
                 reserved = chosen.iter().map(|(n, _)| n.nf).collect();
                 (None, chosen.iter().map(|(n, _)| Step::Pay { nf: n.nf, to: to.clone() }).collect())
             }
@@ -726,11 +760,10 @@ impl PoolClient {
         let now = self.now();
         let (mut spent, mut held, mut waiting) = (0, 0, 0);
         for n in self.wallet.notes().into_iter().filter(|n| n.status == NoteStatus::Spending) {
-            let is_spent = self.chain.view("is_spent", json!({"nf": b64(&n.nf)}))?.as_bool().ok_or("is_spent did not answer a boolean")?;
-            if is_spent {
+            if self.is_spent(&n.nf)? {
                 self.wallet.set_note_status(&n.nf, NoteStatus::Spent)?;
                 spent += 1;
-            } else if self.wallet.spending_until(&n.nf).is_some_and(|until| now > until) {
+            } else if self.wallet.spending_until(&n.nf).is_some_and(|until| now > until.saturating_add(CLOCK_MARGIN_NS)) {
                 self.wallet.set_note_status(&n.nf, NoteStatus::Held)?;
                 held += 1;
             } else {
@@ -739,28 +772,64 @@ impl PoolClient {
         }
         let pending = self.wallet.notes_pending()?;
         let mut recovered = 0;
+        let mut agent_error = None;
         if !pending.is_empty() {
             let blinded: Vec<[u8; G1_LEN]> = pending.iter().map(|(_, p)| p.blinded).collect();
-            let sigs = self.agent.signatures(&blinded).map_err(|e| e.message())?;
-            if sigs.len() != blinded.len() {
-                return Err("the agent returned a wrong number of signatures".into());
-            }
-            for ((vault, p), sig) in pending.iter().zip(sigs) {
-                if let Some(sig) = sig {
-                    let pk = match vault {
-                        None => &state.cash.get(usize::from(p.denom_id)).ok_or("unknown cash tier")?.pk,
-                        Some(v) => &state.vault(*v)?.tiers.get(usize::from(p.denom_id)).ok_or("unknown tier")?.pk,
-                    };
-                    self.wallet.finish_note(*vault, &p.blinded, &sig, pk)?;
-                    recovered += 1;
+            match self.agent.signatures(&blinded) {
+                // Without the agent, what the chain told is still reported, with what waits.
+                Err(e) => agent_error = Some(e.message()),
+                Ok(sigs) if sigs.len() != blinded.len() => agent_error = Some("the agent returned a wrong number of signatures".into()),
+                Ok(sigs) => {
+                    for ((vault, p), sig) in pending.iter().zip(sigs) {
+                        if let Some(sig) = sig {
+                            let pk = match vault {
+                                None => &state.cash.get(usize::from(p.denom_id)).ok_or("unknown cash tier")?.pk,
+                                Some(v) => &state.vault(*v)?.tiers.get(usize::from(p.denom_id)).ok_or("unknown tier")?.pk,
+                            };
+                            self.wallet.finish_note(*vault, &p.blinded, &sig, pk)?;
+                            recovered += 1;
+                        }
+                    }
                 }
             }
         }
-        let still = self.wallet.notes_pending()?.len();
-        Ok(json!({
+        let still: Vec<Value> = self
+            .wallet
+            .notes_pending()?
+            .iter()
+            .map(|(vault, p)| json!({"vault": vault, "tier": p.denom_id}))
+            .collect();
+        let mut reply = json!({
             "spent": spent, "held_again": held, "still_spending": waiting,
-            "signatures_recovered": recovered, "awaiting_signature": still,
-        }))
+            "signatures_recovered": recovered, "awaiting_signature": still.len(), "waiting": still,
+        });
+        if let Some(e) = agent_error {
+            reply["agent_error"] = json!(e);
+        }
+        Ok(reply)
+    }
+
+    /// Whether the contract has spent this nullifier, read from both RPC endpoints when a second one is set:
+    /// a single endpoint could hide a spend or invent one.
+    fn is_spent(&self, nf: &[u8; 32]) -> Result<bool, String> {
+        let read = |chain: &dyn PoolChain| -> Result<bool, String> {
+            chain.view("is_spent", json!({"nf": b64(nf)}))?.as_bool().ok_or_else(|| "is_spent did not answer a boolean".into())
+        };
+        let first = read(self.chain.as_ref())?;
+        if let Some(second) = &self.second {
+            if read(second.as_ref())? != first {
+                return Err("the two RPC endpoints disagree on a note: try again later".into());
+            }
+        }
+        Ok(first)
+    }
+
+    /// Forgets the new notes of an operation certainly refused: no signature can come for them.
+    fn drop_pending(&mut self, vault: Option<u32>, blinded: &[[u8; G1_LEN]]) -> Result<(), String> {
+        for b in blinded {
+            self.wallet.drop_note_pending(vault, b)?;
+        }
+        Ok(())
     }
 
     /// New notes of `vault` (cash when `None`), saved before their blinded points leave.
@@ -800,7 +869,14 @@ impl PoolClient {
 
     fn issue(&mut self, state: &State, account: &str, tier: u8, count: u64) -> Result<usize, String> {
         let blinded = self.new_notes(state, None, &[(tier, count)])?;
-        let sigs = self.agent.issue_cash(account, tier, &blinded).map_err(|e| e.message())?;
+        let sigs = match self.agent.issue_cash(account, tier, &blinded) {
+            Ok(sigs) => sigs,
+            Err(AgentError::Refused(e)) => {
+                self.drop_pending(None, &blinded)?;
+                return Err(e);
+            }
+            Err(e) => return Err(e.message()),
+        };
         Ok(self.finish(state, None, &blinded, &sigs)?.len())
     }
 
@@ -816,6 +892,7 @@ impl PoolClient {
         n: &PoolNote,
         digest: impl Fn(u64) -> [u8; 32],
         call: impl FnOnce(&mut Self, &SignedNote) -> Result<T, AgentError>,
+        new: Option<(Option<u32>, &[[u8; G1_LEN]])>,
     ) -> Result<T, String> {
         let expires_at = self.now().saturating_add(SIGNATURE_LIFE_NS);
         let owner_sig = n.owner.sign(&digest(expires_at)).to_bytes();
@@ -828,6 +905,9 @@ impl PoolClient {
             }
             Err(AgentError::Refused(e)) => {
                 self.wallet.set_note_status(&n.nf, NoteStatus::Held)?;
+                if let Some((vault, blinded)) = new {
+                    self.drop_pending(vault, blinded)?;
+                }
                 Err(e)
             }
             Err(e) => Err(e.message()),
@@ -842,6 +922,7 @@ impl PoolClient {
             &n,
             |exp| pool::enter_digest(&contract, &n.nf, vault, outputs, exp),
             |me, note| me.agent.enter(vault, note, outputs, &blinded),
+            Some((Some(vault), &blinded)),
         )?;
         self.finish(state, Some(vault), &blinded, &sigs)?;
         Ok(())
@@ -855,6 +936,7 @@ impl PoolClient {
             &n,
             |exp| pool::leave_digest(&contract, vault, &n.nf, outputs, exp),
             |me, note| me.agent.leave(vault, note, outputs, &blinded),
+            Some((None, &blinded)),
         )?;
         self.finish(state, None, &blinded, &sigs)
     }
@@ -862,7 +944,7 @@ impl PoolClient {
     fn pay(&mut self, nf: &[u8; 32], to: &str) -> Result<(), String> {
         let n = self.note(nf)?;
         let contract = self.contract.clone();
-        self.spend(&n, |exp| pool::cash_exit_digest(&contract, &n.nf, to, exp), |me, note| me.agent.pay_exit(note, to))
+        self.spend(&n, |exp| pool::cash_exit_digest(&contract, &n.nf, to, exp), |me, note| me.agent.pay_exit(note, to), None)
     }
 }
 
