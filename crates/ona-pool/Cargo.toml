@@ -1,0 +1,19 @@
+[package]
+name = "ona-pool"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = { version = "5.30", features = ["legacy"] }
+
+[dev-dependencies]
+near-sdk = { version = "5.30", features = ["legacy", "unit-testing"] }
+ona-token = { path = "../ona-token" }
+rand = "0.8"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }

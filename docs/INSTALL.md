@@ -16,7 +16,7 @@ A C compiler is also needed, for `blst`. On macOS: `xcode-select --install`.
 ./verify.sh
 ```
 
-This runs all tests and compiles both contracts to wasm. It needs no key, no funded account, no Docker and no browser.
+This runs all tests and compiles the three contracts to wasm. It needs no key, no funded account, no Docker and no browser.
 
 To type-check only, use `cargo check --workspace --all-targets`. Plain `cargo check` fails on purpose: `near-sdk` refuses to build
 a contract for a native target outside tests.
@@ -86,25 +86,36 @@ The node crashes when started inside a macOS Seatbelt sandbox, so run it from a 
 
 ## Deploy the contracts
 
-Testnet or a local node only: the tool refuses mainnet. Build both contracts as in `verify.sh`, and create the signer keys as below. Each
-contract becomes `mint.<parent>` or `registry.<parent>`, created and initialized in one transaction, with no access key.
+Testnet or a local node only: the tool refuses mainnet. Build the contracts as in `verify.sh`, and create the signer keys as below. Each
+contract becomes `mint.<parent>`, `registry.<parent>` or `pool.<parent>`, created and initialized in one transaction, with no access key.
+None of them has been deployed on testnet yet, and the pool has never been deployed anywhere.
 
 | Variable | Value |
 |---|---|
 | `ONA_RPC_URL`, `ONA_NETWORK` | NEAR RPC endpoint and network name |
 | `ONA_PARENT_ACCOUNT`, `ONA_PARENT_KEY_FILE` | funded parent account, and its key in a file readable by its owner only |
 | `ONA_SIGNER_KEYS_FILE` | mint only: the file from `ona-signer init-keys` |
-| `ONA_SIGNER_ACCOUNT`, `ONA_RELAY_ACCOUNT`, `ONA_GUARDIAN_ACCOUNT` | mint only: the three roles |
+| `ONA_SIGNER_ACCOUNT`, `ONA_RELAY_ACCOUNT` | mint only: two of the roles |
+| `ONA_GUARDIAN_ACCOUNT` | mint and pool: the guardian |
 | `ONA_REGISTRY_OWNER_1`, `ONA_REGISTRY_OWNER_2`, `ONA_AGGREGATOR_ACCOUNT` | registry only |
+| `ONA_AGENT_ACCOUNT` | pool only: the account allowed to place funds and pay exits, different from the guardian |
+| `ONA_ESCAPE_DELAY_SECS` | optional, pool only, seconds without agent activity before anyone can pay exits, from 60 to 30 days, default 7 days |
+| `ONA_ADMIN_DELAY_SECS` | optional, pool only, seconds before a new agent or vault takes effect, from 7 to 30 days, default 7 days |
 | `ONA_FUNDING_NEAR` | optional, NEAR sent to the new account, default 5 |
 | `ONA_BASE_VALUE_MILLI_NEAR` | optional, mint only, value of the lowest tier, default 100 |
 | `ONA_CIRCULATION_CAP`, `ONA_HOURLY_REDEEM_CAP` | optional, mint only, per tier, default 1000 and 100 |
-| `ONA_MINT_WASM`, `ONA_REGISTRY_WASM` | optional, paths to the built contracts |
+| `ONA_MINT_WASM`, `ONA_REGISTRY_WASM`, `ONA_POOL_WASM` | optional, paths to the built contracts |
 
 ```
 cargo run -p ona-deploy -- mint
 cargo run -p ona-deploy -- registry
+cargo run -p ona-deploy -- pool
 ```
+
+The pool starts with no vault. The guardian then lists each staking pool with `add_vault`, giving the SHA-256 of the code it checked
+there and one share-note key per tier; creating and holding those keys for the agent is not built yet. Lending vaults are refused.
+A new vault or agent takes effect only after the admin delay, and anyone can leave in the meantime. Depositors pay the pool through
+its `deposit` method, at least 0.1 NEAR; a plain transfer is never credited to anyone.
 
 ## Run the signer
 

@@ -2039,6 +2039,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ona-pool"
+version = "0.0.1"
+dependencies = [
+ "ed25519-dalek",
+ "near-sdk",
+ "ona-token",
+ "rand",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ona-registry"
 version = "0.0.1"
 dependencies = [

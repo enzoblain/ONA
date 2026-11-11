@@ -1,10 +1,10 @@
-//! `ona-deploy mint` and `ona-deploy registry` deploy the contracts on testnet or a local node.
+//! `ona-deploy mint`, `ona-deploy registry` and `ona-deploy pool` deploy the contracts on testnet or a local node.
 //! Configured by the environment variables in `docs/INSTALL.md`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use ona_deploy::{check_network, deploy_actions, registry_init_args, MintPlan};
+use ona_deploy::{check_network, deploy_actions, pool_init_args, registry_init_args, MintPlan};
 use ona_near::{load_account_key, Action, Client};
 use ona_signer::KeyStore;
 use serde_json::json;
@@ -92,12 +92,30 @@ fn deploy_registry() -> Result<()> {
     deployer.send(&account, deploy_actions(funding, code, &args))
 }
 
+fn deploy_pool() -> Result<()> {
+    let deployer = Deployer::from_env()?;
+    let optional = |name: &str| -> Result<Option<u64>> {
+        match std::env::var(name) {
+            Ok(value) => Ok(Some(value.parse().map_err(|_| anyhow!("{name} is not a number"))?)),
+            Err(_) => Ok(None),
+        }
+    };
+    let (escape, admin) = (optional("ONA_ESCAPE_DELAY_SECS")?, optional("ONA_ADMIN_DELAY_SECS")?);
+    let args =
+        pool_init_args(&env("ONA_GUARDIAN_ACCOUNT")?, &env("ONA_AGENT_ACCOUNT")?, &deployer.network, escape, admin)?;
+    let funding = env_number::<u128>("ONA_FUNDING_NEAR", 5)? * NEAR;
+    let code = read_wasm("ONA_POOL_WASM", "target/wasm32-unknown-unknown/contract/ona_pool.wasm")?;
+    let account = format!("pool.{}", deployer.parent);
+    deployer.send(&account, deploy_actions(funding, code, &args))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["mint"] => deploy_mint(),
         ["registry"] => deploy_registry(),
-        _ => Err(anyhow!("usage: ona-deploy mint | ona-deploy registry")),
+        ["pool"] => deploy_pool(),
+        _ => Err(anyhow!("usage: ona-deploy mint | ona-deploy registry | ona-deploy pool")),
     };
     if let Err(e) = result {
         eprintln!("{e:#}");

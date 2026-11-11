@@ -99,6 +99,27 @@ pub fn registry_init_args(owners: [&str; 2], aggregator: &str) -> Result<Value> 
     Ok(json!({"owners": owners, "aggregator": aggregator}))
 }
 
+/// A delay left out keeps the contract's default of 7 days.
+pub fn pool_init_args(
+    guardian: &str,
+    agent: &str,
+    network: &str,
+    escape_delay_secs: Option<u64>,
+    admin_delay_secs: Option<u64>,
+) -> Result<Value> {
+    if guardian.is_empty() || agent.is_empty() || guardian == agent {
+        bail!("the pool needs a guardian and a different agent");
+    }
+    let mut args = json!({"guardian": guardian, "agent": agent, "network": network});
+    if let Some(secs) = escape_delay_secs {
+        args["escape_delay_secs"] = json!(secs);
+    }
+    if let Some(secs) = admin_delay_secs {
+        args["admin_delay_secs"] = json!(secs);
+    }
+    Ok(args)
+}
+
 /// Create, fund, deploy, initialize. There is deliberately no key action.
 pub fn deploy_actions(funding: u128, code: Vec<u8>, init_args: &Value) -> Vec<Action> {
     vec![
@@ -189,5 +210,15 @@ mod tests {
         assert!(registry_init_args(["a", ""], "x").is_err());
         assert!(registry_init_args(["a", "b"], "").is_err());
         assert_eq!(registry_init_args(["a", "b"], "x").unwrap()["owners"], json!(["a", "b"]));
+    }
+
+    #[test]
+    fn the_pool_needs_a_guardian_and_a_different_agent() {
+        assert!(pool_init_args("g", "g", "testnet", None, None).is_err());
+        assert!(pool_init_args("", "a", "testnet", None, None).is_err());
+        let args = pool_init_args("g", "a", "testnet", None, None).unwrap();
+        assert_eq!(args, json!({"guardian": "g", "agent": "a", "network": "testnet"}));
+        let args = pool_init_args("g", "a", "testnet", Some(600), Some(120)).unwrap();
+        assert_eq!((args["escape_delay_secs"].clone(), args["admin_delay_secs"].clone()), (json!(600), json!(120)));
     }
 }

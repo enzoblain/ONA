@@ -1,0 +1,4 @@
+# Flags for building the contracts without cargo-near. From the repository root:
+# cargo build --profile contract --target wasm32-unknown-unknown -p ona-pool --config crates/ona-pool/wasm-build.toml
+[build]
+rustflags = ["--cfg", "near", "-C", "link-arg=-s", "-C", "target-cpu=mvp"]

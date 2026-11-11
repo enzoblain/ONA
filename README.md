@@ -45,6 +45,7 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-signer` | Blind-signs tokens after on-chain deposits; no inbound network | Rust |
 | `ona-mint` | NEAR contract: holds the reserve, verifies blind BLS12-381 tokens, pays recipients directly, returns blinded change | Rust |
 | `ona-registry` | NEAR contract: published measurements, journal anchors, incident level | Rust |
+| `ona-pool` | NEAR contract with no access key: holds the funds the agent places, only in listed vaults, and pays exits only to accounts that deposited | Rust |
 
 ## How paying works (planned)
 
@@ -59,8 +60,9 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-token` blind BLS tokens | done | native tests |
 | `ona-mint` contract | done, gas measured ([SPEC](SPEC.md#measured-gas)) | mocked NEAR VM with real BLS and ed25519 host functions, and a local NEAR node |
 | `ona-registry` contract | done | mocked NEAR VM only |
-| `ona-anchor` hourly journal anchoring, auditor key sealing in `ona-core` | library done, no program receives leaves yet | fake registry only, never on a NEAR node |
+| `ona-pool` contract: listed staking vaults, share notes, exits only to depositors, 7-day escape | done, never deployed, lending not implemented | mocked NEAR VM only, never against a real staking pool |
 | `ona-crowd` crowd simulator for the pool demo | simulation and vault-privacy measure done; the NEAR runner has never run | in-memory chain only |
+| `ona-anchor` hourly journal anchoring, auditor key sealing in `ona-core` | library done, no program receives leaves yet | fake registry only, never on a NEAR node |
 | `ona-deploy` deployment tool | done, refuses mainnet, testnet not tried yet | unit tests |
 | `ona-near` RPC client | done | unit tests, and a local NEAR node through `ona-sandbox` |
 | `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
@@ -79,7 +81,7 @@ with the content, but the account, the network address, the payment and the agen
 
 Setup and details are in [docs/INSTALL.md](docs/INSTALL.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-`./verify.sh` runs every test and compiles the contracts. It needs Rust and the `wasm32-unknown-unknown` target, and no key,
+`./verify.sh` runs every test and compiles the three contracts. It needs Rust and the `wasm32-unknown-unknown` target, and no key,
 no funded account, no Docker and no browser.
 
 ```
