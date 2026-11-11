@@ -1,0 +1,31 @@
+[package]
+name = "ona-desktop"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "ONA desktop app for Windows and Linux (Tauri), on ona-core, serving the phone"
+
+# Not a member of the root workspace. Cargo.lock was seeded from the root one so ona-core's dependencies resolve to
+# the same versions.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+# Every version pinned exactly (team rule); Cargo.lock pins the transitive ones.
+[dependencies]
+ona-core = { path = "../../../crates/ona-core" }
+tauri = { version = "=2.12.5", features = [] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+p256 = { version = "=0.13.2", features = ["ecdsa", "std"] }
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+rand = "=0.8.8"
+qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "debuginfo"

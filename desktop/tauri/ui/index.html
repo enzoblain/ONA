@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ONA</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <header>
+      <h1>Conversations</h1>
+      <button id="new-chat" class="icon" title="Nouvelle conversation" aria-label="Nouvelle conversation">+</button>
+    </header>
+    <ul id="chat-list"></ul>
+    <p id="no-chats" class="empty" hidden>Aucune conversation</p>
+    <button id="phone-button" class="phone-button">
+      <span id="phone-dot" class="dot"></span>
+      <span id="phone-label">Aucun téléphone</span>
+    </button>
+  </aside>
+
+  <main>
+    <div id="mode-banner" class="banner" hidden>Simulation — modèle, web et paiements fictifs (ona-core en mode mock)</div>
+
+    <section id="welcome" class="welcome">
+      <div class="logo"></div>
+      <h2>Que dois-je faire pour vous ?</h2>
+      <p>L'agent travaille sur cet ordinateur. Il demandera votre accord, ici ou sur votre téléphone, avant de contacter quelqu'un ou de payer.</p>
+    </section>
+
+    <section id="conversation" hidden>
+      <header class="conversation-header">
+        <h2 id="chat-title"></h2>
+        <button id="delete-chat" class="ghost danger">Supprimer</button>
+      </header>
+      <div id="items" class="items"></div>
+    </section>
+
+    <form id="composer" class="composer">
+      <textarea id="text" rows="1" maxlength="2000" placeholder="Demandez à l'agent…"></textarea>
+      <button id="send" type="submit" class="send" aria-label="Envoyer">↑</button>
+    </form>
+  </main>
+
+  <dialog id="phone-dialog">
+    <header>
+      <h2>Téléphone</h2>
+      <button id="close-phone" class="ghost">Fermer</button>
+    </header>
+    <div id="phone-body"></div>
+    <section class="connection">
+      <h3>Connexion</h3>
+      <div class="segmented" role="radiogroup">
+        <button data-mode="tor">Par Tor (recommandé)</button>
+        <button data-mode="local">Réseau local (tests)</button>
+      </div>
+      <p id="mode-help" class="help"></p>
+      <p id="reachable" class="mono"></p>
+      <p id="server-error" class="error" hidden></p>
+      <p id="last-request" class="help"></p>
+    </section>
+  </dialog>
+
+  <dialog id="ask-dialog" class="ask">
+    <h2 id="ask-title"></h2>
+    <p id="ask-text" class="help"></p>
+    <div class="actions">
+      <button id="ask-cancel" class="secondary">Annuler</button>
+      <button id="ask-ok" class="primary danger-fill"></button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

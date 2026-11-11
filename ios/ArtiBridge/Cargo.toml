@@ -1,0 +1,39 @@
+[package]
+name = "arti-bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+license = "MIT"
+description = "C ABI around arti-client, linked into the ONA iOS app (Tor spike)"
+
+# Not a member of the root Cargo workspace (the ONA crates): built on its own, for iOS targets.
+[workspace]
+
+[lib]
+# "lib" lets examples/ call the bridge on the Mac (smoke test); iOS links the staticlib.
+crate-type = ["staticlib", "lib"]
+
+# Every version is pinned exactly (team rule). Cargo.lock pins the transitive ones.
+[dependencies]
+arti-client = { version = "=0.48.0", default-features = false, features = [
+    "tokio",
+    "native-tls",
+    "compression",
+    "onion-service-client",
+    "static-sqlite",
+] }
+tor-rtcompat = { version = "=0.48.0", default-features = false, features = ["tokio", "native-tls"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "io-util", "time"] }
+serde_json = "=1.0.154"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "env-filter"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+
+# sysinfo 0.38.4 does not build for iOS; see patches/sysinfo-0.38.4/ONA-PATCH.md.
+[patch.crates-io]
+sysinfo = { path = "patches/sysinfo-0.38.4" }
