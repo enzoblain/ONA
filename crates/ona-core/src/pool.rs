@@ -58,7 +58,21 @@ pub trait PoolChain {
 
     /// Labels every reply, so figures from a fake chain cannot pass for real ones.
     fn mode(&self) -> &'static str;
+
+    /// The final block (`height` = `None`) or the block at `height`, as `(height, hash)`. Needed only when a
+    /// second endpoint is set.
+    fn block(&self, _height: Option<u64>) -> Result<(u64, String), String> {
+        Err("this endpoint cannot read blocks".into())
+    }
+
+    /// A view at the block with this hash. Needed only when a second endpoint is set.
+    fn view_at(&self, _block_hash: &str, _method: &str, _args: Value) -> Result<Value, String> {
+        Err("this endpoint cannot read at a given block".into())
+    }
 }
+
+/// Most blocks the two endpoints' final blocks may be apart, as in `ona-server`'s cross-checked reads.
+pub const MAX_HEIGHT_GAP: u64 = 20;
 
 /// The pool read through a NEAR RPC endpoint, on final blocks.
 pub struct NearPool {
@@ -80,6 +94,42 @@ impl PoolChain for NearPool {
 
     fn mode(&self) -> &'static str {
         crate::remote::REAL_MODE
+    }
+
+    fn block(&self, height: Option<u64>) -> Result<(u64, String), String> {
+        let params = match height {
+            None => json!({"finality": "final"}),
+            Some(h) => json!({"block_id": h}),
+        };
+        let block = self.client.post("block", params).map_err(|e| e.to_string())?;
+        let header = &block["header"];
+        let height = header["height"].as_u64().ok_or("unexpected block reply")?;
+        let hash = header["hash"].as_str().filter(|h| !h.is_empty()).ok_or("unexpected block reply")?;
+        Ok((height, hash.to_string()))
+    }
+
+    fn view_at(&self, block_hash: &str, method: &str, args: Value) -> Result<Value, String> {
+        let result = self
+            .client
+            .post(
+                "query",
+                json!({
+                    "request_type": "call_function", "block_id": block_hash, "account_id": self.pool,
+                    "method_name": method, "args_base64": b64(args.to_string().as_bytes()),
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+        if result["block_hash"].as_str() != Some(block_hash) {
+            return Err(format!("RPC answered {method} for another block"));
+        }
+        let bytes: Vec<u8> = result["result"]
+            .as_array()
+            .ok_or_else(|| format!("view {method} failed"))?
+            .iter()
+            .map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok()))
+            .collect::<Option<_>>()
+            .ok_or_else(|| format!("view {method} returned bytes out of range"))?;
+        serde_json::from_slice(&bytes).map_err(|_| format!("view {method} did not return JSON"))
     }
 }
 
@@ -759,8 +809,10 @@ impl PoolClient {
         let state = self.state()?;
         let now = self.now();
         let (mut spent, mut held, mut waiting) = (0, 0, 0);
-        for n in self.wallet.notes().into_iter().filter(|n| n.status == NoteStatus::Spending) {
-            if self.is_spent(&n.nf)? {
+        let spending: Vec<PoolNote> = self.wallet.notes().into_iter().filter(|n| n.status == NoteStatus::Spending).collect();
+        let block = if spending.is_empty() { None } else { self.agreed_block()? };
+        for n in spending {
+            if self.is_spent(&n.nf, block.as_deref())? {
                 self.wallet.set_note_status(&n.nf, NoteStatus::Spent)?;
                 spent += 1;
             } else if self.wallet.spending_until(&n.nf).is_some_and(|until| now > until.saturating_add(CLOCK_MARGIN_NS)) {
@@ -811,9 +863,14 @@ impl PoolClient {
 
     /// Whether the contract has spent this nullifier, read from both RPC endpoints when a second one is set:
     /// a single endpoint could hide a spend or invent one.
-    fn is_spent(&self, nf: &[u8; 32]) -> Result<bool, String> {
+    fn is_spent(&self, nf: &[u8; 32], block: Option<&str>) -> Result<bool, String> {
+        let args = json!({"nf": b64(nf)});
         let read = |chain: &dyn PoolChain| -> Result<bool, String> {
-            chain.view("is_spent", json!({"nf": b64(nf)}))?.as_bool().ok_or_else(|| "is_spent did not answer a boolean".into())
+            let answer = match block {
+                Some(hash) => chain.view_at(hash, "is_spent", args.clone())?,
+                None => chain.view("is_spent", args.clone())?,
+            };
+            answer.as_bool().ok_or_else(|| "is_spent did not answer a boolean".into())
         };
         let first = read(self.chain.as_ref())?;
         if let Some(second) = &self.second {
@@ -822,6 +879,25 @@ impl PoolClient {
             }
         }
         Ok(first)
+    }
+
+    /// With a second endpoint: the lower of the two final blocks, checked by height on the other endpoint (same
+    /// hash), the two final heights at most `MAX_HEIGHT_GAP` apart. Every read of one recovery is made there.
+    fn agreed_block(&self) -> Result<Option<String>, String> {
+        let Some(second) = &self.second else {
+            return Ok(None);
+        };
+        let a = self.chain.block(None)?;
+        let b = second.block(None)?;
+        let gap = a.0.abs_diff(b.0);
+        if gap > MAX_HEIGHT_GAP {
+            return Err(format!("the two RPC endpoints are {gap} blocks apart, more than {MAX_HEIGHT_GAP}"));
+        }
+        let (low, seen) = if a.0 <= b.0 { (a.clone(), second.block(Some(a.0))?) } else { (b.clone(), self.chain.block(Some(b.0))?) };
+        if seen != low {
+            return Err("the two RPC endpoints disagree on a final block".into());
+        }
+        Ok(Some(low.1))
     }
 
     /// Forgets the new notes of an operation certainly refused: no signature can come for them.

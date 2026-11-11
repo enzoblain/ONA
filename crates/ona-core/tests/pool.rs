@@ -86,6 +86,10 @@ struct FakePool {
     fail: Fail,
     /// Fail on the n-th agent call from now (1 = the next one).
     fail_after: u32,
+    /// The final block height the fake chain reports.
+    height: u64,
+    /// A value every cash tier is shown at instead of its real one, to test absurd figures.
+    shown_cash: Option<u128>,
 }
 
 type Shared = Rc<RefCell<FakePool>>;
@@ -120,7 +124,8 @@ impl PoolChain for Chain {
         match method {
             "get_config" => Ok(json!({"network": NETWORK, "vault_count": f.vaults.len()})),
             "get_cash" => Ok(json!({"tiers": f.cash_keys.iter().zip(CASH).map(|(k, v)| json!({
-                "value": v.to_string(), "pk_raw": raw(k)})).collect::<Vec<_>>(), "liquid": f.cash_liquid.to_string()})),
+                "value": f.shown_cash.unwrap_or(v).to_string(), "pk_raw": raw(k)})).collect::<Vec<_>>(),
+                "liquid": f.cash_liquid.to_string()})),
             "get_vault" => {
                 let v = &f.vaults[args["vault_id"].as_u64().unwrap() as usize];
                 Ok(json!({
@@ -144,6 +149,16 @@ impl PoolChain for Chain {
 
     fn mode(&self) -> &'static str {
         "mock"
+    }
+
+    fn block(&self, height: Option<u64>) -> Result<(u64, String), String> {
+        let h = height.unwrap_or(self.0.borrow().height);
+        Ok((h, format!("block-{h}")))
+    }
+
+    fn view_at(&self, block_hash: &str, method: &str, args: Value) -> Result<Value, String> {
+        self.0.borrow_mut().log.views.push(format!("at {block_hash}"));
+        self.view(method, args)
     }
 }
 
@@ -349,6 +364,8 @@ impl World {
             log: Log::default(),
             fail: Fail::No,
             fail_after: 0,
+            height: 1_000,
+            shown_cash: None,
         }));
         let mut w = Self { core: Core::new(), fake, now: Rc::new(Cell::new(1_000_000_000_000_000_000)), path };
         w.restart();
@@ -645,27 +662,74 @@ fn recovery_holds_an_unspent_note_again_only_after_its_signature_expired() {
     assert_eq!(w.cash_value(), (10 * NEAR).to_string());
 }
 
-/// Answers every view like the real chain, except `is_spent`, which it inverts.
-struct Lying(Shared);
+/// A second endpoint: honest unless told to invert `is_spent`, to report a final block `ahead` blocks later, or
+/// to give another hash for the same height.
+struct Second {
+    fake: Shared,
+    invert: bool,
+    ahead: u64,
+    other_hash: bool,
+}
 
-impl PoolChain for Lying {
+impl PoolChain for Second {
     fn view(&self, method: &str, args: Value) -> Result<Value, String> {
-        let honest = Chain(self.0.clone()).view(method, args)?;
-        Ok(if method == "is_spent" { json!(!honest.as_bool().unwrap()) } else { honest })
+        let honest = Chain(self.fake.clone()).view(method, args)?;
+        Ok(if method == "is_spent" && self.invert { json!(!honest.as_bool().unwrap()) } else { honest })
     }
 
     fn mode(&self) -> &'static str {
         "mock"
     }
+
+    fn block(&self, height: Option<u64>) -> Result<(u64, String), String> {
+        let h = height.unwrap_or(self.fake.borrow().height + self.ahead);
+        Ok((h, if self.other_hash { format!("fork-{h}") } else { format!("block-{h}") }))
+    }
+
+    fn view_at(&self, block_hash: &str, method: &str, args: Value) -> Result<Value, String> {
+        self.fake.borrow_mut().log.views.push(format!("second at {block_hash}"));
+        self.view(method, args)
+    }
 }
 
-#[test]
-fn recovery_refuses_to_decide_when_two_rpc_endpoints_disagree() {
-    let mut w = World::new("two-rpc");
+/// A world whose enter's answer was lost: one note spending on chain, its share notes waiting for signatures.
+fn lost_answer(name: &str) -> World {
+    let mut w = World::new(name);
     w.run(json!({"op": "deposit", "account": "alice.test", "amount": (10 * NEAR).to_string()}));
     w.fail_on(1, Fail::AnswerLost);
     let p = w.prepare(json!({"op": "enter", "vault": 0, "amount": (10 * NEAR).to_string()}));
     w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    w
+}
+
+#[test]
+fn with_two_endpoints_recovery_reads_both_at_one_common_final_block() {
+    let mut w = lost_answer("two-rpc-ok");
+    let second = Second { fake: w.fake.clone(), invert: false, ahead: 5, other_hash: false };
+    set_second(&mut w, second);
+    w.fake.borrow_mut().log.views.clear();
+    let r = w.ok(json!({"cmd": "pool_recover"}));
+    assert_eq!(r["spent"], 1);
+    let views = w.fake.borrow().log.views.clone();
+    assert!(views.contains(&"at block-1000".to_string()), "{views:?}");
+    assert!(views.contains(&"second at block-1000".to_string()), "both read at the lower final block: {views:?}");
+}
+
+#[test]
+fn recovery_refuses_endpoints_too_far_apart_or_on_different_blocks() {
+    let mut w = lost_answer("two-rpc-far");
+    let far = Second { fake: w.fake.clone(), invert: false, ahead: ona_core::pool::MAX_HEIGHT_GAP + 1, other_hash: false };
+    set_second(&mut w, far);
+    let e = w.error(json!({"cmd": "pool_recover"}));
+    assert!(e.contains("blocks apart"), "{e}");
+    let fork = Second { fake: w.fake.clone(), invert: false, ahead: 3, other_hash: true };
+    set_second(&mut w, fork);
+    let e = w.error(json!({"cmd": "pool_recover"}));
+    assert!(e.contains("disagree on a final block"), "{e}");
+    assert_eq!(w.portfolio()["cash"]["spending_value"], (10 * NEAR).to_string(), "nothing decided");
+}
+
+fn set_second(w: &mut World, second: Second) {
     w.core = Core::new();
     let now = w.now.clone();
     let client = PoolClient::new(
@@ -675,8 +739,15 @@ fn recovery_refuses_to_decide_when_two_rpc_endpoints_disagree() {
         POOL,
     )
     .with_clock(Box::new(move || now.get()))
-    .with_second_chain(Box::new(Lying(w.fake.clone())));
+    .with_second_chain(Box::new(second));
     w.core.set_pool(client);
+}
+
+#[test]
+fn recovery_refuses_to_decide_when_two_rpc_endpoints_disagree() {
+    let mut w = lost_answer("two-rpc");
+    let second = Second { fake: w.fake.clone(), invert: true, ahead: 0, other_hash: false };
+    set_second(&mut w, second);
     let e = w.error(json!({"cmd": "pool_recover"}));
     assert!(e.contains("the two RPC endpoints disagree"), "{e}");
     assert_eq!(w.portfolio()["cash"]["spending_value"], (10 * NEAR).to_string(), "nothing decided on one endpoint's word");
@@ -746,6 +817,22 @@ fn an_absurd_figure_from_the_contract_is_an_error_not_a_crash() {
     let e = w.error(json!({"cmd": "pool_prepare", "op": "exit", "from": 0, "amount": "all"}));
     assert!(e.contains("too large"), "{e}");
     let e = w.error(json!({"cmd": "pool_portfolio"}));
+    assert!(e.contains("too large"), "{e}");
+}
+
+#[test]
+fn a_sum_of_values_that_overflows_is_an_error_not_a_crash() {
+    // Each note on its own fits in 128 bits; the cost of entering three of them does not.
+    let mut w = World::new("overflow-sum");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (30 * NEAR).to_string()}));
+    {
+        let mut f = w.fake.borrow_mut();
+        f.shown_cash = Some(u128::MAX / 2);
+        let v = &mut f.vaults[1];
+        v.liquid = u128::MAX / 2;
+        v.total_shares = 1_000_000;
+    }
+    let e = w.error(json!({"cmd": "pool_prepare", "op": "enter", "vault": 1, "amount": "all"}));
     assert!(e.contains("too large"), "{e}");
 }
 

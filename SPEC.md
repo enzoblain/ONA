@@ -551,7 +551,9 @@ note kept by the wallet is paid by the contract.
   past its signature's deadline (a margin for this computer's clock running ahead of the chain's) → held again; otherwise it keeps
   waiting. Then it asks the agent for the blind signatures of every note still waiting for one, and keeps those that check. When the
   agent cannot be reached it still reports what the chain told and lists the notes that wait (`agent_error`). With a second RPC
-  endpoint (`ONA_RPC_URL_2`) each `is_spent` must agree on both, or nothing is decided; with one, that endpoint is trusted (a lying
+  endpoint (`ONA_RPC_URL_2`) recovery agrees on one final block as `ona-server`'s cross-checked reads do (the lower final block,
+  same hash on the other endpoint at that height, heights at most 20 apart) and reads each `is_spent` on both at that block by
+  `block_id`; any difference decides nothing; with one, that endpoint is trusted (a lying
   one can have a spent note held again, which the contract then refuses, or an unspent note marked spent, its value lost to the
   wallet). `is_spent` names a nullifier to the RPC endpoint: a spent one is public anyway, an unspent one says something about a
   later spend.

@@ -87,8 +87,10 @@ Reply: `spent`, `held_again`, `still_spending`, `signatures_recovered`, `awaitin
 each note still waiting for a signature). If the agent cannot be reached, the reply is still a success with what the chain told,
 plus `agent_error`.
 
-With a second RPC endpoint (`ONA_RPC_URL_2`, run by another operator), each `is_spent` is read from both, and a disagreement is an
-error that decides nothing. With one endpoint only, that endpoint is trusted: a lying endpoint could make a spent note look unspent
+With a second RPC endpoint (`ONA_RPC_URL_2`, run by another operator), recovery first agrees on one final block: the lower of the
+two endpoints' final blocks, which the other endpoint must report with the same hash at that height, the two final heights at most
+20 blocks apart. Each `is_spent` is then read from both endpoints at that block, and a disagreement is an error that decides
+nothing. With one endpoint only, that endpoint is trusted: a lying endpoint could make a spent note look unspent
 (it is then held again after its deadline, and the contract refuses it if used) or an unspent note look spent (it is then marked
 spent, and its value is lost to the wallet). `is_spent` names a nullifier to the endpoint: a spent nullifier is public anyway;
 asking about one that is not spent yet tells the endpoint something about a later spend.
