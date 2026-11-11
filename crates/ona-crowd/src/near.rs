@@ -176,6 +176,10 @@ impl Chain for NearChain {
         Self::require(outcome, "withdrawal")
     }
 
+    fn accrue(&mut self, vault: &Vault, _amount: u64) -> Result<()> {
+        bail!("simulated yield cannot be played on a chain (vault {})", vault.contract)
+    }
+
     fn pay(&mut self, to: &str, denomination: u64) -> Result<()> {
         let amount = self.yocto(denomination);
         let outcome = self.agent.send(&self.settings.agent_account, to, vec![Action::Transfer(amount)])?;

@@ -60,7 +60,7 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-token` blind BLS tokens | done | native tests |
 | `ona-mint` contract | done, gas measured ([SPEC](SPEC.md#measured-gas)) | mocked NEAR VM with real BLS and ed25519 host functions, and a local NEAR node |
 | `ona-registry` contract | done | mocked NEAR VM only |
-| `ona-pool` contract: listed staking vaults, share notes, exits only to depositors, 7-day escape | done, never deployed, lending not implemented | mocked NEAR VM only, never against a real staking pool |
+| `ona-pool` contract: listed staking vaults, share notes, switching vaults without an exit, exits only to depositors, 7-day escape | done, never deployed, lending not implemented | mocked NEAR VM only, never against a real staking pool |
 | `ona-crowd` crowd simulator for the pool demo | simulation and vault-privacy measure done; the NEAR runner has never run | in-memory chain only |
 | `ona-anchor` hourly journal anchoring, auditor key sealing in `ona-core` | library done, no program receives leaves yet | fake registry only, never on a NEAR node |
 | `ona-deploy` deployment tool | done, refuses mainnet, testnet not tried yet | unit tests |

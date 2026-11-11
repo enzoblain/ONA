@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use ona_crowd::chain::{execute, Chain};
 use ona_crowd::near::{check_settings, NearChain, NearSettings};
-use ona_crowd::parades::{compare, scenarios, table};
+use ona_crowd::parades::{compare, scenarios, table, yield_scenarios};
 use ona_crowd::{privacy, simulate, simulate_secret, write_keys, Config, EventKind, Simulation};
 use ona_near::load_account_key;
 use rand::rngs::OsRng;
@@ -70,18 +70,36 @@ fn write_outputs(sim: &Simulation, config: &Config, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_parades(config_path: &str, seeds: &str) -> Result<()> {
+fn run_comparison(config_path: &str, seeds: &str, yield_study: bool) -> Result<()> {
     let config = read_config(config_path)?;
     let seeds: u64 = seeds.parse().map_err(|_| anyhow!("seeds must be a number"))?;
     let rules = &config.agent;
-    let set = scenarios(
-        if rules.reserve_percent == 0 { 20 } else { rules.reserve_percent },
-        if rules.settlement_period_secs == 0 { 1800 } else { rules.settlement_period_secs },
-        if rules.noise_moves_per_hour == 0 { 12 } else { rules.noise_moves_per_hour },
-    );
-    let rows = compare(&config, &set, seeds)?;
+    let reserve = if rules.reserve_percent == 0 { 20 } else { rules.reserve_percent };
+    let period = if rules.settlement_period_secs == 0 { 1800 } else { rules.settlement_period_secs };
+    let noise = if rules.noise_moves_per_hour == 0 { 12 } else { rules.noise_moves_per_hour };
+    let set = if yield_study {
+        if !config.has_yield() {
+            return Err(anyhow!("the yield study needs yield_bp_per_hour in the configuration"));
+        }
+        yield_scenarios(reserve, period)
+    } else {
+        scenarios(reserve, period, noise)
+    };
+    let mut base = config.clone();
+    // Countermeasures come from the scenarios only.
+    base.agent.reserve_percent = 0;
+    base.agent.settlement_period_secs = 0;
+    base.agent.noise_moves_per_hour = 0;
+    base.agent.min_active_per_settlement = 0;
+    let rows = compare(&base, &set, seeds)?;
     print!("{}", table(&rows));
-    println!("\n{} users, {} vaults, seeds 1 to {seeds}. * = per-account bound only (no joint assignment).", config.users, config.vaults.len());
+    let failures: usize = rows.iter().map(|r| r.replay_failures).sum();
+    println!("\nSampled states that failed to replay the public timeline: {failures} (must be 0).");
+    println!(
+        "\n{} users, {} vaults, seeds 1 to {seeds}. * = per-account bound only (no joint assignment).",
+        config.users,
+        config.vaults.len()
+    );
     Ok(())
 }
 
@@ -102,6 +120,9 @@ fn run_on_near(config_path: &str, dir: &str) -> Result<()> {
         unit_yocto: env_number::<u128>("ONA_CROWD_UNIT_MILLI_NEAR", 100)? * MILLI_NEAR,
     };
     check_settings(&settings, &config.vaults)?;
+    if config.has_yield() {
+        return Err(anyhow!("yield_bp_per_hour is for simulation only: a real chain pays its own yield"));
+    }
     config.mint_account = settings.mint.clone();
     config.agent.account = settings.agent_account.clone();
     let speed: u64 = env_number("ONA_CROWD_SPEED", 1)?;
@@ -144,10 +165,12 @@ fn main() {
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["simulate", config, dir] => run_offline(config, dir),
         ["run", config, dir] => run_on_near(config, dir),
-        ["parades", config] => run_parades(config, "10"),
-        ["parades", config, seeds] => run_parades(config, seeds),
+        ["parades", config] => run_comparison(config, "10", false),
+        ["parades", config, seeds] => run_comparison(config, seeds, false),
+        ["yield", config] => run_comparison(config, "10", true),
+        ["yield", config, seeds] => run_comparison(config, seeds, true),
         _ => Err(anyhow!(
-            "usage: ona-crowd simulate <config.json> <out-dir> | ona-crowd run <config.json> <out-dir> | ona-crowd parades <config.json> [seeds]"
+            "usage: ona-crowd simulate <config.json> <out-dir> | run <config.json> <out-dir> | parades <config.json> [seeds] | yield <config.json> [seeds]"
         )),
     };
     if let Err(e) = result {

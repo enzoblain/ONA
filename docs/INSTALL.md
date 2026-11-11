@@ -115,7 +115,9 @@ cargo run -p ona-deploy -- pool
 The pool starts with no vault. The guardian then lists each staking pool with `add_vault`, giving the SHA-256 of the code it checked
 there and one share-note key per tier; creating and holding those keys for the agent is not built yet. Lending vaults are refused.
 A new vault or agent takes effect only after the admin delay, and anyone can leave in the meantime. Depositors pay the pool through
-its `deposit` method, at least 0.1 NEAR; a plain transfer is never credited to anyone.
+its `deposit` method, at least 0.1 NEAR; a plain transfer is never credited to anyone. A holder can move notes to another listed
+vault without an exit (`switch_vault`, submitted by the agent); the agent then moves the funds inside the pool with `settle_switch`.
+Nothing new to configure.
 
 ## Run the signer
 
@@ -209,10 +211,12 @@ the notes of its members. The figures are an upper bound on privacy: the elimina
 observer can remove more. Accounts never placed are counted apart. A fixed seed lets anyone rebuild every key and the ground truth,
 so it is for demos and tests only.
 
-`ona-crowd parades crowd.json [seeds]` compares the agent without countermeasures to a liquid reserve, net settlement at fixed times,
-rebalancing noise, and their combinations, over seeds 1 to 10 by default. Results and how to read them are in
-[crates/ona-crowd/PARADES.md](../crates/ona-crowd/PARADES.md): without countermeasures the vault of most users can be deduced, and only
-the three together bring simple timing guesses near blind guessing.
+`ona-crowd parades crowd.json [seeds]` compares the agent without countermeasures to a liquid reserve, net settlement, noise,
+separate accounting, steady withdrawals and vault switching, over seeds 1 to 10 by default. `ona-crowd yield crowd.json [seeds]`
+compares pooled and individual yield and suggestions; the configuration must give `yield_bp_per_hour`. Both add a Bayesian measure
+(sampled assignments) to the elimination bound. Results and how to read them are in
+[crates/ona-crowd/PARADES.md](../crates/ona-crowd/PARADES.md): varied deposit amounts are the main leak, and simulated yield cannot be
+played on a chain.
 
 `ona-crowd run crowd.json out/` also plays the timeline on a local node or testnet. **It has never run.** It ignores the configured
 seed and draws a secret one from the system, never stored. It refuses mainnet, by name and by the chain id the node reports, and

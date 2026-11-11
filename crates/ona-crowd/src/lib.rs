@@ -4,23 +4,25 @@
 //! a seed, gives each a behaviour (when they deposit, which notes, which vault, how long they stay,
 //! full or partial exit) and runs the agent rules of the pool over them.
 //!
-//! Exits go back only to the account that deposited. How
-//! much each account puts in and takes out is public. What stays private is which vault each user
-//! chose and when the agent placed for them. The outputs are:
+//! Exits go back only to the account that deposited. How much each account puts in and takes out is
+//! public. What stays private is which vault each user chose and when the agent placed for them.
+//! The outputs are:
 //! - the public timeline: only what the chain shows (deposits on the mint, the agent's placements and
-//!   withdrawals, exit payments), with no link between a user and a vault;
+//!   withdrawals, rewards credited in vaults, exit payments), with no link between a user and a vault;
 //! - the ground truth, kept apart, which holds that link so the privacy can be measured.
 //!
-//! The simulation models no yield: what is placed comes back unchanged, so an account's exits are
-//! capped by its deposits. Times are seconds from the start of the run, amounts are whole units of
-//! the asset.
+//! Yield is off unless configured; an account's exits are capped by its deposits plus its gains.
+//! Times are seconds from the start of the run, amounts are whole units of the asset.
 
 pub mod chain;
 mod measure;
 pub mod near;
 pub mod parades;
 
-pub use measure::{candidates, guesses, privacy, Candidates, Guesses, Privacy, Sizes};
+pub use measure::{
+    candidates, guesses, posterior, posterior_from, privacy, yield_guess, Candidates, Guesses, Posterior, Privacy,
+    Sizes, TrueRoute,
+};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -81,6 +83,14 @@ pub struct AgentRules {
     /// With net settlement, 0 = off: a settlement runs only once at least this many requests were
     /// placed or left since the last one; otherwise it waits for the next period.
     pub min_active_per_settlement: usize,
+    /// With net settlement, 0 = off: every this many seconds the agent withdraws a small fixed amount
+    /// from each vault, whatever the exits; the next settlement puts back what is not needed.
+    pub steady_withdrawal_period_secs: u64,
+    /// Units withdrawn from each vault at each steady withdrawal.
+    pub steady_withdrawal_units: u64,
+    /// With net settlement, 0 = off: chance, in percent, that a user moves to another vault while
+    /// placed, without leaving. The move is folded into the next net settlement.
+    pub switch_percent: u8,
 }
 
 impl AgentRules {
@@ -107,6 +117,9 @@ impl Default for AgentRules {
             settlement_period_secs: 0,
             noise_moves_per_hour: 0,
             min_active_per_settlement: 0,
+            steady_withdrawal_period_secs: 0,
+            steady_withdrawal_units: 10,
+            switch_percent: 0,
         }
     }
 }
@@ -135,6 +148,28 @@ pub struct Config {
     /// The agent acts until this time. Requests still waiting then are left as they are.
     pub run_secs: u64,
     pub agent: AgentRules,
+    /// Popularity of each vault, in the order of `vaults`. Empty: all equally chosen.
+    pub vault_weights: Vec<u32>,
+    /// Chance, in percent, that a user accepts a suggestion to switch to the most popular vault of
+    /// the same kind.
+    pub suggestion_percent: u8,
+    /// Yield of each vault in basis points per hour, in the order of `vaults`. Empty: no yield.
+    /// Demo values, accelerated: real rates are per year.
+    pub yield_bp_per_hour: Vec<u32>,
+    pub yield_mode: YieldMode,
+    /// Gains are paid in whole notes at a random moment within this many seconds after the exit.
+    /// What whole notes cannot make stays in the pool.
+    pub gain_delay_secs: u64,
+}
+
+/// How a user's gain is computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum YieldMode {
+    /// At the rate of the user's own vault.
+    Individual,
+    /// At the pool's average rate, weighted by what each vault holds for requests at the exit.
+    Pooled,
 }
 
 impl Default for Config {
@@ -153,7 +188,32 @@ impl Default for Config {
             partial_exit_percent: 30,
             run_secs: 3 * 3600,
             agent: AgentRules::default(),
+            vault_weights: Vec::new(),
+            suggestion_percent: 0,
+            yield_bp_per_hour: Vec::new(),
+            yield_mode: YieldMode::Individual,
+            gain_delay_secs: 3600,
         }
+    }
+}
+
+impl Config {
+    /// Yield of one vault, in basis points per hour.
+    pub fn yield_of(&self, vault: usize) -> u64 {
+        self.yield_bp_per_hour.get(vault).copied().map_or(0, u64::from)
+    }
+
+    pub fn has_yield(&self) -> bool {
+        self.yield_bp_per_hour.iter().any(|&y| y > 0)
+    }
+
+    /// The most popular vault of the same kind as `vault` (lowest index on a tie).
+    pub fn most_popular_like(&self, vault: usize) -> usize {
+        let weight = |v: usize| self.vault_weights.get(v).copied().unwrap_or(1);
+        (0..self.vaults.len())
+            .filter(|&v| self.vaults[v].kind == self.vaults[vault].kind)
+            .max_by_key(|&v| (weight(v), std::cmp::Reverse(v)))
+            .unwrap_or(vault)
     }
 }
 
@@ -219,6 +279,33 @@ impl Config {
         if self.agent.noise_moves_per_hour > 0 && self.vaults.len() < 2 {
             bail!("noise needs at least two vaults");
         }
+        let settles = self.agent.settlement_period_secs > 0;
+        if self.agent.steady_withdrawal_period_secs > 0 && (!settles || self.agent.steady_withdrawal_units == 0) {
+            bail!("steady withdrawals need net settlement and a positive amount");
+        }
+        if self.agent.switch_percent > 0 && (!settles || self.vaults.len() < 2) {
+            bail!("switching vaults needs net settlement and at least two vaults");
+        }
+        if self.agent.switch_percent > 100 {
+            bail!("switch_percent is above 100");
+        }
+        for (name, len) in [("vault_weights", self.vault_weights.len()), ("yield_bp_per_hour", self.yield_bp_per_hour.len())] {
+            if len != 0 && len != self.vaults.len() {
+                bail!("{name} must give one value per vault");
+            }
+        }
+        if !self.vault_weights.is_empty() && self.vault_weights.iter().all(|&w| w == 0) {
+            bail!("vault_weights must not all be zero");
+        }
+        if self.suggestion_percent > 100 {
+            bail!("suggestion_percent is above 100");
+        }
+        if self.yield_bp_per_hour.iter().any(|&y| y > 10_000) {
+            bail!("yield_bp_per_hour must be at most 10000");
+        }
+        if self.has_yield() && self.gain_delay_secs == 0 {
+            bail!("gain_delay_secs must be positive");
+        }
         Ok(())
     }
 }
@@ -259,9 +346,21 @@ pub struct Profile {
     pub deposit_at: u64,
     pub notes: Vec<Notes>,
     pub request_at: u64,
+    /// The vault the user first wanted, before any suggestion.
+    pub wanted_vault: usize,
+    /// The vault the request names.
     pub vault: usize,
     pub exit_at: u64,
     pub exit_notes: Vec<Notes>,
+    /// A move to another vault while placed, if the user makes one.
+    pub switch: Option<Switch>,
+}
+
+/// A move to vault `to`, from time `at` on (once placed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Switch {
+    pub at: u64,
+    pub to: usize,
 }
 
 impl Profile {
@@ -281,6 +380,9 @@ pub enum EventKind {
     Placement,
     Withdrawal,
     ExitPayment,
+    /// Rewards credited to the agent's position in a vault (`from`). Vault rates are public. Not in
+    /// whole notes.
+    Yield,
 }
 
 /// What the chain shows. Nothing here names a request or links a user to a vault.
@@ -302,7 +404,10 @@ pub struct PublicEvent {
 pub struct RequestTruth {
     pub user: usize,
     pub account: String,
+    /// The vault the request ends in (after a switch, if any).
     pub vault: String,
+    /// The vault the request was first placed in.
+    pub first_vault: String,
     pub profile: Profile,
     pub placed_at: Option<u64>,
     pub withdrawn_at: Option<u64>,
@@ -310,12 +415,23 @@ pub struct RequestTruth {
     /// Batches shared with other requests.
     pub placement_events: Vec<usize>,
     pub withdrawal_events: Vec<usize>,
+    /// Every payment to the account: the notes taken out, then any gain.
     pub payment_events: Vec<usize>,
+    /// Gain earned, before cutting into notes.
+    pub gain: u64,
+    /// Part of the gain paid in whole notes.
+    pub gain_paid: u64,
+    /// Gain the user would have earned in the vault first wanted, at its own rate.
+    pub wanted_gain: u64,
+    /// When the request moved to its final vault, if it switched.
+    pub switched_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Truth {
     pub requests: Vec<RequestTruth>,
+    /// Moments a net settlement ran (with or without moves to show).
+    pub settlements: Vec<u64>,
 }
 
 pub struct Simulation {
@@ -346,7 +462,26 @@ fn draw_profile(config: &Config, rng: &mut ChaCha20Rng) -> Profile {
         notes.push(Notes { denomination, count });
     }
     let request_at = deposit_at + rng.gen_range(0..=config.request_delay_max_secs);
-    let vault = rng.gen_range(0..config.vaults.len());
+    let wanted_vault = if config.vault_weights.is_empty() {
+        rng.gen_range(0..config.vaults.len())
+    } else {
+        let total: u32 = config.vault_weights.iter().sum();
+        let mut pick = rng.gen_range(0..total);
+        config.vault_weights.iter().position(|&w| {
+            if pick < w {
+                true
+            } else {
+                pick -= w;
+                false
+            }
+        })
+        .unwrap_or(0)
+    };
+    let vault = if config.suggestion_percent > 0 && rng.gen_range(0..100u8) < config.suggestion_percent {
+        config.most_popular_like(wanted_vault)
+    } else {
+        wanted_vault
+    };
     let exit_at = request_at + rng.gen_range(config.stay_min_secs..=config.stay_max_secs);
 
     let total = total_notes(&notes);
@@ -366,7 +501,17 @@ fn draw_profile(config: &Config, rng: &mut ChaCha20Rng) -> Profile {
     } else {
         notes.clone()
     };
-    Profile { deposit_at, notes, request_at, vault, exit_at, exit_notes }
+    let switch = if config.agent.switch_percent > 0 && rng.gen_range(0..100u8) < config.agent.switch_percent {
+        let at = request_at + rng.gen_range(0..=exit_at - request_at);
+        let mut to = rng.gen_range(0..config.vaults.len() - 1);
+        if to >= vault {
+            to += 1;
+        }
+        Some(Switch { at, to })
+    } else {
+        None
+    };
+    Profile { deposit_at, notes, request_at, wanted_vault, vault, exit_at, exit_notes, switch }
 }
 
 struct Pending {
@@ -385,6 +530,10 @@ struct State {
     placements: Vec<usize>,
     withdrawals: Vec<usize>,
     payments: Vec<usize>,
+    gain: u64,
+    gain_paid: u64,
+    wanted_gain: u64,
+    switched_at: Option<u64>,
 }
 
 /// Adds one event per denomination of a batch, summing the notes of its requests.
@@ -546,6 +695,10 @@ fn simulate_with(config: &Config, mut rng: ChaCha20Rng) -> Result<Simulation> {
                 placements: Vec::new(),
                 withdrawals: Vec::new(),
                 payments: Vec::new(),
+                gain: 0,
+                gain_paid: 0,
+                wanted_gain: 0,
+                switched_at: None,
             }
         })
         .collect();
@@ -562,6 +715,10 @@ fn simulate_with(config: &Config, mut rng: ChaCha20Rng) -> Result<Simulation> {
     let mut returns: Vec<NoiseReturn> = Vec::new();
     let mut seq = 0usize;
     let mut active_since_settlement = 0usize;
+    // The vault each request is in now; differs from `profile.vault` only after a switch.
+    let mut current: Vec<usize> = profiles.iter().map(|p| p.vault).collect();
+    let mut pending_yield: Vec<u64> = vec![0; vault_count];
+    let mut settlements: Vec<u64> = Vec::new();
     let last_tick = config.run_secs + 4 * rules.settlement_period_secs.max(3600) + rules.exit_window_secs;
     let mut t = 0;
     loop {
@@ -576,8 +733,20 @@ fn simulate_with(config: &Config, mut rng: ChaCha20Rng) -> Result<Simulation> {
             }
         }
         let acting = t <= config.run_secs;
+        // Switches: the request now belongs to another vault; the next settlement moves the funds.
+        for (i, p) in profiles.iter().enumerate() {
+            let Some(s) = p.switch else { continue };
+            if current[i] != s.to && t >= s.at && states[i].placed_at.is_some_and(|at| at < t) && states[i].withdrawn_at.is_none() {
+                let amount = notes_amount(&p.notes);
+                owed[current[i]] -= amount;
+                owed[s.to] += amount;
+                current[i] = s.to;
+                states[i].switched_at = Some(t);
+                active_since_settlement += 1;
+            }
+        }
         for (v, vault) in config.vaults.iter().enumerate().filter(|_| acting) {
-            let in_vault = |i: &usize| profiles[*i].vault == v;
+            let in_vault = |i: &usize| current[*i] == v;
             let placeable: Vec<usize> = (0..users.len())
                 .filter(in_vault)
                 .filter(|&i| states[i].placed_at.is_none() && profiles[i].request_at + rules.min_wait_secs <= t)
@@ -638,18 +807,63 @@ fn simulate_with(config: &Config, mut rng: ChaCha20Rng) -> Result<Simulation> {
                     continue;
                 }
                 withdraw_at[v] = None;
+                // Yield: the vault credits what these requests earned at its own rate; each user gets
+                // a gain at its vault's rate or at the pool's average rate.
+                let mut earned_here = 0;
+                if config.has_yield() {
+                    let held: u64 = owed.iter().sum();
+                    let pooled_bp = if held == 0 {
+                        0
+                    } else {
+                        (0..vault_count).map(|w| u128::from(owed[w]) * u128::from(config.yield_of(w))).sum::<u128>()
+                            / u128::from(held)
+                    };
+                    for &i in &leaving {
+                        let p = &profiles[i];
+                        let principal = u128::from(notes_amount(&p.exit_notes));
+                        let duration = u128::from(t - states[i].placed_at.unwrap_or(t));
+                        let at_rate = |bp: u128| (principal * bp * duration / 36_000_000) as u64;
+                        let earned = at_rate(u128::from(config.yield_of(v)));
+                        earned_here += earned;
+                        states[i].gain = match config.yield_mode {
+                            YieldMode::Individual => earned,
+                            YieldMode::Pooled => at_rate(pooled_bp),
+                        };
+                        states[i].wanted_gain = at_rate(u128::from(config.yield_of(p.wanted_vault)));
+                    }
+                    if earned_here > 0 && !rules.direct_placement() {
+                        // With net settlement, rewards are credited with the next settlement, like
+                        // every other move, so they do not date an exit.
+                        pending_yield[v] += earned_here;
+                    } else if earned_here > 0 {
+                        funds.vaults[v] += earned_here;
+                        events.push(Pending {
+                            at: t,
+                            kind: EventKind::Yield,
+                            from: vault.contract.clone(),
+                            to: rules.account.clone(),
+                            denomination: earned_here,
+                            count: 1,
+                        });
+                    }
+                }
                 owed[v] -= total;
                 active_since_settlement += leaving.len();
                 let ids = if rules.direct_exit() {
                     funds.move_out(v, total);
-                    batch_events(
+                    let ids = batch_events(
                         &mut events,
                         t,
                         EventKind::Withdrawal,
                         &vault.contract,
                         &rules.account,
                         leaving.iter().flat_map(|&i| profiles[i].exit_notes.clone()),
-                    )
+                    );
+                    // The yield leaves with the principal, as far as whole notes can carry it.
+                    let harvest = funds.cut_down(earned_here);
+                    funds.move_out(v, harvest);
+                    funds.emit(&mut events, t, EventKind::Withdrawal, &vault.contract, &rules.account, harvest);
+                    ids
                 } else {
                     Vec::new()
                 };
@@ -671,6 +885,18 @@ fn simulate_with(config: &Config, mut rng: ChaCha20Rng) -> Result<Simulation> {
                                 });
                                 states[i].payments.push(events.len() - 1);
                             } else {
+                                queue.push(QueuedPayment { due, seq, user: i, denomination: n.denomination });
+                                seq += 1;
+                            }
+                        }
+                    }
+                    // The gain follows later, in whole notes, from the agent's liquid funds.
+                    if states[i].gain > 0 {
+                        let notes = funds.cut(states[i].gain);
+                        states[i].gain_paid = notes_amount(&notes);
+                        for n in notes {
+                            for _ in 0..n.count {
+                                let due = t + rng.gen_range(1..=config.gain_delay_secs);
                                 queue.push(QueuedPayment { due, seq, user: i, denomination: n.denomination });
                                 seq += 1;
                             }
@@ -718,11 +944,36 @@ fn simulate_with(config: &Config, mut rng: ChaCha20Rng) -> Result<Simulation> {
             }
         }
 
+        // Steady withdrawals: a small fixed amount from every vault at a fixed pace, whatever the exits.
+        let steady = rules.steady_withdrawal_period_secs;
+        if acting && steady > 0 && t > 0 && t % steady == 0 {
+            for (v, vault) in config.vaults.iter().enumerate() {
+                let moved = funds.cut_down(rules.steady_withdrawal_units.min(funds.vaults[v]));
+                funds.move_out(v, moved);
+                funds.emit(&mut events, t, EventKind::Withdrawal, &vault.contract, agent, moved);
+            }
+        }
+
         // Net settlement: each vault is brought to what it owes, less the reserve, plus noise on loan.
         let period = rules.settlement_period_secs;
         let busy_enough = active_since_settlement >= rules.min_active_per_settlement || t > config.run_secs;
-        if period > 0 && t > 0 && t % period == 0 && busy_enough {
+        if period > 0 && t > 0 && t.is_multiple_of(period) && busy_enough {
             active_since_settlement = 0;
+            settlements.push(t);
+            for (v, vault) in config.vaults.iter().enumerate() {
+                let credited = std::mem::take(&mut pending_yield[v]);
+                if credited > 0 {
+                    funds.vaults[v] += credited;
+                    events.push(Pending {
+                        at: t,
+                        kind: EventKind::Yield,
+                        from: vault.contract.clone(),
+                        to: agent.to_string(),
+                        denomination: credited,
+                        count: 1,
+                    });
+                }
+            }
             let desired: Vec<u64> = (0..vault_count)
                 .map(|v| {
                     let kept = funds.cut_down(owed[v] * (100 - u64::from(rules.reserve_percent)) / 100);
@@ -746,10 +997,10 @@ fn simulate_with(config: &Config, mut rng: ChaCha20Rng) -> Result<Simulation> {
         }
 
         // Exits paid from the reserve, refilled from the fullest vault when it runs short.
-        if !rules.direct_exit() {
+        if !rules.direct_exit() || !queue.is_empty() {
             queue.sort_by_key(|p| (p.due, p.seq));
             let due_now: u64 = queue.iter().filter(|p| p.due <= t).map(|p| p.denomination).sum();
-            if period == 0 && due_now > funds.available() {
+            if !rules.direct_exit() && period == 0 && due_now > funds.available() {
                 let reserve = (funds.liquid + funds.vaults.iter().sum::<u64>()) * u64::from(rules.reserve_percent) / 100;
                 if let Some(v) = (0..vault_count).max_by_key(|&v| (funds.vaults[v], std::cmp::Reverse(v))) {
                     let wanted = due_now - funds.available() + reserve;
@@ -810,17 +1061,22 @@ fn simulate_with(config: &Config, mut rng: ChaCha20Rng) -> Result<Simulation> {
         .map(|((s, profile), u)| RequestTruth {
             user: u.index,
             account: u.account(),
-            vault: config.vaults[profile.vault].contract.clone(),
+            vault: config.vaults[current[u.index]].contract.clone(),
+            first_vault: config.vaults[profile.vault].contract.clone(),
             placed_at: s.placed_at,
             withdrawn_at: s.withdrawn_at,
             deposit_events: remap(&s.deposits),
             placement_events: remap(&s.placements),
             withdrawal_events: remap(&s.withdrawals),
             payment_events: remap(&s.payments),
+            gain: s.gain,
+            switched_at: s.switched_at,
+            gain_paid: s.gain_paid,
+            wanted_gain: s.wanted_gain,
             profile,
         })
         .collect();
-    Ok(Simulation { users, timeline, truth: Truth { requests } })
+    Ok(Simulation { users, timeline, truth: Truth { requests, settlements } })
 }
 
 

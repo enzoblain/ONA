@@ -15,10 +15,19 @@ pub trait Chain {
     fn place(&mut self, vault: &Vault, denomination: u64, count: u32) -> Result<()>;
     fn withdraw(&mut self, vault: &Vault, denomination: u64, count: u32) -> Result<()>;
     fn pay(&mut self, to: &str, denomination: u64) -> Result<()>;
+    /// Rewards a vault credits to the agent's position. Only a simulated chain can create them.
+    fn accrue(&mut self, vault: &Vault, amount: u64) -> Result<()>;
 }
 
 /// Checks that an event only carries whole notes of a listed denomination, as every event must.
+/// Yield credited inside a vault is the one exception: rewards are not cut into notes.
 pub fn check_event(config: &Config, event: &PublicEvent) -> Result<()> {
+    if event.kind == EventKind::Yield {
+        if event.count != 1 || event.amount != event.denomination || event.amount == 0 {
+            bail!("event {} is a malformed yield", event.id);
+        }
+        return Ok(());
+    }
     if !config.denominations.contains(&event.denomination) {
         bail!("event {} uses an unlisted denomination {}", event.id, event.denomination);
     }
@@ -35,13 +44,20 @@ pub fn check_event(config: &Config, event: &PublicEvent) -> Result<()> {
 }
 
 /// Exits only go back to an account that deposited, and never above what it deposited at that
-/// moment. The cap is deposits plus gains; the simulation models no gains, so it is the deposits.
-pub fn check_exit_caps(timeline: &[PublicEvent]) -> Result<()> {
-    let mut balance: BTreeMap<&str, u64> = BTreeMap::new();
+/// moment plus its gains. `gains` gives each account's gain; accounts left out earned nothing.
+pub fn check_exit_caps(timeline: &[PublicEvent], gains: &BTreeMap<String, u64>) -> Result<()> {
+    let mut balance: BTreeMap<&str, u64> = gains.iter().map(|(a, g)| (a.as_str(), *g)).collect();
+    let mut deposited = std::collections::BTreeSet::new();
     for e in timeline {
         match e.kind {
-            EventKind::Deposit => *balance.entry(e.from.as_str()).or_default() += e.amount,
+            EventKind::Deposit => {
+                deposited.insert(e.from.as_str());
+                *balance.entry(e.from.as_str()).or_default() += e.amount;
+            }
             EventKind::ExitPayment => {
+                if !deposited.contains(e.to.as_str()) {
+                    bail!("event {} pays an account that never deposited", e.id);
+                }
                 let held = balance.get_mut(e.to.as_str()).ok_or_else(|| anyhow!("event {} pays an account that never deposited", e.id))?;
                 *held = held.checked_sub(e.amount).ok_or_else(|| anyhow!("event {} pays more than the account deposited", e.id))?;
             }
@@ -57,7 +73,8 @@ pub fn execute(sim: &Simulation, config: &Config, chain: &mut dyn Chain, wait: &
     for event in &sim.timeline {
         check_event(config, event)?;
     }
-    check_exit_caps(&sim.timeline)?;
+    let gains: BTreeMap<String, u64> = sim.truth.requests.iter().map(|r| (r.account.clone(), r.gain_paid)).collect();
+    check_exit_caps(&sim.timeline, &gains)?;
     let by_account: BTreeMap<String, &FakeUser> = sim.users.iter().map(|u| (u.account(), u)).collect();
     let mut owed: BTreeMap<&str, (u64, u64, u64)> = BTreeMap::new();
     for e in sim.timeline.iter().filter(|e| e.kind == EventKind::Deposit) {
@@ -85,6 +102,7 @@ pub fn execute(sim: &Simulation, config: &Config, chain: &mut dyn Chain, wait: &
             EventKind::Placement => chain.place(vault(&e.to)?, e.denomination, e.count)?,
             EventKind::Withdrawal => chain.withdraw(vault(&e.from)?, e.denomination, e.count)?,
             EventKind::ExitPayment => chain.pay(&e.to, e.denomination)?,
+            EventKind::Yield => chain.accrue(vault(&e.from)?, e.amount)?,
         }
     }
     Ok(())
@@ -141,6 +159,11 @@ impl Chain for MemoryChain {
         take(&mut self.reserve, denomination, "reserve")?;
         *self.balances.entry(to.to_string()).or_default() += denomination;
         self.operations += 1;
+        Ok(())
+    }
+
+    fn accrue(&mut self, vault: &Vault, amount: u64) -> Result<()> {
+        *self.vaults.entry(vault.contract.clone()).or_default() += amount;
         Ok(())
     }
 }

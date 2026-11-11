@@ -26,6 +26,8 @@ pub const DEFAULT_ESCAPE_DELAY_NS: u64 = 7 * DAY_NS;
 pub const DEFAULT_ADMIN_DELAY_NS: u64 = 7 * DAY_NS;
 pub const MIN_ADMIN_DELAY_NS: u64 = 7 * DAY_NS;
 pub const MAX_REQUESTS_PER_ACCOUNT: usize = 4;
+/// Stands for the pool's reserve in `settle_switch`: what a switch leaves over goes there, to nobody.
+pub const SWITCH_RESERVE: u32 = u32::MAX;
 /// At most one `unstake` per vault in this time. A design margin, not a measured lock length.
 pub const UNSTAKE_INTERVAL_NS: u64 = 3 * DAY_NS;
 /// Attached to `request_exit` and kept, for the storage of the request.
@@ -159,6 +161,14 @@ pub struct TierInit {
     pub pk_g2: Base64VecU8,
 }
 
+/// Notes asked for in exchange of a switched note: `count` notes of `tier` in the destination vault.
+#[near(serializers = [json])]
+#[derive(Clone)]
+pub struct SwitchOut {
+    pub tier: u8,
+    pub count: u64,
+}
+
 #[near(serializers = [json])]
 #[derive(Clone)]
 pub struct NoteInput {
@@ -191,6 +201,10 @@ pub struct Vault {
     /// Asked back from the target, not yet confirmed by its callback.
     withdrawing: u128,
     fee_owed: u128,
+    /// Value this vault owes other vaults for notes switched out, and is owed for notes switched in, not
+    /// settled yet. Counted in the share price; the money moves only at `settle_switch`.
+    owes: u128,
+    due: u128,
     total_shares: u128,
     /// Highest and lowest share price seen. The fee is charged only above `peak`.
     peak: u128,
@@ -266,6 +280,8 @@ pub struct VaultView {
     pub placed: U128,
     pub withdrawing: U128,
     pub fee_owed: U128,
+    pub owes: U128,
+    pub due: U128,
     pub total_shares: U128,
     pub share_price: U128,
     pub max_assets: U128,
@@ -309,6 +325,8 @@ pub struct ReserveStatus {
     pub owed: U128,
     /// Received by `deposit` and not yet given to a vault.
     pub unassigned: U128,
+    /// Left over from switches, paid to nobody.
+    pub reserve: U128,
     pub solvent: bool,
 }
 
@@ -335,6 +353,10 @@ pub struct Pool {
     nullifiers: LookupSet<[u8; 32]>,
     /// When each note's exit was first requested, kept after a withdrawal of the request.
     first_requests: LookupMap<[u8; 32], u64>,
+    /// Switched value one vault owes another (or the reserve), by `pair(from, to)`.
+    debts: LookupMap<u64, u128>,
+    /// Left over from switches, kept by the pool and paid to nobody.
+    reserve: u128,
     /// A new agent announced by the guardian, and when it takes over.
     pending_agent: Option<(AccountId, u64)>,
     /// The escape stays open to everyone until every guardian announcement has taken effect.
@@ -397,6 +419,23 @@ pub fn exit_digest(
     d.extend_from_slice(nf);
     d.extend_from_slice(&sha256(to.as_bytes()));
     d.extend_from_slice(&min_amount.to_le_bytes());
+    sha256(&d)
+}
+
+/// What the note owner signs to move a note of `from` to new notes of `to_vault`.
+/// `SHA-256("ONA-POOL-SWITCH-V1" || H(contract) || from (u32 LE) || nf || to_vault (u32 LE) || n (u32 LE) || (tier || count (u64 LE))*n)`.
+pub fn switch_digest(contract: &AccountId, from: u32, nf: &[u8; 32], to_vault: u32, outputs: &[SwitchOut]) -> [u8; 32] {
+    let mut d = Vec::with_capacity(94 + outputs.len() * 9);
+    d.extend_from_slice(b"ONA-POOL-SWITCH-V1");
+    d.extend_from_slice(&sha256(contract.as_bytes()));
+    d.extend_from_slice(&from.to_le_bytes());
+    d.extend_from_slice(nf);
+    d.extend_from_slice(&to_vault.to_le_bytes());
+    d.extend_from_slice(&(outputs.len() as u32).to_le_bytes());
+    for o in outputs {
+        d.push(o.tier);
+        d.extend_from_slice(&o.count.to_le_bytes());
+    }
     sha256(&d)
 }
 
@@ -503,7 +542,33 @@ fn checked_key(pk: &[u8]) -> Vec<u8> {
 }
 
 fn assets(v: &Vault) -> u128 {
-    v.liquid.saturating_add(v.placed).saturating_sub(v.fee_owed)
+    v.liquid.saturating_add(v.placed).saturating_add(v.due).saturating_sub(v.fee_owed).saturating_sub(v.owes)
+}
+
+/// Price rounded up, used to value notes a vault receives by a switch.
+fn price_up(v: &Vault) -> u128 {
+    if v.total_shares == 0 {
+        INITIAL_PRICE
+    } else {
+        let a = assets(v);
+        a / v.total_shares + u128::from(a % v.total_shares != 0)
+    }
+}
+
+/// What a vault holds or is owed, less what it owes, for its asset cap.
+fn held(v: &Vault) -> u128 {
+    v.liquid.saturating_add(v.placed).saturating_add(v.due).saturating_sub(v.owes)
+}
+
+/// What the vault holds and is owed covers what it owes and its fee. New money never goes into a vault that
+/// does not, so a new holder never pays an older debt.
+fn covers_debts(v: &Vault) -> bool {
+    v.liquid.saturating_add(v.placed).saturating_add(v.due) >= v.owes.saturating_add(v.fee_owed)
+}
+
+/// Key of the debt `from` owes `to`.
+fn pair(from: u32, to: u32) -> u64 {
+    u64::from(from) << 32 | u64::from(to)
 }
 
 /// Total assets over shares issued, rounded down, in yoctoNEAR per share.
@@ -604,6 +669,8 @@ impl Pool {
             holders: LookupMap::new(b"h".to_vec()),
             nullifiers: LookupSet::new(b"n".to_vec()),
             first_requests: LookupMap::new(b"q".to_vec()),
+            debts: LookupMap::new(b"d".to_vec()),
+            reserve: 0,
         }
     }
 
@@ -718,6 +785,8 @@ impl Pool {
                 placed: 0,
                 withdrawing: 0,
                 fee_owed: 0,
+                owes: 0,
+                due: 0,
                 total_shares: 0,
                 peak: INITIAL_PRICE,
                 low: INITIAL_PRICE,
@@ -787,12 +856,13 @@ impl Pool {
         require!(env::block_timestamp() >= v.active_at, "vault not active yet");
         let p = price(&v);
         require!(p >= PRICE_FLOOR, "share price too low for new entries");
-        let t = v.tiers.get_mut(usize::from(tier)).unwrap_or_else(|| env::panic_str("unknown tier"));
-        let shares = mul(t.shares, u128::from(count));
+        require!(covers_debts(&v), "this vault owes more than it holds");
+        let tier_shares = v.tiers.get(usize::from(tier)).unwrap_or_else(|| env::panic_str("unknown tier")).shares;
+        let shares = mul(tier_shares, u128::from(count));
         let cost = mul(shares, p);
         require!(cost <= self.unassigned, "not enough unassigned funds");
-        require!(add(add(v.liquid, v.placed), cost) <= v.max_assets, "vault cap reached");
-        t.issued += count;
+        require!(add(held(&v), cost) <= v.max_assets, "vault cap reached");
+        v.tiers[usize::from(tier)].issued += count;
         v.total_shares = add(v.total_shares, shares);
         v.liquid = add(v.liquid, cost);
         observe(&mut v);
@@ -812,6 +882,9 @@ impl Pool {
         require!(!v.frozen, "vault frozen");
         require!(env::block_timestamp() >= v.active_at, "vault not active yet");
         require!(!self.overdue(&v), "an exit request on this vault is overdue");
+        require!(!self.creditor_overdue(vault_id), "a vault this one owes is overdue");
+        // Switched value is settled before new money goes out, so a later loss is not shifted onto it.
+        require!(v.owes == 0, "settle switches out of this vault first");
         require!(amount.0 > 0 && amount.0 <= v.liquid, "amount above the vault's liquid funds");
         let cap = v.hourly_cap;
         use_window(&mut v.place_window, cap, amount.0);
@@ -834,9 +907,12 @@ impl Pool {
     pub fn unstake(&mut self, vault_id: u32, amount: U128) {
         let mut v = self.vault(vault_id);
         if env::predecessor_account_id() == self.current_agent() {
-            require!(!self.escape_open() && !self.overdue(&v), "the escape is open on this vault");
+            require!(
+                !self.escape_open() && !self.overdue(&v) && !self.creditor_overdue(vault_id),
+                "the escape is open on this vault"
+            );
         } else {
-            self.agent_or_escape(&v);
+            self.agent_or_escape(vault_id, &v);
         }
         Adapter::from_code(v.adapter).require_built();
         require!(amount.0 > 0, "amount must be positive");
@@ -859,7 +935,7 @@ impl Pool {
     /// request on this vault is overdue.
     pub fn withdraw(&mut self, vault_id: u32, amount: U128) {
         let mut v = self.vault(vault_id);
-        self.agent_or_escape(&v);
+        self.agent_or_escape(vault_id, &v);
         Adapter::from_code(v.adapter).require_built();
         require!(amount.0 > 0 && amount.0 <= v.placed, "amount above what the vault holds");
         let op = start(&mut v);
@@ -878,7 +954,7 @@ impl Pool {
     /// escape is open or an exit request on this vault is overdue. Counts as agent activity when the agent calls it.
     pub fn sync(&mut self, vault_id: u32) {
         let mut v = self.vault(vault_id);
-        self.agent_or_escape(&v);
+        self.agent_or_escape(vault_id, &v);
         Adapter::from_code(v.adapter).require_built();
         let op = start(&mut v);
         if env::predecessor_account_id() == self.current_agent() {
@@ -961,6 +1037,110 @@ impl Pool {
         let open = self.escape_open() || self.overdue(&self.vault(vault_id));
         require!(open, "the agent is still active");
         self.exit(vault_id, note, owner_sig, to, min_amount.0, true);
+    }
+
+    /// Moves one note of `from` to new notes of `to_vault`, with no payment to anyone. The note is checked
+    /// and spent as for an exit, signed by its owner for exactly these outputs, and must have no exit request
+    /// waiting. The note is valued at `from`'s price rounded down, the new notes at `to_vault`'s price rounded
+    /// up; what is left over must be less than the smallest note of `to_vault` and goes to the pool's reserve,
+    /// so no share price jumps. The agent then blind-signs the new notes off chain. `from` now owes the cost
+    /// to `to_vault` and the rest to the reserve, settled later by `settle_switch`. Only the agent, which pays
+    /// the gas; no account's counters change. Returns the cost of the new notes.
+    pub fn switch_vault(
+        &mut self,
+        from: u32,
+        note: NoteInput,
+        owner_sig: Base64VecU8,
+        to_vault: u32,
+        outputs: Vec<SwitchOut>,
+    ) -> U128 {
+        self.only_agent();
+        require!(from != to_vault, "choose another vault");
+        require!(!outputs.is_empty() && outputs.len() <= MAX_TIERS, "bad output count");
+        let mut a = self.vault(from);
+        let mut b = self.vault(to_vault);
+        require!(!b.frozen, "vault frozen");
+        require!(env::block_timestamp() >= b.active_at, "vault not active yet");
+        let contract = env::current_account_id();
+        let nf = self.check_signed_note(&a, from, &note, &owner_sig, |nf| {
+            switch_digest(&contract, from, nf, to_vault, &outputs)
+        });
+        require!(!a.requests.iter().any(|r| r.nf == nf), "withdraw the exit request on this note first");
+        let t = &a.tiers[usize::from(note.tier)];
+        require!(t.paid < t.issued, "more exits than notes issued");
+        let shares_a = t.shares;
+        let value = shares_a.saturating_mul(price(&a));
+
+        require!(price(&b) >= PRICE_FLOOR, "share price too low for new entries");
+        require!(covers_debts(&b), "this vault owes more than it holds");
+        let pb = price_up(&b);
+        let (mut shares_b, mut total_count) = (0u128, 0u64);
+        for o in &outputs {
+            let tb = b.tiers.get(usize::from(o.tier)).unwrap_or_else(|| env::panic_str("unknown tier"));
+            require!(o.count > 0, "count must be positive");
+            total_count = total_count.saturating_add(o.count);
+            shares_b = add(shares_b, mul(tb.shares, u128::from(o.count)));
+        }
+        require!(total_count <= MAX_ENTRY, "count must be between 1 and 64");
+        let cost = mul(shares_b, pb);
+        require!(cost <= value, "the new notes are worth more than the note");
+        let smallest = b.tiers.iter().map(|t| t.shares).min().unwrap_or(0).saturating_mul(pb);
+        let rest = value - cost;
+        require!(rest < smallest, "too much left over: ask for more notes");
+        require!(add(held(&b), cost) <= b.max_assets, "vault cap reached");
+
+        self.nullifiers.insert(&nf);
+        track_full(&mut a);
+        a.tiers[usize::from(note.tier)].paid += 1;
+        a.total_shares -= shares_a;
+        a.owes = add(a.owes, value);
+        observe(&mut a);
+        self.add_debt(from, to_vault, cost);
+        if rest > 0 {
+            self.add_debt(from, SWITCH_RESERVE, rest);
+        }
+        for o in &outputs {
+            b.tiers[usize::from(o.tier)].issued += o.count;
+        }
+        b.total_shares = add(b.total_shares, shares_b);
+        b.due = add(b.due, cost);
+        observe(&mut b);
+        self.vaults.insert(&from, &a);
+        self.vaults.insert(&to_vault, &b);
+        self.require_solvent();
+        event("switch", &format!("{{\"from\":{from},\"to\":{to_vault}}}"));
+        U128(cost)
+    }
+
+    /// Moves liquid funds `from` owes `to_vault` for switched notes, or owes the reserve when `to_vault` is
+    /// `SWITCH_RESERVE`. Money stays in the pool. The agent, or anyone once the escape is open, `from` is
+    /// overdue, or a vault `from` owes is overdue.
+    pub fn settle_switch(&mut self, from: u32, to_vault: u32, amount: U128) {
+        let mut a = self.vault(from);
+        self.agent_or_escape(from, &a);
+        require!(from != to_vault, "choose another vault");
+        let owed = self.debt(from, to_vault);
+        require!(owed > 0, "this vault owes nothing to that one");
+        require!(amount.0 > 0 && amount.0 <= owed, "more than is owed between these vaults");
+        require!(amount.0 <= a.liquid, "not enough liquid funds in this vault");
+        a.liquid -= amount.0;
+        a.owes -= amount.0;
+        self.vaults.insert(&from, &a);
+        if owed == amount.0 {
+            self.debts.remove(&pair(from, to_vault));
+        } else {
+            self.debts.insert(&pair(from, to_vault), &(owed - amount.0));
+        }
+        if to_vault == SWITCH_RESERVE {
+            self.total_liquid -= amount.0;
+            self.reserve = add(self.reserve, amount.0);
+        } else {
+            let mut b = self.vault(to_vault);
+            b.liquid = add(b.liquid, amount.0);
+            b.due -= amount.0;
+            self.vaults.insert(&to_vault, &b);
+        }
+        event("settle_switch", &format!("{{\"from\":{from},\"to\":{to_vault}}}"));
     }
 
     /// Pays the agent the fee owed by a vault, from its liquid funds. The only payment to the agent: at most
@@ -1097,6 +1277,8 @@ impl Pool {
             liquid: U128(v.liquid),
             placed: U128(v.placed),
             fee_owed: U128(v.fee_owed),
+            owes: U128(v.owes),
+            due: U128(v.due),
             total_shares: U128(v.total_shares),
             share_price: U128(price(&v)),
             max_assets: U128(v.max_assets),
@@ -1120,6 +1302,11 @@ impl Pool {
         }
     }
 
+    /// Switched value `from` owes `to` (`SWITCH_RESERVE` for the reserve), not settled yet.
+    pub fn get_debt(&self, from: u32, to: u32) -> U128 {
+        U128(self.debt(from, to))
+    }
+
     pub fn is_spent(&self, nf: Base64VecU8) -> bool {
         fixed::<32>(&nf.0).is_some_and(|nf| self.nullifiers.contains(&nf))
     }
@@ -1140,6 +1327,7 @@ impl Pool {
             liquid: U128(self.total_liquid),
             owed: U128(self.total_owed),
             unassigned: U128(self.unassigned),
+            reserve: U128(self.reserve),
             solvent: balance >= self.needed(),
         }
     }
@@ -1203,10 +1391,31 @@ impl Pool {
         require!(env::predecessor_account_id() == self.current_agent(), "only the agent");
     }
 
-    fn agent_or_escape(&self, v: &Vault) {
+    fn agent_or_escape(&self, vault_id: u32, v: &Vault) {
         if env::predecessor_account_id() != self.current_agent() {
-            require!(self.escape_open() || self.overdue(v), "only the agent while it is active");
+            require!(
+                self.escape_open() || self.overdue(v) || self.creditor_overdue(vault_id),
+                "only the agent while it is active"
+            );
         }
+    }
+
+    /// A vault that `vault_id` owes switched value to is overdue: its funds must be reachable to pay it.
+    fn creditor_overdue(&self, vault_id: u32) -> bool {
+        (0..self.vault_count).any(|id| {
+            id != vault_id
+                && self.debt(vault_id, id) > 0
+                && self.vaults.get(&id).is_some_and(|b| self.overdue(&b))
+        })
+    }
+
+    fn debt(&self, from: u32, to: u32) -> u128 {
+        self.debts.get(&pair(from, to)).unwrap_or(0)
+    }
+
+    fn add_debt(&mut self, from: u32, to: u32, amount: u128) {
+        let total = add(self.debt(from, to), amount);
+        self.debts.insert(&pair(from, to), &total);
     }
 
     /// The announced agent once its delay has passed, otherwise the previous one.
@@ -1266,6 +1475,7 @@ impl Pool {
             .saturating_add(self.total_liquid)
             .saturating_add(self.total_owed)
             .saturating_add(self.unassigned)
+            .saturating_add(self.reserve)
     }
 
     fn require_solvent(&self) {
@@ -1302,6 +1512,19 @@ impl Pool {
         to: &AccountId,
         min_amount: u128,
     ) -> [u8; 32] {
+        let contract = env::current_account_id();
+        self.check_signed_note(v, vault_id, note, owner_sig, |nf| exit_digest(&contract, vault_id, nf, to, min_amount))
+    }
+
+    /// Checks a note, and its owner's signature on the digest `digest` builds from its nullifier.
+    fn check_signed_note(
+        &self,
+        v: &Vault,
+        vault_id: u32,
+        note: &NoteInput,
+        owner_sig: &Base64VecU8,
+        digest: impl Fn(&[u8; 32]) -> [u8; 32],
+    ) -> [u8; 32] {
         let tier = note.tier;
         let pk: [u8; 32] = fixed(&note.pk.0).unwrap_or_else(|| env::panic_str("bad note encoding"));
         let nonce: [u8; 32] = fixed(&note.nonce.0).unwrap_or_else(|| env::panic_str("bad note encoding"));
@@ -1312,8 +1535,7 @@ impl Pool {
 
         let owner_sig: [u8; 64] =
             fixed(&owner_sig.0).unwrap_or_else(|| env::panic_str("bad owner signature length"));
-        let digest = exit_digest(&env::current_account_id(), vault_id, &nf, to, min_amount);
-        require!(env::ed25519_verify(&owner_sig, digest, &pk), "bad owner signature");
+        require!(env::ed25519_verify(&owner_sig, digest(&nf), &pk), "bad owner signature");
 
         let mut message = [0u8; 65];
         message[0] = tier;

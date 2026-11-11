@@ -161,6 +161,23 @@ The account that holds the funds the agent places. Never deployed, tested on the
   keeps the date of its first request even if the request is withdrawn and made again. A vault whose list of 64 requests stays full
   for the escape delay (the clock stops only when the list is back to 32) opens the same way, so keeping it full cannot shut out an
   honest holder. When a vault opens this way, `escape_exit` works for every note of that vault.
+- **Switching vaults.** `switch_vault(from, note, owner_sig, to_vault, outputs)` (agent) spends a note of `from` with the same checks
+  and nullifier as an exit, and records `outputs` (tier and count) as notes the agent may blind-sign in `to_vault`. The owner signs
+  `SHA-256("ONA-POOL-SWITCH-V1" || H(contract) || from (u32 LE) || nf || to_vault (u32 LE) || n (u32 LE) || (tier || count (u64 LE))*n)`.
+  The old note is valued at `from`'s price rounded down, the new notes at `to_vault`'s price rounded up, in favour of both vaults'
+  holders. The new notes cannot cost more; what is left over must be less than `to_vault`'s smallest note and goes to the pool's
+  reserve, which pays nobody, so no share price and no exit limit jumps. `to_vault` must be listed, active, not frozen and above the
+  price floor, and its asset cap counts what it is owed, as entries do. A note with an exit request waiting cannot be switched.
+  Nothing is paid and no account's counters change, so exit limits are unchanged. Debts are kept per pair of vaults (and per vault
+  towards the reserve, `get_debt`); both share prices count them. `settle_switch(from, to, amount)` moves liquid funds inside the
+  pool, only up to what `from` owes `to`, by the agent, or by anyone once the escape is open, `from` is overdue, or a vault `from` owes
+  is overdue; the agent can then no longer unstake `from`. Until settled, the new notes can be paid only from `to_vault`'s own liquid
+  funds. A vault that owes switched value cannot place more until it settles. A loss in `from` before settlement falls on `from`'s
+  remaining holders: the debt is a fixed amount of NEAR. If `from` no longer holds enough to cover what it owes and its fee
+  (liquid + placed + due < owes + fee owed), no entry and no switch can bring new money into it, so a new holder never pays that
+  debt. What it cannot pay is a loss for its creditors: their share prices still count the full debt, so they show more than can be
+  paid until settlement, and nothing writes the debt down (not implemented). The reserve from switch leftovers is locked: no method
+  pays it out, and each leftover is less than the destination vault's smallest note.
 - **Escape speed.** Exits through the escape are limited by the vault's hourly cap, like other exits, including during an admin
   delay: a guardian announcement gives holders 7 days or more, but at most one hourly cap per hour per vault can leave that way.
 - **Caps.** Per vault: most assets, and most NEAR moved per hour, counted separately for placements, for exits paid by the agent and

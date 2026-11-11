@@ -1194,3 +1194,281 @@ fn a_frozen_vault_takes_nothing_new_but_still_pays_out() {
     assert!(e.contains("vault frozen"), "{e}");
     pay(&mut h, &notes[0], &alice());
 }
+
+// ---- changer de vault ----
+
+/// Written from the SPEC, independently of the contract.
+fn switch_digest_spec(from: u32, nf: &[u8; 32], to_vault: u32, outputs: &[(u8, u64)]) -> [u8; 32] {
+    let mut parts: Vec<Vec<u8>> = vec![
+        b"ONA-POOL-SWITCH-V1".to_vec(),
+        sha(&[contract().as_bytes()]).to_vec(),
+        from.to_le_bytes().to_vec(),
+        nf.to_vec(),
+        to_vault.to_le_bytes().to_vec(),
+        (outputs.len() as u32).to_le_bytes().to_vec(),
+    ];
+    for (tier, count) in outputs {
+        parts.push(vec![*tier]);
+        parts.push(count.to_le_bytes().to_vec());
+    }
+    let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    sha(&refs)
+}
+
+fn outs(list: &[(u8, u64)]) -> Vec<SwitchOut> {
+    list.iter().map(|(tier, count)| SwitchOut { tier: *tier, count: *count }).collect()
+}
+
+fn switch_sig(n: &Note, to_vault: u32, list: &[(u8, u64)]) -> Base64VecU8 {
+    b64(&sign_digest(&n.owner, &switch_digest_spec(n.vault, &nullifier(n.vault, &n.token), to_vault, list)))
+}
+
+fn switch(h: &mut H, n: &Note, to_vault: u32, list: &[(u8, u64)]) -> u128 {
+    let (note, sig, o, from) = (input(n), switch_sig(n, to_vault, list), outs(list), n.vault);
+    h.call(&agent(), move |p| p.switch_vault(from, note, sig, to_vault, o)).0
+}
+
+fn refused_switch(h: &mut H, n: &Note, to_vault: u32, signed_for: &[(u8, u64)], sent: &[(u8, u64)]) -> String {
+    let (note, sig, o, from) = (input(n), switch_sig(n, to_vault, signed_for), outs(sent), n.vault);
+    h.refused(&agent(), move |p| {
+        p.switch_vault(from, note, sig, to_vault, o);
+    })
+}
+
+#[test]
+fn a_switch_keeps_the_value_and_pays_no_one() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 1, &alice()); // 10 NEAR in vault 0
+    h.enter(1, 0, 1, &bob()); // vault 1 already has a holder
+    let before = h.holder(&alice());
+    h.transfers.clear();
+    h.calls.clear();
+    let moved = switch(&mut h, &notes[0], 1, &[(0, 10)]);
+    assert_eq!(moved, 10 * NEAR, "ten 1-NEAR notes for one 10-NEAR note");
+    assert!(h.transfers.is_empty() && h.calls.is_empty(), "nothing is paid and nothing leaves the pool");
+    let after = h.holder(&alice());
+    assert_eq!(
+        (after.deposited.0, after.withdrawn.0, after.refunded.0, after.exit_limit.0),
+        (before.deposited.0, before.withdrawn.0, before.refunded.0, before.exit_limit.0),
+        "the account's counters do not change"
+    );
+    let (a, b) = (h.vault(0), h.vault(1));
+    assert_eq!((a.owes.0, b.due.0), (10 * NEAR, 10 * NEAR));
+    assert_eq!((a.total_shares.0, b.share_price.0), (0, INITIAL_PRICE), "prices are unchanged");
+    assert_eq!(b.tiers[0].issued, 11);
+}
+
+#[test]
+fn the_new_notes_cannot_be_worth_more_and_the_rest_goes_to_the_reserve() {
+    let mut h = H::new();
+    let notes = h.enter(0, 0, 2, &alice());
+    h.place(0, 2 * NEAR);
+    h.sync(0, 2 * NEAR + NEAR / 5); // 1.1 NEAR a note in vault 0
+    let e = refused_switch(&mut h, &notes[0], 1, &[(0, 2)], &[(0, 2)]);
+    assert!(e.contains("worth more than the note"), "{e}");
+    let limit = h.holder(&alice()).exit_limit.0;
+    let moved = switch(&mut h, &notes[0], 1, &[(0, 1)]);
+    assert_eq!(moved, NEAR);
+    // The 0.1 NEAR left over goes to the reserve: no price jumps, so no exit limit grows.
+    assert_eq!(h.vault(0).share_price.0, INITIAL_PRICE / 10 * 11);
+    assert_eq!(h.view(|p| p.get_debt(0, SWITCH_RESERVE)).0, NEAR / 10);
+    assert_eq!(h.holder(&alice()).exit_limit.0, limit);
+}
+
+#[test]
+fn a_switch_cannot_leave_more_than_one_small_note_over() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 1, &alice()); // one 10-NEAR note
+    let e = refused_switch(&mut h, &notes[0], 1, &[(0, 1)], &[(0, 1)]);
+    assert!(e.contains("too much left over"), "{e}");
+    assert_eq!(switch(&mut h, &notes[0], 1, &[(0, 10)]), 10 * NEAR);
+}
+
+#[test]
+fn debts_are_kept_per_pair_of_vaults() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 1, &alice());
+    switch(&mut h, &notes[0], 1, &[(1, 1)]);
+    let e = h.refused(&agent(), |p| p.settle_switch(1, 0, U128(NEAR)));
+    assert!(e.contains("owes nothing"), "{e}");
+    let e = h.refused(&agent(), |p| p.settle_switch(0, SWITCH_RESERVE, U128(1)));
+    assert!(e.contains("owes nothing"), "{e}");
+    assert_eq!(h.view(|p| p.get_debt(0, 1)).0, 10 * NEAR);
+}
+
+#[test]
+fn a_vault_owing_switched_value_must_settle_before_placing() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 2, &alice());
+    switch(&mut h, &notes[0], 1, &[(1, 1)]);
+    let e = h.refused(&agent(), |p| p.place(0, U128(NEAR)));
+    assert!(e.contains("settle switches out of this vault first"), "{e}");
+    h.call(&agent(), |p| p.settle_switch(0, 1, U128(10 * NEAR)));
+    h.place(0, NEAR);
+}
+
+#[test]
+fn an_overdue_creditor_opens_the_vault_that_owes_it() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 1, &alice());
+    h.place(0, 10 * NEAR); // the money sits in vault 0's target
+    switch(&mut h, &notes[0], 1, &[(1, 1)]);
+    let new_note = h.note(1, 1);
+    request(&mut h, &new_note, &alice());
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, 10 * NEAR);
+    }
+    assert!(!h.view(|p| p.escape_open()));
+    // Vault 1 is overdue and vault 0 owes it: vault 0's funds can be brought back by anyone, not the agent.
+    let e = h.refused(&agent(), |p| p.unstake(0, U128(10 * NEAR)));
+    assert!(e.contains("the escape is open on this vault"), "{e}");
+    h.call(&mallory(), |p| p.unstake(0, U128(10 * NEAR)));
+    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_done(0, op));
+    h.call(&mallory(), |p| p.withdraw(0, U128(10 * NEAR)));
+    h.balance += 10 * NEAR;
+    h.reply(0, PromiseResult::Successful(vec![]), |p, op| p.on_withdraw(0, U128(10 * NEAR), op));
+    h.call(&mallory(), |p| p.settle_switch(0, 1, U128(10 * NEAR)));
+    let (note, sig) = (input(&new_note), signed(&new_note, 1, &alice(), 0));
+    h.call(&mallory(), move |p| p.escape_exit(1, note, sig, alice(), U128(0)));
+}
+
+#[test]
+fn a_new_holder_never_pays_the_debt_of_an_emptied_vault() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 1, &alice()); // alice is vault 0's only holder
+    h.place(0, 10 * NEAR);
+    switch(&mut h, &notes[0], 1, &[(1, 1)]); // vault 0 now owes vault 1 10 NEAR and has no shares
+    h.sync(0, 9 * NEAR); // vault 0 loses 1 NEAR
+    assert_eq!(h.vault(0).share_price.0, INITIAL_PRICE, "an empty vault shows the initial price");
+    h.deposit(&bob(), 10 * NEAR);
+    let e = h.refused(&agent(), |p| {
+        p.record_entry(0, 1, 1);
+    });
+    assert!(e.contains("this vault owes more than it holds"), "{e}");
+    // Nor can a switch bring value into it.
+    let others = h.enter(1, 1, 1, &bob());
+    let e = refused_switch(&mut h, &others[0], 0, &[(1, 1)], &[(1, 1)]);
+    assert!(e.contains("this vault owes more than it holds"), "{e}");
+}
+
+#[test]
+fn an_overdue_vault_opens_nothing_on_a_vault_that_owes_it_nothing() {
+    let mut h = H::new();
+    h.enter(0, 1, 1, &alice());
+    h.place(0, 10 * NEAR);
+    let other = h.enter(1, 1, 1, &bob());
+    request(&mut h, &other[0], &bob());
+    for _ in 0..7 {
+        h.now += DAY_NS;
+        h.sync(0, 10 * NEAR);
+    }
+    assert!(!h.view(|p| p.escape_open()));
+    let e = h.refused(&mallory(), |p| p.unstake(0, U128(NEAR)));
+    assert!(e.contains("only the agent while it is active"), "{e}");
+    let e = h.refused(&mallory(), |p| p.withdraw(0, U128(NEAR)));
+    assert!(e.contains("only the agent while it is active"), "{e}");
+    // Vault 1 itself is open.
+    h.call(&mallory(), |p| p.sync(1));
+}
+
+#[test]
+fn notes_received_by_a_switch_are_valued_at_the_price_rounded_up() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 1, &alice());
+    h.enter(1, 0, 1, &bob());
+    h.place(1, NEAR);
+    h.sync(1, NEAR + 1); // vault 1's price is 10^18 + 10^-6 yocto a share
+    assert_eq!(switch(&mut h, &notes[0], 1, &[(0, 9)]), 9 * (NEAR + 1_000_000));
+}
+
+#[test]
+fn deposits_and_switches_count_the_same_against_a_vault_cap() {
+    let mut h = H::with(None, 10 * NEAR, 1_000 * NEAR);
+    let notes = h.enter(0, 1, 1, &alice());
+    switch(&mut h, &notes[0], 1, &[(1, 1)]);
+    h.deposit(&bob(), NEAR);
+    let e = h.refused(&agent(), |p| {
+        p.record_entry(1, 0, 1);
+    });
+    assert!(e.contains("vault cap reached"), "{e}");
+    let more = h.enter(0, 0, 1, &bob());
+    let e = refused_switch(&mut h, &more[0], 1, &[(0, 1)], &[(0, 1)]);
+    assert!(e.contains("vault cap reached"), "{e}");
+}
+
+#[test]
+fn a_switched_note_cannot_be_spent_again() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 1, &alice());
+    switch(&mut h, &notes[0], 1, &[(1, 1)]);
+    let e = refused_switch(&mut h, &notes[0], 1, &[(1, 1)], &[(1, 1)]);
+    assert!(e.contains("note already spent"), "{e}");
+    let sig = signed(&notes[0], 0, &alice(), 0);
+    let e = refused_exit(&mut h, &agent(), &notes[0], 0, sig, &alice());
+    assert!(e.contains("note already spent"), "{e}");
+}
+
+#[test]
+fn a_switch_goes_only_to_a_listed_active_vault_with_the_owners_consent() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 1, &alice());
+    let n = &notes[0];
+    let e = refused_switch(&mut h, n, 9, &[(0, 1)], &[(0, 1)]);
+    assert!(e.contains("unknown vault"), "{e}");
+    let e = refused_switch(&mut h, n, 0, &[(0, 1)], &[(0, 1)]);
+    assert!(e.contains("choose another vault"), "{e}");
+    let fresh = h.add_vault(1_000 * NEAR, 1_000 * NEAR);
+    let e = refused_switch(&mut h, n, fresh, &[(0, 1)], &[(0, 1)]);
+    assert!(e.contains("vault not active yet"), "{e}");
+    // The agent cannot change what the owner signed for.
+    let e = refused_switch(&mut h, n, 1, &[(0, 1)], &[(1, 1)]);
+    assert!(e.contains("bad owner signature"), "{e}");
+    // Only the agent submits it.
+    let (note, sig, o) = (input(n), switch_sig(n, 1, &[(0, 1)]), outs(&[(0, 1)]));
+    let e = h.refused(&alice(), move |p| {
+        p.switch_vault(0, note, sig, 1, o);
+    });
+    assert!(e.contains("only the agent"), "{e}");
+}
+
+#[test]
+fn switched_notes_exit_from_the_new_vault_after_settlement_within_the_same_limit() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 1, &alice());
+    switch(&mut h, &notes[0], 1, &[(1, 1)]);
+    let new_note = h.note(1, 1);
+    // Before settlement the new vault has no liquid funds to pay with.
+    let sig = signed(&new_note, 1, &alice(), 0);
+    let e = refused_exit(&mut h, &agent(), &new_note, 1, sig, &alice());
+    assert!(e.contains("not enough liquid funds"), "{e}");
+    let e = h.refused(&mallory(), |p| p.settle_switch(0, 1, U128(NEAR)));
+    assert!(e.contains("only the agent while it is active"), "{e}");
+    let e = h.refused(&agent(), |p| p.settle_switch(0, 1, U128(11 * NEAR)));
+    assert!(e.contains("more than is owed"), "{e}");
+    h.call(&agent(), |p| p.settle_switch(0, 1, U128(10 * NEAR)));
+    let (a, b) = (h.vault(0), h.vault(1));
+    assert_eq!((a.owes.0, a.liquid.0, b.due.0, b.liquid.0), (0, 0, 0, 10 * NEAR));
+    h.transfers.clear();
+    pay(&mut h, &new_note, &alice());
+    assert_eq!(h.transfers, vec![(alice(), 10 * NEAR - EXIT_STORAGE_FEE)]);
+    assert_eq!(h.holder(&alice()).exit_limit.0, 0, "a switch never raised the limit");
+}
+
+#[test]
+fn a_note_with_a_pending_request_cannot_be_switched_and_the_escape_keeps_working() {
+    let mut h = H::new();
+    let notes = h.enter(0, 1, 2, &alice());
+    request(&mut h, &notes[0], &alice());
+    let e = refused_switch(&mut h, &notes[0], 1, &[(1, 1)], &[(1, 1)]);
+    assert!(e.contains("withdraw the exit request on this note first"), "{e}");
+    let nf = b64(&nullifier(0, &notes[0].token));
+    h.call(&alice(), move |p| p.cancel_exit_request(0, nf));
+    switch(&mut h, &notes[0], 1, &[(1, 1)]);
+    // During the escape anyone can settle, then the switched note leaves from the new vault.
+    h.now += DEFAULT_ESCAPE_DELAY_NS;
+    h.call(&mallory(), |p| p.settle_switch(0, 1, U128(10 * NEAR)));
+    let new_note = h.note(1, 1);
+    let (note, sig) = (input(&new_note), signed(&new_note, 1, &alice(), 0));
+    h.call(&mallory(), move |p| p.escape_exit(1, note, sig, alice(), U128(0)));
+}

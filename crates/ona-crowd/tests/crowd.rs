@@ -6,8 +6,8 @@ use ona_crowd::chain::{check_event, check_exit_caps, execute, MemoryChain};
 use ona_crowd::near::{check_chain_id, check_settings, NearChain, NearSettings};
 use ona_crowd::parades::{agent_transactions, compare, scenarios, table};
 use ona_crowd::{
-    candidates, guesses, implicit_account, privacy, simulate, simulate_secret, write_keys, AgentRules, Config,
-    EventKind, PublicEvent, Simulation, Vault, VaultKind,
+    candidates, guesses, implicit_account, posterior, posterior_from, privacy, simulate, simulate_secret, write_keys,
+    yield_guess, AgentRules, Config, EventKind, PublicEvent, Simulation, TrueRoute, Vault, VaultKind,
 };
 
 fn config(seed: u64) -> Config {
@@ -279,7 +279,8 @@ fn the_public_timeline_does_not_link_users_to_vaults() {
 #[test]
 fn exits_never_exceed_what_the_account_deposited() {
     let (_, sim) = run(14);
-    check_exit_caps(&sim.timeline).unwrap();
+    let none = BTreeMap::new();
+    check_exit_caps(&sim.timeline, &none).unwrap();
     for r in &sim.truth.requests {
         let deposited: u64 = r.deposit_events.iter().map(|&i| sim.timeline[i].amount).sum();
         let paid: u64 = r.payment_events.iter().map(|&i| sim.timeline[i].amount).sum();
@@ -287,11 +288,14 @@ fn exits_never_exceed_what_the_account_deposited() {
     }
     use EventKind::*;
     let over = vec![ev(0, Deposit, "a", "mint", 10, 1), ev(2000, ExitPayment, "agent", "a", 100, 1)];
-    assert!(check_exit_caps(&over).unwrap_err().to_string().contains("more than"));
+    assert!(check_exit_caps(&over, &none).unwrap_err().to_string().contains("more than"));
+    // The cap is deposits plus gains.
+    let gains = BTreeMap::from([("a".to_string(), 90)]);
+    assert!(check_exit_caps(&over, &gains).is_ok());
     let elsewhere = vec![ev(0, Deposit, "a", "mint", 10, 1), ev(2000, ExitPayment, "agent", "b", 10, 1)];
-    assert!(check_exit_caps(&elsewhere).unwrap_err().to_string().contains("never deposited"));
+    assert!(check_exit_caps(&elsewhere, &none).unwrap_err().to_string().contains("never deposited"));
     let before = vec![ev(2000, ExitPayment, "agent", "a", 10, 1), ev(3000, Deposit, "a", "mint", 10, 1)];
-    assert!(check_exit_caps(&before).is_err());
+    assert!(check_exit_caps(&before, &gains).is_err());
 }
 
 fn ev(at_secs: u64, kind: EventKind, from: &str, to: &str, denomination: u64, count: u32) -> PublicEvent {
@@ -497,6 +501,7 @@ fn with_a_reserve_exits_do_not_wait_for_a_vault_withdrawal() {
                 placed -= e.amount as i64;
             }
             EventKind::ExitPayment => reserve -= e.amount as i64,
+            EventKind::Yield => placed += e.amount as i64,
         }
     }
 }
@@ -552,21 +557,315 @@ fn the_comparison_covers_every_scenario() {
     base.users = 30;
     base.run_secs = 6 * 3600;
     let rows = compare(&base, &scenarios(20, 1800, 12), 2).unwrap();
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 8);
     assert!(rows[0].joint && !rows[1].joint);
     for r in &rows {
         assert!((0.0..=1.0).contains(&r.exposed_share));
-        for g in [r.first_placement_guess, r.last_withdrawal_guess, r.most_chosen].into_iter().flatten() {
+        for g in [r.worst_max, r.observer_success, r.blind, r.last_withdrawal_guess].into_iter().flatten() {
             assert!((0.0..=1.0).contains(&g));
         }
+        assert!(r.mean_entropy_bits.unwrap() >= 0.0 && r.mean_entropy_bits.unwrap() <= 1.0 + 1e-9);
+        assert_eq!((r.yield_guess, r.yield_lost), (None, None));
     }
     // Net settlement ties no account to a vault.
     assert_eq!(rows[2].exposed_share, 0.0);
     let text = table(&rows);
-    assert_eq!(text.lines().count(), 8);
+    assert_eq!(text.lines().count(), 10);
     assert!(text.lines().nth(2).unwrap().contains("| +0 |"));
     let g = guesses(&simulate(&base).unwrap(), &base);
     assert!(g.most_chosen.unwrap() >= 0.5);
+}
+
+fn route(account: &str, vault: &str, placed_at: u64) -> TrueRoute {
+    TrueRoute {
+        account: account.into(),
+        vault: Some(vault.into()),
+        first_vault: Some(vault.into()),
+        placed_at: Some(placed_at),
+        withdrawn_at: None,
+        switched_at: None,
+        placed: 0,
+        principal_out: 0,
+    }
+}
+
+#[test]
+fn posterior_of_four_identical_users_is_an_even_split() {
+    // Two batches of two notes of 100, four users with one note each: any two can be in either
+    // batch, so each user is in v1 with probability 1/2.
+    use EventKind::*;
+    let timeline = vec![
+        ev(0, Deposit, "u1", "mint", 100, 1),
+        ev(0, Deposit, "u2", "mint", 100, 1),
+        ev(0, Deposit, "u3", "mint", 100, 1),
+        ev(0, Deposit, "u4", "mint", 100, 1),
+        ev(200, Placement, "agent", "v1", 100, 2),
+        ev(200, Placement, "agent", "v2", 100, 2),
+    ];
+    let truth = vec![route("u1", "v1", 200), route("u2", "v1", 200), route("u3", "v2", 200), route("u4", "v2", 200)];
+    let p = posterior_from(&timeline, &hand_config(AgentRules::default()), &truth, &[], 2000);
+    assert_eq!(p.users, 4);
+    assert!((p.worst_max.unwrap() - 0.5).abs() < 0.06, "{p:?}");
+    assert!((p.mean_entropy_bits.unwrap() - 1.0).abs() < 0.02, "{p:?}");
+    assert_eq!(p.blind, Some(0.5));
+}
+
+#[test]
+fn posterior_with_one_distinct_user() {
+    // u1 alone holds a note of 1, so it is certainly in v2. The other three hold one note of 100:
+    // one of them is in v2 with u1, two in v1, so each is in v2 with probability 1/3.
+    // Worst user: 1. Entropy: (0 + 3 x 0.918) / 4 = 0.689 bit. An observer guessing the most
+    // probable vault finds u1 and the two users in v1: 3 of 4.
+    use EventKind::*;
+    let timeline = vec![
+        ev(0, Deposit, "u1", "mint", 1, 1),
+        ev(0, Deposit, "u2", "mint", 100, 1),
+        ev(0, Deposit, "u3", "mint", 100, 1),
+        ev(0, Deposit, "u4", "mint", 100, 1),
+        ev(200, Placement, "agent", "v1", 100, 2),
+        ev(200, Placement, "agent", "v2", 100, 1),
+        ev(200, Placement, "agent", "v2", 1, 1),
+    ];
+    let truth = vec![route("u1", "v2", 200), route("u2", "v1", 200), route("u3", "v1", 200), route("u4", "v2", 200)];
+    let p = posterior_from(&timeline, &hand_config(AgentRules::default()), &truth, &[], 3000);
+    assert_eq!(p.worst_max, Some(1.0));
+    assert!((p.mean_entropy_bits.unwrap() - 0.689).abs() < 0.03, "{p:?}");
+    assert!((p.success.unwrap() - 0.75).abs() < 1e-9, "{p:?}");
+}
+
+#[test]
+fn the_sampler_never_leaves_assignments_that_explain_the_timeline() {
+    // Without any user that can be swapped, the observer is certain of everyone.
+    use EventKind::*;
+    let timeline = vec![
+        ev(0, Deposit, "u1", "mint", 1, 1),
+        ev(0, Deposit, "u2", "mint", 100, 1),
+        ev(200, Placement, "agent", "v1", 1, 1),
+        ev(200, Placement, "agent", "v2", 100, 1),
+    ];
+    let truth = vec![route("u1", "v1", 200), route("u2", "v2", 200)];
+    let p = posterior_from(&timeline, &hand_config(AgentRules::default()), &truth, &[], 500);
+    assert_eq!((p.worst_max, p.mean_entropy_bits, p.success), (Some(1.0), Some(0.0), Some(1.0)));
+}
+
+#[test]
+fn accounts_with_different_deposits_are_never_swapped() {
+    // w (two notes) fits batch v1 and u (one note) fits batch v2, but swapping them would put three
+    // notes in v1, which holds two. Only u and x, with identical deposits, may trade places, and they
+    // share v1 anyway: everyone is certain.
+    use EventKind::*;
+    let timeline = vec![
+        ev(0, Deposit, "u", "mint", 100, 1),
+        ev(0, Deposit, "w", "mint", 100, 2),
+        ev(0, Deposit, "x", "mint", 100, 1),
+        ev(200, Placement, "agent", "v1", 100, 2),
+        ev(200, Placement, "agent", "v2", 100, 2),
+    ];
+    let truth = vec![route("u", "v1", 200), route("w", "v2", 200), route("x", "v1", 200)];
+    let p = posterior_from(&timeline, &hand_config(AgentRules::default()), &truth, &[], 1000);
+    assert_eq!((p.worst_max, p.mean_entropy_bits, p.success), (Some(1.0), Some(0.0), Some(1.0)));
+}
+
+#[test]
+fn the_posterior_is_never_more_private_than_the_elimination_bound() {
+    for c in all_scenarios(4) {
+        let sim = simulate(&c).unwrap();
+        let p = posterior(&sim, &c, 100);
+        let bound = privacy(&sim.timeline, &c);
+        // A user certain under elimination stays certain under sampling.
+        if bound.exposed > 0 {
+            assert_eq!(p.worst_max, Some(1.0), "{:?}", c.agent);
+        }
+        assert!(p.success.unwrap() >= p.blind.unwrap() - 0.2);
+    }
+}
+
+#[test]
+fn every_sampled_state_replays_the_public_timeline() {
+    let mut configs = all_scenarios(5);
+    let mut separate = with_parades(5, 20, 1800, 0);
+    separate.agent.min_active_per_settlement = 10;
+    configs.push(separate.clone());
+    separate.agent.switch_percent = 30;
+    configs.push(separate);
+    let mut with_yield = yield_config(5);
+    with_yield.agent.reserve_percent = 20;
+    with_yield.agent.settlement_period_secs = 1800;
+    configs.push(with_yield.clone());
+    with_yield.agent.reserve_percent = 0;
+    with_yield.agent.settlement_period_secs = 0;
+    configs.push(with_yield);
+    for c in configs {
+        let sim = simulate(&c).unwrap();
+        let p = posterior(&sim, &c, 200);
+        assert!(p.replayed > 0);
+        assert_eq!(p.replay_failures, 0, "{:?}", c.agent);
+        assert!(p.frozen <= p.users);
+        if p.frozen > 0 {
+            assert_eq!(p.worst_max, Some(1.0), "a frozen user is always certain");
+        }
+    }
+}
+
+#[test]
+fn the_replay_catches_an_inconsistent_swap() {
+    // u and w have different deposits. If the sampler swapped them, the batches would no longer hold
+    // their members' notes; with identical deposits it may.
+    use EventKind::*;
+    let timeline = vec![
+        ev(0, Deposit, "u", "mint", 100, 1),
+        ev(0, Deposit, "w", "mint", 100, 2),
+        ev(0, Deposit, "x", "mint", 100, 1),
+        ev(200, Placement, "agent", "v1", 100, 2),
+        ev(200, Placement, "agent", "v2", 100, 2),
+    ];
+    let truth = vec![route("u", "v1", 200), route("w", "v2", 200), route("x", "v1", 200)];
+    let p = posterior_from(&timeline, &hand_config(AgentRules::default()), &truth, &[], 500);
+    assert_eq!((p.replay_failures, p.frozen), (0, 1));
+}
+
+fn yield_config(seed: u64) -> Config {
+    Config {
+        seed,
+        users: 60,
+        run_secs: 6 * 3600,
+        partial_exit_percent: 0,
+        vaults: vec![
+            Vault { kind: VaultKind::Staking, contract: "stake-a.testnet".into() },
+            Vault { kind: VaultKind::Staking, contract: "stake-b.testnet".into() },
+            Vault { kind: VaultKind::Lending, contract: "lend-c.testnet".into() },
+            Vault { kind: VaultKind::Lending, contract: "lend-d.testnet".into() },
+        ],
+        vault_weights: vec![3, 1, 3, 1],
+        yield_bp_per_hour: vec![100, 200, 300, 600],
+        ..Config::default()
+    }
+}
+
+#[test]
+fn individual_yield_pays_each_vault_rate_in_whole_notes() {
+    let c = yield_config(1);
+    let sim = simulate(&c).unwrap();
+    execute(&sim, &c, &mut MemoryChain::default(), &mut |_| {}).unwrap();
+    let mut gained = 0;
+    for r in sim.truth.requests.iter().filter(|r| r.withdrawn_at.is_some()) {
+        let v = c.vaults.iter().position(|x| x.contract == r.vault).unwrap();
+        let principal = r.profile.exit_notes.iter().map(|n| n.denomination * u64::from(n.count)).sum::<u64>();
+        let duration = r.withdrawn_at.unwrap() - r.placed_at.unwrap();
+        assert_eq!(r.gain, principal * c.yield_of(v) * duration / 36_000_000);
+        assert!(r.gain_paid <= r.gain && r.gain - r.gain_paid < 1, "only what notes cannot make stays");
+        gained += r.gain_paid;
+    }
+    assert!(gained > 0);
+    assert!(sim.timeline.iter().any(|e| e.kind == EventKind::Yield));
+    for e in &sim.timeline {
+        check_event(&c, e).unwrap();
+    }
+}
+
+#[test]
+fn pooled_yield_gives_everyone_the_same_rate_and_hides_the_vault() {
+    // Large deposits (four notes of 100) and notes of 1 to pay gains, so the rate shows.
+    let mut pooled = yield_config(2);
+    pooled.denominations = vec![1, 100];
+    pooled.notes_per_denomination = vec![4];
+    pooled.yield_mode = ona_crowd::YieldMode::Pooled;
+    let individual = Config { yield_mode: ona_crowd::YieldMode::Individual, ..pooled.clone() };
+    let pooled_guess = yield_guess(&simulate(&pooled).unwrap(), &pooled).unwrap();
+    let individual_guess = yield_guess(&simulate(&individual).unwrap(), &individual).unwrap();
+    assert!(individual_guess > pooled_guess + 0.2, "individual {individual_guess}, pooled {pooled_guess}");
+    assert_eq!(yield_guess(&simulate(&config(2)).unwrap(), &config(2)), None);
+}
+
+#[test]
+fn suggestions_move_users_to_the_most_popular_vault_of_the_same_kind() {
+    let mut c = yield_config(3);
+    c.suggestion_percent = 100;
+    let sim = simulate(&c).unwrap();
+    for r in &sim.truth.requests {
+        let p = &r.profile;
+        assert_eq!(p.vault, c.most_popular_like(p.wanted_vault));
+        assert_eq!(c.vaults[p.vault].kind, c.vaults[p.wanted_vault].kind);
+        assert!(p.vault == 0 || p.vault == 2);
+        if r.withdrawn_at.is_some() && p.vault != p.wanted_vault {
+            assert!(r.wanted_gain >= r.gain, "a suggestion moves to a lower rate here");
+        }
+    }
+    assert!(sim.truth.requests.iter().any(|r| r.profile.vault != r.profile.wanted_vault));
+    c.suggestion_percent = 0;
+    assert!(simulate(&c).unwrap().truth.requests.iter().all(|r| r.profile.vault == r.profile.wanted_vault));
+}
+
+#[test]
+fn a_settlement_waits_for_enough_active_requests() {
+    let mut c = with_parades(6, 20, 600, 0);
+    c.agent.min_active_per_settlement = 1000;
+    let sim = simulate(&c).unwrap();
+    // With an unreachable threshold, nothing moves before the agent stops acting.
+    assert!(sim
+        .timeline
+        .iter()
+        .filter(|e| matches!(e.kind, EventKind::Placement | EventKind::Withdrawal))
+        .all(|e| e.at_secs > c.run_secs));
+    execute(&sim, &c, &mut MemoryChain::default(), &mut |_| {}).unwrap();
+    c.agent.min_active_per_settlement = 0;
+    let eager = simulate(&c).unwrap();
+    assert!(eager.timeline.iter().any(|e| e.kind == EventKind::Placement && e.at_secs <= c.run_secs));
+}
+
+#[test]
+fn steady_withdrawals_leave_every_vault_at_a_fixed_pace() {
+    let mut c = with_parades(9, 20, 1800, 0);
+    c.agent.steady_withdrawal_period_secs = 600;
+    c.agent.steady_withdrawal_units = 10;
+    let sim = simulate(&c).unwrap();
+    for (v, vault) in c.vaults.iter().enumerate() {
+        let times: BTreeSet<u64> = sim
+            .timeline
+            .iter()
+            .filter(|e| e.kind == EventKind::Withdrawal && e.from == vault.contract && e.at_secs % 1800 != 0)
+            .map(|e| e.at_secs)
+            .collect();
+        assert!(!times.is_empty(), "vault {v} never withdrew steadily");
+        assert!(times.iter().all(|t| t % 600 == 0));
+    }
+    execute(&sim, &c, &mut MemoryChain::default(), &mut |_| {}).unwrap();
+    let mut alone = with_parades(9, 20, 0, 0);
+    alone.agent.steady_withdrawal_period_secs = 600;
+    assert!(simulate(&alone).err().unwrap().to_string().contains("net settlement"));
+}
+
+#[test]
+fn a_switch_moves_a_placed_request_to_another_vault_without_an_exit() {
+    let mut c = with_parades(10, 20, 1800, 0);
+    c.agent.switch_percent = 100;
+    let sim = simulate(&c).unwrap();
+    let moved: Vec<_> = sim.truth.requests.iter().filter(|r| r.vault != r.first_vault).collect();
+    assert!(!moved.is_empty());
+    for r in &moved {
+        let s = r.profile.switch.unwrap();
+        assert_eq!(r.vault, c.vaults[s.to].contract);
+        assert!(r.placed_at.is_some(), "only a placed request can switch");
+        // The user's own account sees nothing of it.
+        assert!(r.payment_events.iter().all(|&i| sim.timeline[i].kind == EventKind::ExitPayment));
+    }
+    execute(&sim, &c, &mut MemoryChain::default(), &mut |_| {}).unwrap();
+    let mut direct = with_parades(10, 0, 0, 0);
+    direct.agent.switch_percent = 30;
+    assert!(simulate(&direct).is_err());
+}
+
+#[test]
+fn bad_yield_settings_are_refused() {
+    let mut c = yield_config(1);
+    c.yield_bp_per_hour = vec![1, 2];
+    assert!(simulate(&c).err().unwrap().to_string().contains("one value per vault"));
+    let mut c = yield_config(1);
+    c.vault_weights = vec![0, 0, 0, 0];
+    assert!(simulate(&c).is_err());
+    let mut c = yield_config(1);
+    c.suggestion_percent = 101;
+    assert!(simulate(&c).is_err());
 }
 
 #[test]
