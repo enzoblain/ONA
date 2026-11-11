@@ -83,6 +83,21 @@ the token count and salted fingerprints, never the content. The exposure report 
 relay and the model with the requests and bytes each received, attestation and signature requests included, and
 `content_readable_by_relay` is `true` as soon as one request reached the relay. This mode has never run against NEAR AI.
 
+To check one encrypted call against NEAR AI without a mission, run a relay that holds the key, then:
+
+```
+ONA_CHECK_RELAY_URL=http://127.0.0.1:8787 ONA_CHECK_MODEL=<model> cargo run -p ona-core --example e2ee_check
+```
+
+| Variable | Value |
+|---|---|
+| `ONA_CHECK_RELAY_URL` | relay address, default `http://127.0.0.1:8787` |
+| `ONA_CHECK_MODEL` | model name, required |
+| `ONA_CHECK_MAX_TOKENS` | optional, most reply tokens, default 200 |
+| `ONA_CHECK_VERSION` | optional, `2` to compare with encryption version 2; version 3 otherwise |
+
+It prints whether the reply was decrypted and its signature checked. One run spends at most the reply ceiling plus the prompt.
+
 ## Measure gas on a local node
 
 ```
