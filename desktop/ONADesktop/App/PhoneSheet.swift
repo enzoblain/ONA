@@ -49,18 +49,26 @@ struct PhoneSheet: View {
                     .textSelection(.enabled)
                     .lineLimit(2)
             }
+            #if DEBUG
+            // Debug builds only (the simulator has no camera): the general pasteboard is readable by every app.
             Button("Copier le texte du code") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(payload, forType: .string)
             }
             .buttonStyle(.glass)
+            #endif
         } else {
             waitingForAddress
         }
-        Picker("Connexion", selection: $model.mode) {
-            ForEach(DesktopModel.ConnectionMode.allCases) { Text($0.label).tag($0) }
+        if DesktopModel.ConnectionMode.available.count > 1 {
+            Picker("Connexion", selection: $model.mode) {
+                ForEach(DesktopModel.ConnectionMode.available) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
         }
-        .pickerStyle(.segmented)
+        if let error = model.pairing.storageError {
+            Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red).font(.caption)
+        }
         footer
     }
 
@@ -92,15 +100,14 @@ struct PhoneSheet: View {
             Text("Le téléphone doit afficher le même code :").foregroundStyle(.secondary)
             Text("\(awaiting.code.prefix(3)) \(awaiting.code.suffix(3))")
                 .font(.system(size: 46, weight: .semibold, design: .monospaced))
-            Text("Si les codes diffèrent, quelqu'un s'est peut-être interposé : refusez.")
+            Text("Si les codes diffèrent, ou si le téléphone n'affiche aucun code, quelqu'un s'est peut-être interposé : refusez. Ce code expire au bout de 5 minutes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Button("Ils diffèrent", role: .destructive) { model.pairing.forgetPhone() }
+                Button("Refuser", role: .destructive) { model.pairing.forgetPhone() }
                     .buttonStyle(.glass)
                 Button("Les codes sont identiques") {
-                    model.pairing.confirmCode()
-                    dismiss()
+                    if model.pairing.confirmCode() { dismiss() }
                 }
                 .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)
@@ -121,6 +128,9 @@ struct PhoneSheet: View {
             }
             .formStyle(.grouped)
             .frame(height: 150)
+            if let error = model.pairing.storageError {
+                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red).font(.caption)
+            }
             HStack {
                 Button("Oublier ce téléphone", role: .destructive) { confirmingForget = true }
                     .buttonStyle(.glass)
@@ -160,13 +170,15 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Picker("Le téléphone joint ce Mac", selection: $model.mode) {
-                ForEach(DesktopModel.ConnectionMode.allCases) { Text($0.label).tag($0) }
+            if DesktopModel.ConnectionMode.available.count > 1 {
+                Picker("Le téléphone joint ce Mac", selection: $model.mode) {
+                    ForEach(DesktopModel.ConnectionMode.available) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.radioGroup)
             }
-            .pickerStyle(.radioGroup)
             Text(model.mode == .tor
                  ? "Le serveur écoute seulement sur cet ordinateur (127.0.0.1) et est publié en service .onion par Tor."
-                 : "Le serveur écoute sur le réseau local. À réserver aux tests : l'adresse est visible sur ce réseau.")
+                 : "Version de développement : le serveur écoute sur le réseau local, en clair. Tout appareil de ce réseau voit les échanges.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             LabeledContent("Tor") { TorStatusLabel(state: model.tor.state) }

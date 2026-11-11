@@ -32,7 +32,24 @@ public final class TorService {
         return nil
     }
 
-    /// Starts tor with an onion service whose port 80 goes to 127.0.0.1:`port`.
+    /// The torrc. Paths quoted (escaped); `__OwningControllerProcess` makes tor exit when this app exits, even after a
+    /// crash, so no orphan tor keeps publishing the onion address towards a port another program could take.
+    static func torrc(data: String, hs: String, port: UInt16, owner: Int32) -> String {
+        func quoted(_ path: String) -> String {
+            "\"" + path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        return """
+        SocksPort 0
+        DataDirectory \(quoted(data))
+        HiddenServiceDir \(quoted(hs))
+        HiddenServicePort 80 127.0.0.1:\(port)
+        __OwningControllerProcess \(owner)
+        Log notice stdout
+
+        """
+    }
+
+    /// Starts tor with an onion service whose port 80 goes to 127.0.0.1:`port` (the port the server got).
     public func start(port: UInt16) {
         stop()
         guard let binary = Self.binary else {
@@ -47,13 +64,8 @@ public final class TorService {
                 try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
             }
             let torrc = Self.root.appending(path: "torrc")
-            try """
-            SocksPort 0
-            DataDirectory \(data.path)
-            HiddenServiceDir \(hs.path)
-            HiddenServicePort 80 127.0.0.1:\(port)
-            Log notice stdout
-            """.write(to: torrc, atomically: true, encoding: .utf8)
+            try Self.torrc(data: data.path, hs: hs.path, port: port, owner: ProcessInfo.processInfo.processIdentifier)
+                .write(to: torrc, atomically: true, encoding: .utf8)
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: binary)

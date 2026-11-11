@@ -201,7 +201,7 @@ private struct ConfirmationCard: View {
                 }
                 .pickerStyle(.radioGroup)
                 .disabled(state != .pending)
-            case .payment(let to, let amount, let screen, _):
+            case .payment(let to, let amount, let screen, _, _):
                 LabeledContent("Montant", value: Self.near(amount))
                 LabeledContent("Destinataire", value: to)
                 Text(screen).font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -213,7 +213,7 @@ private struct ConfirmationCard: View {
                         switch pending.request {
                         case .plan: answer("accept", nil, nil)
                         case .recipient: answer("accept", firm, nil)
-                        case .payment(_, _, _, let digest): answer("accept", nil, digest)
+                        case .payment(_, _, _, let digest, _): answer("accept", nil, digest)
                         }
                     }
                     .buttonStyle(.glassProminent)

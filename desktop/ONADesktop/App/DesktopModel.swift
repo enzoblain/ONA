@@ -8,11 +8,14 @@ final class DesktopModel {
     enum ConnectionMode: String, CaseIterable, Identifiable {
         /// The phone reaches this Mac through Tor (onion service). The server listens on 127.0.0.1 only.
         case tor
-        /// The phone reaches this Mac on the local network. For tests.
+        /// The phone reaches this Mac on the local network, in plain HTTP. Debug builds only.
         case localNetwork
 
         var id: String { rawValue }
-        var label: String { self == .tor ? "Par Tor (recommandé)" : "Réseau local (tests)" }
+        var label: String { self == .tor ? "Par Tor" : "Réseau local (développement)" }
+
+        /// The modes this build offers.
+        static var available: [ConnectionMode] { LocalModePolicy.allowed ? allCases : [.tor] }
     }
 
     let pairing: PairingAuthority
@@ -21,15 +24,20 @@ final class DesktopModel {
     private(set) var serverError: String?
     private(set) var lastPhoneRequest: String?
     private(set) var lastPhoneContact: Date?
+    /// The port the server got (chosen by the system in Tor mode).
+    private(set) var port: UInt16?
 
     var mode: ConnectionMode {
         didSet {
+            guard mode != oldValue else { return }
+            if mode == .localNetwork && !LocalModePolicy.allowed { mode = .tor; return }
             UserDefaults.standard.set(mode.rawValue, forKey: "connectionMode")
             startServing()
         }
     }
 
-    static let port: UInt16 = 8790
+    /// Port of the local-network mode (debug builds). Tor mode uses a port chosen by the system.
+    static let localPort: UInt16 = 8790
 
     private var server: PhoneServer?
     private var router: PhoneRouter?
@@ -38,46 +46,67 @@ final class DesktopModel {
     init() {
         pairing = PairingAuthority(name: Host.current().localizedName ?? "Mon Mac", store: KeychainPairingStore())
         engine = ChatEngine(makeCore: { OnaCoreMission() })
-        mode = ConnectionMode(rawValue: UserDefaults.standard.string(forKey: "connectionMode") ?? "") ?? .tor
+        mode = ConnectionMode(rawValue: LocalModePolicy.resolve(stored: UserDefaults.standard.string(forKey: "connectionMode"))) ?? .tor
         let router = PhoneRouter(pairing: pairing, engine: engine)
         router.onRequest = { [weak self] line in
             self?.lastPhoneRequest = line
             self?.lastPhoneContact = .now
         }
+        router.allowedHosts = { [weak self] in self?.allowedHosts ?? [] }
         self.router = router
         startServing()
         ticker = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(1500))
                 self?.engine.tick()
+                self?.pairing.tick()
             }
         }
     }
 
-    /// (Re)starts the phone server, and the onion service when the mode is Tor.
+    /// (Re)starts the phone server; in Tor mode, the onion service starts once the server listens, on its port.
+    /// While listening fails, tor stays stopped.
     func startServing() {
         server?.stop()
         tor.stop()
+        port = nil
         let router = self.router
-        let server = PhoneServer(port: Self.port) { request in
-            await MainActor.run { router?.handle(request) ?? HTTPResponse(status: 500, json: [:]) }
+        let server = PhoneServer(port: mode == .tor ? 0 : Self.localPort) { request in
+            await MainActor.run { router?.handle(request) ?? HTTPResponse(status: 503, json: [:]) }
         }
-        server.onState = { [weak self] message in
-            Task { @MainActor in self?.serverError = message }
+        server.onState = { [weak self] message, port in
+            Task { @MainActor in
+                guard let self else { return }
+                self.serverError = message
+                self.port = port
+                if let port, self.mode == .tor { self.tor.start(port: port) } else if port == nil { self.tor.stop() }
+            }
         }
         do {
             try server.start(mode == .tor ? .localhost : .localNetwork)
             serverError = nil
         } catch {
-            serverError = "Le port \(Self.port) n'est pas disponible : \(error.localizedDescription)"
+            serverError = "Écoute impossible : \(error.localizedDescription)"
         }
         self.server = server
-        if mode == .tor { tor.start(port: Self.port) }
     }
 
     func stop() {
         server?.stop()
         tor.stop()
+    }
+
+    /// The `Host` values the server answers to.
+    var allowedHosts: [String] {
+        guard let port else { return [] }
+        var hosts = ["127.0.0.1:\(port)"]
+        switch mode {
+        case .tor:
+            if let onion = tor.onion { hosts += [onion, "\(onion):80"] }
+        case .localNetwork:
+            if let ip = LocalAddress.ipv4() { hosts.append("\(ip):\(port)") }
+        }
+        return hosts
     }
 
     /// Text of the pairing QR code for the current mode, or nil while it cannot be built yet.
@@ -87,8 +116,8 @@ final class DesktopModel {
             guard let onion = tor.onion else { return nil }
             return pairing.payload(address: nil, onion: onion)
         case .localNetwork:
-            guard let ip = LocalAddress.ipv4() else { return nil }
-            return pairing.payload(address: "http://\(ip):\(Self.port)", onion: nil)
+            guard let reachable = reachableAt else { return nil }
+            return pairing.payload(address: reachable, onion: nil)
         }
     }
 
@@ -96,7 +125,8 @@ final class DesktopModel {
     var reachableAt: String? {
         switch mode {
         case .tor: tor.onion
-        case .localNetwork: LocalAddress.ipv4().map { "http://\($0):\(Self.port)" }
+        case .localNetwork:
+            if let ip = LocalAddress.ipv4(), let port { "http://\(ip):\(port)" } else { nil }
         }
     }
 }

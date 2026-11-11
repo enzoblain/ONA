@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use crate::pairing::ProtocolError;
-use crate::protocol::parse_payment_screen;
+use crate::protocol::{self, parse_payment_screen};
 
 /// Something that runs ona-core commands (`Core::dispatch`).
 pub trait MissionCore {
@@ -20,9 +20,36 @@ impl MissionCore for ona_core::Core {
     }
 }
 
+/// A core whose panic is caught (the single worker thread survives) and which is never used again afterwards: its
+/// state (gate, journal) may be half changed.
+pub struct Guarded<C: MissionCore> {
+    core: C,
+    poisoned: bool,
+}
+
+impl<C: MissionCore> Guarded<C> {
+    pub fn new(core: C) -> Self {
+        Self { core, poisoned: false }
+    }
+}
+
+impl<C: MissionCore> MissionCore for Guarded<C> {
+    fn dispatch(&mut self, request: Value) -> Value {
+        if self.poisoned {
+            return json!({"ok": false, "error": "ona-core stopped after an internal error"});
+        }
+        let core = &mut self.core;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| core.dispatch(request))) {
+            Ok(reply) => reply,
+            Err(_) => {
+                self.poisoned = true;
+                json!({"ok": false, "error": "panic inside ona-core"})
+            }
+        }
+    }
+}
+
 pub const MAX_TEXT: usize = 2000;
-/// Amount of the demo payment, in yoctoNEAR (1 NEAR), as in ona-core's demo.
-const DEMO_AMOUNT: &str = "1000000000000000000000000";
 const CONTACT_MESSAGE: &str = "Bonjour, je souhaite un devis pour une consultation en droit du travail.";
 const PLAN_MESSAGE: &str = "J'ai préparé un plan en {} étapes. Il est figé avant toute lecture du web : je ne contacterai personne et ne paierai rien sans votre accord. Validez-le pour que je commence.";
 const RECIPIENT_MESSAGE: &str = "J'ai trouvé {} offres. Laquelle dois-je contacter ?";
@@ -55,11 +82,20 @@ fn error_of(reply: &Value) -> String {
     reply["error"].as_str().unwrap_or("erreur inconnue").to_owned()
 }
 
+/// What binds a payment confirmation to one mission, once (format v2, shared with ona-core).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaymentBinding {
+    pub network: String,
+    pub contract: String,
+    pub mission_id: String,
+    pub nonce: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
     Plan(Vec<String>),
     Recipient(Vec<Value>),
-    Payment { to: String, amount: String, screen: String, digest: String },
+    Payment { to: String, amount: String, screen: String, digest: String, binding: PaymentBinding },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -69,16 +105,57 @@ pub struct Pending {
 }
 
 impl Pending {
-    fn json(&self) -> Value {
+    /// Digest of what the phone shows for this confirmation. The phone recomputes it from what it displays and signs
+    /// it; a confirmation signed over anything else does not verify.
+    pub fn content(&self) -> String {
         match &self.request {
-            Request::Plan(steps) => json!({"id": self.id, "kind": "plan", "plan": steps}),
-            Request::Recipient(offers) => json!({"id": self.id, "kind": "recipient", "offers": offers}),
-            Request::Payment { to, amount, screen, digest } => json!({
-                "id": self.id, "kind": "payment",
-                "payment": {"to": to, "amount": amount, "screen": screen, "digest": digest},
+            Request::Plan(steps) => protocol::plan_digest(&self.id, steps),
+            Request::Recipient(offers) => protocol::offers_digest(&self.id, offers),
+            Request::Payment { digest, .. } => digest.clone(),
+        }
+    }
+
+    fn json(&self) -> Value {
+        let content = self.content();
+        match &self.request {
+            Request::Plan(steps) => json!({"id": self.id, "kind": "plan", "plan": steps, "content": content}),
+            Request::Recipient(offers) => json!({"id": self.id, "kind": "recipient", "offers": offers, "content": content}),
+            Request::Payment { to, amount, screen, digest, binding: b } => json!({
+                "id": self.id, "kind": "payment", "content": content,
+                "payment": {"to": to, "amount": amount, "screen": screen, "digest": digest, "digest_version": 2,
+                            "network": b.network, "contract": b.contract, "mission_id": b.mission_id, "nonce": b.nonce},
             }),
         }
     }
+}
+
+/// Reads ona-core's `prepare_payment` reply: `screen`, `digest` and `payment` {`network`, `contract`, `mission_id`,
+/// `nonce`, `to`, `amount`}. The digest must be `protocol::payment_digest_v2` of those six fields, and `to` and `amount`
+/// must be the ones of the screen. Anything else is refused: the phone could not recompute what it signs.
+pub fn read_prepared_payment(reply: &Value) -> Result<Request, String> {
+    let screen = reply["screen"].as_str().unwrap_or_default().to_owned();
+    let digest = reply["digest"].as_str().unwrap_or_default().to_owned();
+    let (amount, to) = parse_payment_screen(&screen).ok_or("unreadable payment screen")?;
+    if !protocol::is_hex(&digest, 64) {
+        return Err("malformed payment digest".into());
+    }
+    let payment = &reply["payment"];
+    let field = |key: &str| payment[key].as_str().map(String::from);
+    let (Some(network), Some(contract), Some(mission_id), Some(nonce), Some(paid_to), Some(paid_amount)) =
+        (field("network"), field("contract"), field("mission_id"), field("nonce"), field("to"), field("amount"))
+    else {
+        return Err("payment without its mission binding (digest v2 required)".into());
+    };
+    if paid_to != to || paid_amount != amount {
+        return Err("payment fields differ from the payment screen".into());
+    }
+    if !protocol::is_hex(&nonce, 32) || mission_id.is_empty() {
+        return Err("malformed payment binding".into());
+    }
+    if protocol::payment_digest_v2(&network, &contract, &mission_id, &nonce, &to, &amount) != digest {
+        return Err("payment digest does not match its fields".into());
+    }
+    Ok(Request::Payment { to, amount, screen, digest, binding: PaymentBinding { network, contract, mission_id, nonce } })
 }
 
 enum Content {
@@ -111,7 +188,6 @@ struct Run {
     read_count: usize,
     ranked: Vec<Value>,
     chosen: Option<String>,
-    confirmations: u32,
 }
 
 pub struct Chat {
@@ -191,7 +267,7 @@ impl ChatEngine {
     }
 
     pub fn with_ona_core() -> Self {
-        Self::new(|| Box::new(ona_core::Core::new()))
+        Self::new(|| Box::new(Guarded::new(ona_core::Core::new())))
     }
 
     fn sorted(&self) -> Vec<&Chat> {
@@ -209,7 +285,8 @@ impl ChatEngine {
     pub fn create(&mut self, text: &str) -> Result<String, ProtocolError> {
         let text = clean(text).ok_or(ProtocolError::BadText)?;
         self.count += 1;
-        let id = format!("chat-{}", self.count);
+        // Random, never reused: an old signed request cannot target a new chat that took the same id.
+        let id = format!("chat-{}", protocol::random_hex16());
         self.chats.push(Chat {
             id: id.clone(), title: title(&text), updated_at: now(), items: Vec::new(), decisions: Vec::new(),
             run: None, item_count: 0, order: self.count,
@@ -229,6 +306,11 @@ impl ChatEngine {
         let before = self.chats.len();
         self.chats.retain(|c| c.id != chat_id);
         if self.chats.len() == before { Err(ProtocolError::UnknownChat) } else { Ok(()) }
+    }
+
+    /// The content digest of a confirmation still pending (what the phone must have signed).
+    pub fn pending_content(&self, id: &str) -> Option<String> {
+        self.chats.iter().find_map(|c| c.pending().filter(|p| p.id == id)).map(Pending::content)
     }
 
     /// A decision on a pending confirmation. Returns an error code on refusal.
@@ -295,8 +377,9 @@ impl ChatEngine {
             chat.add(Content::Agent(BUSY_MESSAGE.into()));
             return;
         }
-        let core = chat.run.take().map(|r| r.core).unwrap_or_else(|| make_core());
-        if let Some(mode) = start(chat, core, text) {
+        // A new core for every mission: the previous one (closed, or stopped by an error or a panic) is dropped.
+        chat.run = None;
+        if let Some(mode) = start(chat, make_core(), text) {
             self.mode = mode;
         }
     }
@@ -338,7 +421,7 @@ impl ChatEngine {
 fn start(chat: &mut Chat, core: Box<dyn MissionCore>, text: &str) -> Option<String> {
     chat.run = Some(Run {
         core, plan: Vec::new(), cursor: 0, phase: Phase::Running, handles: Vec::new(), read_count: 0,
-        ranked: Vec::new(), chosen: None, confirmations: 0,
+        ranked: Vec::new(), chosen: None,
     });
     let run = chat.run.as_mut()?;
     let opened = run.core.dispatch(json!({"cmd": "open", "mission": text}));
@@ -402,17 +485,19 @@ fn step(chat: &mut Chat) {
             activity(format!("Message générique envoyé à {}", run.chosen.as_deref().unwrap_or("?")))
         }
         "prepare_payment" => {
-            let reply = run.core.dispatch(json!({"cmd": "prepare_payment", "amount": DEMO_AMOUNT}));
-            let screen = reply["screen"].as_str().unwrap_or_default().to_owned();
-            let digest = reply["digest"].as_str().unwrap_or_default().to_owned();
-            let Some((amount, to)) = parse_payment_screen(&screen).filter(|_| ok(&reply) && !digest.is_empty())
-            else { return fail(chat, &error_of(&reply)) };
+            // No amount: ona-core computes it from the chosen offer's price and the policy's rate.
+            let reply = run.core.dispatch(json!({"cmd": "prepare_payment"}));
+            if !ok(&reply) { return fail(chat, &error_of(&reply)) }
+            let request = match read_prepared_payment(&reply) {
+                Ok(request) => request,
+                Err(error) => return fail(chat, &error),
+            };
             run.cursor += 1;
             let next_is_confirmation = run.plan.get(run.cursor).is_some_and(|t| t == "confirm_payment");
             chat.add(activity("Paiement préparé à partir de l'annuaire".into()));
             if next_is_confirmation {
                 chat.add(Content::Agent(PAYMENT_MESSAGE.into()));
-                wait(chat, Request::Payment { to, amount, screen, digest });
+                wait(chat, request);
             }
             return;
         }
@@ -430,8 +515,8 @@ fn step(chat: &mut Chat) {
 
 fn wait(chat: &mut Chat, request: Request) {
     let Some(run) = chat.run.as_mut() else { return };
-    run.confirmations += 1;
-    let pending = Pending { id: format!("{}-c-{}", chat.id, run.confirmations), request };
+    // 16 random bytes: never the same id twice, across missions, chats and restarts.
+    let pending = Pending { id: format!("c-{}", protocol::random_hex16()), request };
     run.phase = Phase::Waiting(pending.clone());
     chat.add(Content::Confirmation(pending));
 }
@@ -508,7 +593,14 @@ mod tests {
         run_until_waiting(&mut engine, &chat);
         let payment = pending_of(&engine, &chat);
         assert_eq!(payment["kind"], "payment");
-        assert_eq!(payment["payment"]["amount"], DEMO_AMOUNT);
+        // The amount comes from ona-core (offer price × policy rate); the phone can recompute the v2 digest.
+        let p = &payment["payment"];
+        assert_eq!(p["digest_version"], 2);
+        assert_eq!(p["screen"], format!("Pay {} yoctoNEAR to {}", p["amount"].as_str().unwrap(), p["to"].as_str().unwrap()));
+        assert_eq!(p["digest"], protocol::payment_digest_v2(
+            p["network"].as_str().unwrap(), p["contract"].as_str().unwrap(), p["mission_id"].as_str().unwrap(),
+            p["nonce"].as_str().unwrap(), p["to"].as_str().unwrap(), p["amount"].as_str().unwrap()));
+        assert_eq!(payment["content"], p["digest"]);
         // ona-core's gate refuses a digest that is not the one of the payment screen.
         assert!(engine.confirm(payment["id"].as_str(), Some("accept"), None, Some("00")).is_err());
         engine.confirm(payment["id"].as_str(), Some("accept"), None, payment["payment"]["digest"].as_str()).unwrap();
@@ -541,6 +633,7 @@ mod tests {
         assert_eq!(engine.create("   "), Err(ProtocolError::BadText));
         assert_eq!(engine.create(&"a".repeat(MAX_TEXT + 1)), Err(ProtocolError::BadText));
         assert_eq!(engine.post("bonjour", "chat-9"), Err(ProtocolError::UnknownChat));
+        assert_eq!(engine.delete("chat-1"), Err(ProtocolError::UnknownChat));
         assert_eq!(engine.delete("chat-9"), Err(ProtocolError::UnknownChat));
         let chat = engine.create("Trouve un avocat").unwrap();
         engine.post("Et vite", &chat).unwrap();
@@ -548,6 +641,99 @@ mod tests {
         assert_eq!(view["chat"]["items"].as_array().unwrap().last().unwrap()["text"], BUSY_MESSAGE);
         engine.delete(&chat).unwrap();
         assert!(engine.chat_json(&chat).is_none());
+    }
+
+    /// Confirmation and chat ids never repeat (they used to restart at chat-1-c-1).
+    #[test]
+    fn ids_are_random_and_never_reused() {
+        let mut engine = ChatEngine::with_ona_core();
+        let chat = engine.create("Trouve un avocat").unwrap();
+        let other = engine.create("Trouve un avocat").unwrap();
+        assert_ne!(chat, other);
+        assert!(chat.starts_with("chat-") && protocol::is_hex(&chat[5..], 32));
+        let first = pending_of(&engine, &chat)["id"].as_str().unwrap().to_owned();
+        assert!(first.starts_with("c-") && protocol::is_hex(&first[2..], 32));
+        engine.confirm(Some(&first), Some("reject"), None, None).unwrap();
+        engine.post("Recommence", &chat).unwrap();
+        let second = pending_of(&engine, &chat)["id"].as_str().unwrap().to_owned();
+        assert_ne!(first, second);
+        assert_eq!(engine.confirm(Some(&first), Some("accept"), None, None), Err("stale confirmation".into()));
+    }
+
+    /// Each confirmation carries the digest of what it shows.
+    #[test]
+    fn confirmations_carry_the_digest_of_their_content() {
+        let mut engine = ChatEngine::with_ona_core();
+        let chat = engine.create("Trouve un avocat").unwrap();
+        let plan = pending_of(&engine, &chat);
+        let steps: Vec<String> = plan["plan"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_owned()).collect();
+        let id = plan["id"].as_str().unwrap();
+        assert_eq!(plan["content"], protocol::plan_digest(id, &steps));
+        assert_eq!(engine.pending_content(id), Some(protocol::plan_digest(id, &steps)));
+        assert_eq!(engine.pending_content("c-unknown"), None);
+    }
+
+    /// A core that panicked is caught, then never used again, and the chat's next mission gets a new core.
+    #[test]
+    fn a_core_that_panicked_is_not_reused() {
+        struct Exploding;
+        impl MissionCore for Exploding {
+            fn dispatch(&mut self, request: Value) -> Value {
+                if request["cmd"] == "propose_plan" {
+                    panic!("inside the core");
+                }
+                json!({"ok": true, "mode": "mock"})
+            }
+        }
+        let made = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = made.clone();
+        let mut engine = ChatEngine::new(move || {
+            counter.set(counter.get() + 1);
+            Box::new(Guarded::new(Exploding)) as Box<dyn MissionCore>
+        });
+        let chat = engine.create("Trouve un avocat").unwrap();
+        let view = engine.chat_json(&chat).unwrap();
+        let last = view["chat"]["items"].as_array().unwrap().last().unwrap().clone();
+        assert!(last["text"].as_str().unwrap().contains("panic inside ona-core"), "{last}");
+        engine.post("Recommence", &chat).unwrap();
+        assert_eq!(made.get(), 2);
+
+        let mut guarded = Guarded::new(Exploding);
+        assert_eq!(guarded.dispatch(json!({"cmd": "propose_plan"}))["error"], "panic inside ona-core");
+        assert_eq!(guarded.dispatch(json!({"cmd": "open"}))["error"], "ona-core stopped after an internal error");
+    }
+
+    /// Payment v2: the digest binds network, contract, mission, nonce, account and amount.
+    #[test]
+    fn reads_a_v2_payment_and_refuses_unbound_or_mismatched_ones() {
+        let nonce = "00112233445566778899aabbccddeeff";
+        let screen = "Pay 1000000000000000000000000 yoctoNEAR to cabinet-b.testnet";
+        let digest = protocol::payment_digest_v2("testnet", "pay.ona.testnet", "m-1", nonce, "cabinet-b.testnet",
+                                                 "1000000000000000000000000");
+        // Shape of ona-core's prepare_payment reply.
+        let reply = json!({"ok": true, "screen": screen, "digest": digest, "amount_near": "1", "mode": "mock",
+                           "payment": {"network": "testnet", "contract": "pay.ona.testnet", "mission_id": "m-1",
+                                       "nonce": nonce, "to": "cabinet-b.testnet", "amount": "1000000000000000000000000"}});
+        let Ok(request) = read_prepared_payment(&reply) else { panic!() };
+        let pending = Pending { id: "c-1".into(), request };
+        let view = pending.json();
+        assert_eq!(view["payment"]["digest_version"], 2);
+        assert_eq!(view["payment"]["mission_id"], "m-1");
+        assert_eq!(view["payment"]["screen"], screen);
+        assert_eq!(view["content"], digest);
+
+        let mut other_mission = reply.clone();
+        other_mission["payment"]["mission_id"] = json!("m-2");
+        assert!(read_prepared_payment(&other_mission).is_err());
+        let mut other_account = reply.clone();
+        other_account["payment"]["to"] = json!("attacker.testnet");
+        assert!(read_prepared_payment(&other_account).is_err());
+        let mut other_amount = reply.clone();
+        other_amount["payment"]["amount"] = json!("2");
+        assert!(read_prepared_payment(&other_amount).is_err());
+        // The old digest (account and amount only), even for a mock payment: refused.
+        let unbound = json!({"ok": true, "screen": screen, "digest": digest, "mode": "mock"});
+        assert!(read_prepared_payment(&unbound).is_err());
     }
 
     #[test]

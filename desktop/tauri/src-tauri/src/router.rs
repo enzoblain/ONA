@@ -1,5 +1,6 @@
-//! The phone protocol (docs/ios/protocol-draft.md) on top of the pairing authority and the chat engine.
-//! Every request that changes something must be signed by the paired, verified phone.
+//! The phone protocol v1 (docs/ios/protocol-draft.md) on top of the pairing authority and the chat engine.
+//! Every request is a POST with a JSON body; every reply is signed with the computer's key. Reads need the token
+//! given at pairing; requests that change something are also signed by the phone's key, with a counter.
 
 use serde_json::{Map, Value, json};
 
@@ -8,59 +9,111 @@ use crate::http::{Request, Response};
 use crate::pairing::{PairingAuthority, ProtocolError};
 use crate::protocol;
 
-pub fn handle(request: &Request, pairing: &mut PairingAuthority, engine: &mut ChatEngine) -> Response {
+/// Longest request nonce copied into the reply signature.
+const MAX_NONCE: usize = 64;
+/// Largest counter accepted, 2^53 − 1 (exact in every JSON implementation). Same bound in the macOS app.
+pub const MAX_COUNTER: u64 = 9_007_199_254_740_991;
+
+/// A request counter: a JSON integer from 0 to `MAX_COUNTER`. Fractions (`1.0`), booleans, negatives refused.
+pub fn counter(value: &Value) -> Option<u64> {
+    value.as_u64().filter(|c| *c <= MAX_COUNTER)
+}
+
+/// Answers one request. `allowed_hosts`: the `Host` values this computer answers to (`127.0.0.1:port`, the onion
+/// address, the local address in local mode). Anything else is refused (DNS rebinding).
+pub fn handle(request: &Request, pairing: &mut PairingAuthority, engine: &mut ChatEngine, allowed_hosts: &[String])
+              -> Response {
+    let body: Option<Map<String, Value>> = if request.body.is_empty() {
+        Some(Map::new())
+    } else {
+        match serde_json::from_slice(&request.body) {
+            Ok(Value::Object(body)) => Some(body),
+            _ => None,
+        }
+    };
+    let nonce = body.as_ref().and_then(|b| b.get("nonce")).and_then(Value::as_str)
+        .filter(|n| n.len() <= MAX_NONCE).unwrap_or("").to_owned();
+    let mut response = route(request, body, pairing, engine, allowed_hosts);
+    response.signature = pairing.sign_reply(&nonce, &request.method, &request.path, response.status,
+                                            &response.json.to_string());
+    response
+}
+
+fn route(request: &Request, body: Option<Map<String, Value>>, pairing: &mut PairingAuthority, engine: &mut ChatEngine,
+         allowed_hosts: &[String]) -> Response {
+    // Browsers always send one of these on cross-site or scripted requests; the phone never does.
+    for name in ["origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"] {
+        if request.header(name) != Ok(None) {
+            return error(engine, 403, ProtocolError::Browser.code());
+        }
+    }
+    match request.header("host") {
+        Ok(Some(host)) if allowed_hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) => {}
+        _ => return error(engine, 403, ProtocolError::BadHost.code()),
+    }
     let parts: Vec<&str> = request.path.split('/').collect();
-    // parts: ["", "v0", …]
-    if parts.len() < 3 || !parts[0].is_empty() || parts[1] != "v0" {
+    // parts: ["", "v1", …]
+    if parts.len() < 3 || !parts[0].is_empty() || parts[1] != "v1" || request.method != "POST" {
         return error(engine, 404, "not found");
     }
-    let rest = &parts[2..];
-    match (request.method.as_str(), rest) {
-        ("GET", ["chats"]) => match pairing.read_refusal() {
-            Some(failure) => error(engine, 403, failure.code()),
-            None => Response::new(200, engine.list_json()),
-        },
-        ("GET", ["chats", id]) => match pairing.read_refusal() {
-            Some(failure) => error(engine, 403, failure.code()),
-            None => match engine.chat_json(id) {
-                Some(view) => Response::new(200, view),
-                None => error(engine, 404, ProtocolError::UnknownChat.code()),
-            },
-        },
-        ("POST", _) => {
-            let body = if request.body.is_empty() { Ok(Value::Object(Map::new())) } else { serde_json::from_slice(&request.body) };
-            match body {
-                Ok(Value::Object(body)) => post(rest, &body, pairing, engine),
-                _ => error(engine, 400, "body is not a JSON object"),
-            }
-        }
-        _ => error(engine, 404, "not found"),
-    }
+    let Some(body) = body else { return error(engine, 400, "body is not a JSON object") };
+    post(&parts[2..], &body, pairing, engine)
 }
 
 fn post(rest: &[&str], body: &Map<String, Value>, pairing: &mut PairingAuthority, engine: &mut ChatEngine) -> Response {
     let text = |key: &str| body.get(key).and_then(Value::as_str);
+    let token = text("token");
     let pairing_id = text("pairing_id");
     let signature = text("signature");
+    let counter = body.get("counter").and_then(counter);
 
     match rest {
-        ["pair"] => match pairing.pair(text("code"), text("phone_key"), signature) {
-            Ok(id) => ok(engine, json!({"pairing_id": id})),
+        ["pair"] => match pairing.commit(text("code"), text("commitment")) {
+            Ok((id, computer_nonce)) => ok(engine, json!({"pairing_id": id, "computer_nonce": computer_nonce})),
+            Err(failure) => error(engine, 403, failure.code()),
+        },
+        ["pair", "reveal"] => match pairing.reveal(pairing_id, text("phone_key"), text("phone_nonce"), signature) {
+            Ok((id, token)) => ok(engine, json!({"pairing_id": id, "token": token})),
+            Err(failure) => error(engine, 403, failure.code()),
+        },
+        ["chats", "list"] => match pairing.authorize(token) {
+            Ok(_) => Response::new(200, engine.list_json()),
+            Err(failure) => error(engine, 403, failure.code()),
+        },
+        ["chats", id, "view"] => match pairing.authorize(token) {
+            Ok(_) => match engine.chat_json(id) {
+                Some(view) => Response::new(200, view),
+                None => error(engine, 404, ProtocolError::UnknownChat.code()),
+            },
             Err(failure) => error(engine, 403, failure.code()),
         },
         ["confirm"] => {
             let (id, decision, firm, digest) = (text("id"), text("decision"), text("firm"), text("digest"));
-            if let Err(failure) = pairing.check(pairing_id, signature, |p| protocol::confirm_message(p, id, decision, firm, digest)) {
+            if let Err(failure) = pairing.authorize(token) {
+                return error(engine, 403, failure.code());
+            }
+            // The phone signs the digest of what it showed; the computer uses the digest of what it asked.
+            let Some(content) = id.and_then(|id| engine.pending_content(id)) else {
+                return error(engine, 409, ProtocolError::Stale.code());
+            };
+            let signed = |p: &str, c: u64| protocol::confirm_message(p, c, id, decision, firm, digest, &content);
+            if let Err(failure) = pairing.check(token, pairing_id, counter, signature, id, signed) {
                 return error(engine, 409, failure.code());
             }
             match engine.confirm(id, decision, firm, digest) {
-                Ok(()) => ok(engine, json!({})),
+                Ok(()) => {
+                    if let Some(id) = id {
+                        pairing.record_confirmation(id);
+                    }
+                    ok(engine, json!({}))
+                }
                 Err(failure) => error(engine, 409, &failure),
             }
         }
         ["chats"] => {
             let message = text("text");
-            if let Err(failure) = pairing.check(pairing_id, signature, |p| protocol::chat_message(p, None, message)) {
+            let signed = |p: &str, c: u64| protocol::chat_message(p, c, None, message);
+            if let Err(failure) = pairing.check(token, pairing_id, counter, signature, None, signed) {
                 return error(engine, 409, failure.code());
             }
             match engine.create(message.unwrap_or("")) {
@@ -70,7 +123,8 @@ fn post(rest: &[&str], body: &Map<String, Value>, pairing: &mut PairingAuthority
         }
         ["chats", chat_id, "messages"] => {
             let message = text("text");
-            if let Err(failure) = pairing.check(pairing_id, signature, |p| protocol::chat_message(p, Some(chat_id), message)) {
+            let signed = |p: &str, c: u64| protocol::chat_message(p, c, Some(chat_id), message);
+            if let Err(failure) = pairing.check(token, pairing_id, counter, signature, None, signed) {
                 return error(engine, 409, failure.code());
             }
             match engine.post(message.unwrap_or(""), chat_id) {
@@ -79,7 +133,8 @@ fn post(rest: &[&str], body: &Map<String, Value>, pairing: &mut PairingAuthority
             }
         }
         ["chats", chat_id, "delete"] => {
-            if let Err(failure) = pairing.check(pairing_id, signature, |p| protocol::delete_message(p, chat_id)) {
+            let signed = |p: &str, c: u64| protocol::delete_message(p, c, chat_id);
+            if let Err(failure) = pairing.check(token, pairing_id, counter, signature, None, signed) {
                 return error(engine, 409, failure.code());
             }
             match engine.delete(chat_id) {
@@ -106,60 +161,231 @@ fn error(engine: &ChatEngine, status: u16, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pairing::tests::Phone;
+    use crate::pairing::tests::{Paired, Phone};
 
-    fn request(method: &str, path: &str, body: Value) -> Request {
-        Request { method: method.into(), path: path.into(), body: body.to_string().into_bytes() }
+    const HOST: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+
+    fn hosts() -> Vec<String> {
+        vec![HOST.to_owned(), "127.0.0.1:8790".to_owned()]
+    }
+
+    fn request(path: &str, body: Value) -> Request {
+        Request { method: "POST".into(), path: path.into(), headers: vec![("host".into(), HOST.into())],
+                  body: body.to_string().into_bytes() }
+    }
+
+    struct Setup {
+        pairing: PairingAuthority,
+        engine: ChatEngine,
+        phone: Phone,
+        paired: Paired,
+    }
+
+    impl Setup {
+        fn new() -> Self {
+            let mut pairing = PairingAuthority::new("PC", None);
+            let phone = Phone::new();
+            let paired = phone.pair(&mut pairing);
+            pairing.confirm_code().unwrap();
+            Self { pairing, engine: ChatEngine::with_ona_core(), phone, paired }
+        }
+
+        fn send(&mut self, request: &Request) -> Response {
+            handle(request, &mut self.pairing, &mut self.engine, &hosts())
+        }
+
+        fn post(&mut self, path: &str, body: Value) -> Response {
+            self.send(&request(path, body))
+        }
+
+        fn create(&mut self, text: &str) -> (Value, Response) {
+            let counter = self.phone.next();
+            let signature = self.phone.sign(&protocol::chat_message(&self.paired.id, counter, None, Some(text)));
+            let body = json!({"token": self.paired.token, "pairing_id": self.paired.id, "counter": counter,
+                              "text": text, "signature": signature});
+            let response = self.post("/v1/chats", body.clone());
+            (body, response)
+        }
+
+        fn pending(&mut self, chat: &str) -> Value {
+            let view = self.post(&format!("/v1/chats/{chat}/view"), json!({"token": self.paired.token}));
+            view.json["chat"]["items"].as_array().unwrap().iter().rev().find(|i| i["kind"] == "confirmation").unwrap()["pending"].clone()
+        }
+
+        fn confirm_body(&self, pending: &Value, content: &str) -> Value {
+            let counter = self.phone.next();
+            let id = pending["id"].as_str().unwrap();
+            let signature = self.phone.sign(&protocol::confirm_message(&self.paired.id, counter, Some(id), Some("accept"),
+                                                                       None, None, content));
+            json!({"token": self.paired.token, "pairing_id": self.paired.id, "counter": counter, "id": id,
+                   "decision": "accept", "signature": signature})
+        }
     }
 
     #[test]
-    fn serves_a_paired_phone_and_refuses_everyone_else() {
+    fn pairs_over_the_routes_and_signs_every_reply() {
         let mut pairing = PairingAuthority::new("PC", None);
         let mut engine = ChatEngine::with_ona_core();
         let phone = Phone::new();
+        let code = pairing.pairing_code.clone().unwrap().value;
+        let nonce = protocol::random_hex16();
+        let request_nonce = protocol::random_hex16();
+        let commit = handle(&request("/v1/pair", json!({
+            "code": code, "commitment": protocol::commitment(&phone.public_key(), &nonce), "nonce": request_nonce,
+        })), &mut pairing, &mut engine, &hosts());
+        assert_eq!(commit.status, 200);
+        // The phone checks the reply with the key from the QR code.
+        let text = commit.json.to_string();
+        let key = pairing.computer_public_key();
+        let signed = protocol::reply_message(&request_nonce, "POST", "/v1/pair", 200, &text);
+        assert!(protocol::verify(commit.signature.as_deref(), &signed, &key));
+        // Not valid for another nonce, nor as the reply to another request with the same nonce.
+        for other in [protocol::reply_message("other", "POST", "/v1/pair", 200, &text),
+                      protocol::reply_message(&request_nonce, "POST", "/v1/chats/list", 200, &text),
+                      protocol::reply_message(&request_nonce, "GET", "/v1/pair", 200, &text)] {
+            assert!(!protocol::verify(commit.signature.as_deref(), &other, &key));
+        }
+        let envelope: Value = serde_json::from_str(&commit.body()).unwrap();
+        assert_eq!(envelope["reply"], commit.json.to_string());
 
-        let refused = handle(&request("GET", "/v0/chats", json!({})), &mut pairing, &mut engine);
-        assert_eq!((refused.status, refused.json["error"].as_str()), (403, Some("not paired")));
+        let id = commit.json["pairing_id"].as_str().unwrap().to_owned();
+        let computer_nonce = commit.json["computer_nonce"].as_str().unwrap().to_owned();
+        let proof = phone.sign(&protocol::pair_message(&id, &code, &phone.public_key(), &pairing.computer_public_key(),
+                                                       &nonce, &computer_nonce));
+        let reveal = handle(&request("/v1/pair/reveal", json!({
+            "pairing_id": id, "phone_key": protocol::b64(&phone.public_key()), "phone_nonce": nonce, "signature": proof,
+        })), &mut pairing, &mut engine, &hosts());
+        assert_eq!(reveal.status, 200);
+        let token = reveal.json["token"].as_str().unwrap().to_owned();
+        // Not trusted before the codes are compared on the computer.
+        let early = handle(&request("/v1/chats/list", json!({"token": token})), &mut pairing, &mut engine, &hosts());
+        assert_eq!(early.json["error"], "not paired");
+        pairing.confirm_code().unwrap();
+        let list = handle(&request("/v1/chats/list", json!({"token": token})), &mut pairing, &mut engine, &hosts());
+        assert_eq!(list.status, 200);
+    }
 
-        let code = pairing.pairing_code.clone().unwrap();
-        let proof = phone.sign(&protocol::pair_message(&code, &phone.public_key(), &pairing.computer_public_key()));
-        let paired = handle(&request("POST", "/v0/pair", json!({
-            "code": code, "phone_key": protocol::b64(&phone.public_key()), "signature": proof,
-        })), &mut pairing, &mut engine);
-        assert_eq!(paired.status, 200);
-        let id = paired.json["pairing_id"].as_str().unwrap().to_owned();
+    /// Reads need the token; browsers and foreign Host values are refused.
+    #[test]
+    fn reads_need_the_token_and_browsers_are_refused() {
+        let mut setup = Setup::new();
+        let (_, created) = setup.create("Trouve un avocat");
+        let chat = created.json["chat_id"].as_str().unwrap().to_owned();
 
-        let text = "Trouve un avocat";
-        let signature = phone.sign(&protocol::chat_message(&id, None, Some(text)));
-        let body = json!({"pairing_id": id, "text": text, "signature": signature});
-        let early = handle(&request("POST", "/v0/chats", body.clone()), &mut pairing, &mut engine);
-        assert_eq!(early.json["error"], "pairing not verified");
+        for body in [json!({}), json!({"token": "x"})] {
+            assert_eq!(setup.post("/v1/chats/list", body.clone()).status, 403);
+            assert_eq!(setup.post(&format!("/v1/chats/{chat}/view"), body).status, 403);
+        }
+        let token = json!({"token": setup.paired.token});
+        assert_eq!(setup.post("/v1/chats/list", token.clone()).status, 200);
 
-        pairing.confirm_code();
-        let created = handle(&request("POST", "/v0/chats", body), &mut pairing, &mut engine);
-        assert_eq!((created.status, created.json["chat_id"].as_str()), (200, Some("chat-1")));
+        let mut rebinding = request("/v1/chats/list", token.clone());
+        rebinding.headers = vec![("host".into(), "evil.example:8790".into())];
+        assert_eq!(setup.send(&rebinding).json["error"], "unexpected host");
+        let mut no_host = request("/v1/chats/list", token.clone());
+        no_host.headers.clear();
+        assert_eq!(setup.send(&no_host).status, 403);
+        let mut browser = request("/v1/chats/list", token.clone());
+        browser.headers.push(("origin".into(), "http://evil.example".into()));
+        assert_eq!(setup.send(&browser).json["error"], "browser requests are refused");
+        let mut fetch = request("/v1/chats/list", token.clone());
+        fetch.headers.push(("sec-fetch-site".into(), "same-origin".into()));
+        assert_eq!(setup.send(&fetch).status, 403);
+        let mut get = request("/v1/chats/list", token);
+        get.method = "GET".into();
+        assert_eq!(setup.send(&get).status, 404);
+        // The protocol v0 routes are gone.
+        assert_eq!(setup.post("/v0/chats", json!({})).status, 404);
+    }
 
-        let forged = json!({"pairing_id": id, "text": "Paye tout", "signature": signature});
-        let refused = handle(&request("POST", "/v0/chats", forged), &mut pairing, &mut engine);
-        assert_eq!((refused.status, refused.json["error"].as_str()), (409, Some("signature does not verify")));
+    /// A recorded request replayed as is (new mission, old confirmations) is refused.
+    #[test]
+    fn refuses_a_replayed_message_and_a_replayed_confirmation() {
+        let mut setup = Setup::new();
+        let (body, created) = setup.create("Trouve un avocat");
+        assert_eq!(created.status, 200);
+        assert_eq!(setup.post("/v1/chats", body).json["error"], "replayed request");
 
-        let list = handle(&request("GET", "/v0/chats", json!({})), &mut pairing, &mut engine);
-        assert_eq!(list.json["chats"][0]["status"], "waiting");
-        let view = handle(&request("GET", "/v0/chats/chat-1", json!({})), &mut pairing, &mut engine);
-        let pending = view.json["chat"]["items"].as_array().unwrap().iter().find(|i| i["kind"] == "confirmation").unwrap()["pending"].clone();
-        let pending_id = pending["id"].as_str().unwrap();
+        let chat = created.json["chat_id"].as_str().unwrap().to_owned();
+        let pending = setup.pending(&chat);
+        let content = pending["content"].as_str().unwrap().to_owned();
+        let accept = setup.confirm_body(&pending, &content);
+        assert_eq!(setup.post("/v1/confirm", accept.clone()).status, 200);
+        let again = setup.post("/v1/confirm", accept);
+        assert_eq!((again.status, again.json["error"].as_str()), (409, Some("stale confirmation")));
+    }
 
-        let signature = phone.sign(&protocol::confirm_message(&id, Some(pending_id), Some("accept"), None, None));
-        let confirmed = handle(&request("POST", "/v0/confirm", json!({
-            "pairing_id": id, "id": pending_id, "decision": "accept", "signature": signature,
-        })), &mut pairing, &mut engine);
-        assert_eq!(confirmed.status, 200);
+    /// A confirmation signed over other content (another plan, other prices) does not verify.
+    #[test]
+    fn a_confirmation_signed_over_other_content_is_refused() {
+        let mut setup = Setup::new();
+        let (_, created) = setup.create("Trouve un avocat");
+        let chat = created.json["chat_id"].as_str().unwrap().to_owned();
+        let pending = setup.pending(&chat);
+        let id = pending["id"].as_str().unwrap();
+        let shown = protocol::plan_digest(id, &["search".into()]);
+        let refused = setup.post("/v1/confirm", setup.confirm_body(&pending, &shown));
+        assert_eq!(refused.json["error"], "signature does not verify");
+        let content = pending["content"].as_str().unwrap().to_owned();
+        assert_eq!(setup.post("/v1/confirm", setup.confirm_body(&pending, &content)).status, 200);
+    }
 
-        let signature = phone.sign(&protocol::delete_message(&id, "chat-1"));
-        let deleted = handle(&request("POST", "/v0/chats/chat-1/delete", json!({"pairing_id": id, "signature": signature})),
-                             &mut pairing, &mut engine);
-        assert_eq!(deleted.status, 200);
-        let gone = handle(&request("GET", "/v0/chats/chat-1", json!({})), &mut pairing, &mut engine);
+    /// Counters are JSON integers from 0 to 2^53 − 1, as in the macOS app.
+    #[test]
+    fn counters_are_integers_within_the_shared_bound() {
+        let values: Value = serde_json::from_str("[1.0, true, -1, 9007199254740992, 9007199254740991, 7, \"7\"]").unwrap();
+        let read: Vec<Option<u64>> = values.as_array().unwrap().iter().map(counter).collect();
+        assert_eq!(read, [None, None, None, None, Some(MAX_COUNTER), Some(7), None]);
+    }
+
+    /// A header sent with an empty value counts as sent.
+    #[test]
+    fn an_empty_origin_header_is_still_a_browser() {
+        let mut setup = Setup::new();
+        let crate::http::Parse::Request(mut request) = crate::http::parse(b"POST /v1/chats/list HTTP/1.0\r\nOrigin:\r\n\r\n") else {
+            panic!()
+        };
+        request.headers.push(("host".into(), HOST.into()));
+        request.body = json!({"token": setup.paired.token}).to_string().into_bytes();
+        assert_eq!(setup.send(&request).json["error"], "browser requests are refused");
+    }
+
+    /// An answer the agent refuses does not block the next answer to the same confirmation.
+    #[test]
+    fn a_refused_answer_does_not_block_the_confirmation() {
+        let mut setup = Setup::new();
+        let (_, created) = setup.create("Trouve un avocat");
+        let chat = created.json["chat_id"].as_str().unwrap().to_owned();
+        let pending = setup.pending(&chat);
+        let (id, content) = (pending["id"].as_str().unwrap().to_owned(), pending["content"].as_str().unwrap().to_owned());
+        let counter = setup.phone.next();
+        let signature = setup.phone.sign(&protocol::confirm_message(&setup.paired.id, counter, Some(&id), Some("maybe"),
+                                                                    None, None, &content));
+        let refused = setup.post("/v1/confirm", json!({"token": setup.paired.token, "pairing_id": setup.paired.id,
+            "counter": counter, "id": id, "decision": "maybe", "signature": signature}));
+        assert_eq!(refused.json["error"], "bad request");
+        assert_eq!(setup.post("/v1/confirm", setup.confirm_body(&pending, &content)).status, 200);
+    }
+
+    #[test]
+    fn writes_need_the_phone_signature_with_its_counter() {
+        let mut setup = Setup::new();
+        let (mut body, created) = setup.create("Trouve un avocat");
+        let chat = created.json["chat_id"].as_str().unwrap().to_owned();
+        body["text"] = json!("Paye tout");
+        body["counter"] = json!(setup.phone.next());
+        assert_eq!(setup.post("/v1/chats", body).json["error"], "signature does not verify");
+
+        let counter = setup.phone.next();
+        let wrong_counter = setup.phone.sign(&protocol::delete_message(&setup.paired.id, counter + 1, &chat));
+        let body = json!({"token": setup.paired.token, "pairing_id": setup.paired.id, "counter": counter,
+                          "signature": wrong_counter});
+        assert_eq!(setup.post(&format!("/v1/chats/{chat}/delete"), body).status, 409);
+        let deletion = setup.phone.sign(&protocol::delete_message(&setup.paired.id, counter, &chat));
+        let body = json!({"token": setup.paired.token, "pairing_id": setup.paired.id, "counter": counter,
+                          "signature": deletion});
+        assert_eq!(setup.post(&format!("/v1/chats/{chat}/delete"), body).status, 200);
+        let gone = setup.post(&format!("/v1/chats/{chat}/view"), json!({"token": setup.paired.token}));
         assert_eq!(gone.status, 404);
     }
 }

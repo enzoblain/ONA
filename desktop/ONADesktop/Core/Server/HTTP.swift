@@ -4,10 +4,40 @@ import Foundation
 public struct HTTPRequest: Equatable, Sendable {
     public let method: String
     public let path: String
+    /// Header names in lower case, values trimmed, in arrival order.
+    public let headers: [Header]
     public let body: Data
+
+    public struct Header: Equatable, Sendable {
+        public let name: String
+        public let value: String
+        public init(_ name: String, _ value: String) { self.name = name; self.value = value }
+    }
 
     public static let maxHeader = 16 * 1024
     public static let maxBody = 16 * 1024
+
+    public init(method: String, path: String, headers: [Header] = [], body: Data) {
+        self.method = method
+        self.path = path
+        self.headers = headers
+        self.body = body
+    }
+
+    public enum HeaderValue: Equatable, Sendable {
+        case absent
+        case one(String)
+        case repeated
+    }
+
+    public func header(_ name: String) -> HeaderValue {
+        let values = headers.filter { $0.name == name }.map(\.value)
+        switch values.count {
+        case 0: return .absent
+        case 1: return .one(values[0])
+        default: return .repeated
+        }
+    }
 
     public enum ParseResult: Equatable, Sendable {
         /// More bytes are needed.
@@ -22,7 +52,8 @@ public struct HTTPRequest: Equatable, Sendable {
         guard let end = buffer.range(of: Data("\r\n\r\n".utf8)) else {
             return buffer.count > maxHeader ? .invalid(431) : .incomplete
         }
-        guard end.lowerBound <= maxHeader, let head = String(data: buffer[..<end.lowerBound], encoding: .utf8) else {
+        guard end.lowerBound - buffer.startIndex <= maxHeader,
+              let head = String(data: buffer[..<end.lowerBound], encoding: .utf8) else {
             return .invalid(431)
         }
         let lines = head.components(separatedBy: "\r\n")
@@ -30,32 +61,49 @@ public struct HTTPRequest: Equatable, Sendable {
         guard requestLine.count == 3, requestLine[2].hasPrefix("HTTP/1."), requestLine[1].hasPrefix("/") else {
             return .invalid(400)
         }
-        var length = 0
+        var length: Int?
+        var headers: [Header] = []
         for line in lines.dropFirst() {
-            let parts = line.split(separator: ":", maxSplits: 1)
-            guard parts.count == 2 else { continue }
-            if parts[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length" {
-                guard let value = Int(parts[1].trimmingCharacters(in: .whitespaces)), value >= 0 else {
+            // An empty value ("Origin:") is a header with an empty value, as on the Rust side.
+            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return .invalid(400) }
+            let name = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            if name == "content-length" {
+                guard let number = Int(value), number >= 0, length == nil || length == number else {
                     return .invalid(400)
                 }
-                length = value
+                length = number
             }
+            if name == "transfer-encoding" { return .invalid(400) }
+            headers.append(Header(name, value))
         }
-        guard length <= maxBody else { return .invalid(413) }
+        let bodyLength = length ?? 0
+        guard bodyLength <= maxBody else { return .invalid(413) }
         let bodyStart = end.upperBound
-        guard buffer.count - (bodyStart - buffer.startIndex) >= length else { return .incomplete }
-        let body = buffer[bodyStart..<(bodyStart + length)]
-        return .request(HTTPRequest(method: String(requestLine[0]), path: String(requestLine[1]), body: Data(body)))
+        guard buffer.count - (bodyStart - buffer.startIndex) >= bodyLength else { return .incomplete }
+        let body = buffer[bodyStart..<(bodyStart + bodyLength)]
+        return .request(HTTPRequest(method: String(requestLine[0]), path: String(requestLine[1]), headers: headers,
+                                    body: Data(body)))
     }
 }
 
 public struct HTTPResponse: Sendable {
     public let status: Int
-    public let body: Data
+    /// The reply as JSON text. When `signature` is set it travels inside `{"reply": "<text>", "signature": "…"}`.
+    public let reply: Data
+    public var signature: String?
 
     public init(status: Int, json: [String: Any]) {
         self.status = status
-        body = (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])) ?? Data("{}".utf8)
+        reply = (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])) ?? Data("{}".utf8)
+    }
+
+    /// What is sent: the signed envelope, or the reply itself when unsigned.
+    public var body: Data {
+        guard let signature else { return reply }
+        let envelope: [String: Any] = ["reply": String(decoding: reply, as: UTF8.self), "signature": signature]
+        return (try? JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])) ?? Data("{}".utf8)
     }
 
     public var bytes: Data {
@@ -67,8 +115,10 @@ public struct HTTPResponse: Sendable {
         case 409: "Conflict"
         case 413: "Payload Too Large"
         case 431: "Request Header Fields Too Large"
+        case 503: "Service Unavailable"
         default: "Error"
         }
+        let body = self.body
         var out = Data("HTTP/1.0 \(status) \(reason)\r\n".utf8)
         out.append(Data("Content-Type: application/json; charset=utf-8\r\nContent-Length: \(body.count)\r\n".utf8))
         out.append(Data("Cache-Control: no-store\r\nConnection: close\r\n\r\n".utf8))

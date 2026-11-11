@@ -109,8 +109,8 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-wallet` encrypted wallet file | done, keychain not wired in; a wallet without its seal file is refused by design (`open_adopting_unsealed` adopts one explicitly) | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
-| Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol; no wallet yet | Mac tests with the real `ona-core`, one end-to-end run with the iOS simulator on the local network ([notes](docs/desktop/app.md)) |
-| Desktop app (`desktop/tauri`, Windows and Linux) | same features and protocol as the macOS app, in Rust with Tauri; no wallet yet | Rust tests with the real `ona-core`, one end-to-end run with the iOS simulator on the local network, run on macOS. Never built or run on Windows or Linux ([notes](docs/desktop/tauri.md)) |
+| Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol v1 (commit-then-reveal pairing, signed replies, token for reads, counter against replays, signed content of each confirmation); local-network mode in debug builds only; no wallet yet | Core tests with the real `ona-core` (compiled with `swiftc`, not `swift test`); the app target and an end-to-end run with protocol v1 not done: the iOS app still speaks v0 ([notes](docs/desktop/app.md)) |
+| Desktop app (`desktop/tauri`, Windows and Linux) | same features and protocol v1 as the macOS app, in Rust with Tauri; no wallet yet | Rust tests of every module but `main.rs` with the real `ona-core`, run on macOS; the Tauri binary was not rebuilt after the v1 changes (crates missing offline). Never built or run on Windows or Linux ([notes](docs/desktop/tauri.md)) |
 | iOS app (`ios/`) | Tor (Arti embedded): an earlier test build reached a test onion service; the Tor screen is now a tab of the app | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
 | iOS app (`ios/`) | chat-style conversations with the agent, QR pairing and signed messages and confirmations against a mock computer, labelled `mode: mock` (the mock replays one demo mission for any request). Over Tor (Arti), pairing, polling and a signed confirmation passed once end to end in the simulator. The Secure Enclave key path has not run on a device yet | iOS simulator (software key), unit tests on the Mac ([notes](docs/ios/app.md)) |
 | `ona-tor` client through Tor | library done, no program uses it yet ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
@@ -197,8 +197,8 @@ Desktop app for Windows and Linux (`desktop/tauri/src-tauri`), pinned exactly (`
 |---|---|---|
 | `tauri` | 2.12.5 | window, web view, commands |
 | `tauri-build` | 2.7.4 | build script |
-| `p256` (RustCrypto) | 0.13.2 | checking the phone's ECDSA P-256 signatures, the computer's key |
-| `sha2` | 0.10.9 | the 6-digit pairing code |
+| `p256` (RustCrypto) | 0.13.2 | checking the phone's ECDSA P-256 signatures, signing replies with the computer's key |
+| `sha2` | 0.10.9 | pairing commitment, 6-digit code, digests of what the phone confirms |
 | `base64` | 0.22.1 | protocol encoding |
 | `rand` | 0.8.8 | pairing codes and ids |
 | `qrcode` | 0.14.1 | pairing QR code (SVG) |

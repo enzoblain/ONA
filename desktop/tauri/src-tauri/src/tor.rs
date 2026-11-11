@@ -22,22 +22,25 @@ pub struct TorService {
     started: Option<Instant>,
 }
 
-/// Where `tor` is usually installed, on top of the folders in PATH.
+/// Where `tor` is installed by the system's packages. Searched before PATH: a folder put early in PATH (by another
+/// program, or writable by the user) must not decide which `tor` holds the onion key.
 const CANDIDATES: &[&str] = &[
     "/usr/bin/tor",
-    "/usr/local/bin/tor",
     "/usr/sbin/tor",
+    "/usr/local/bin/tor",
     "/opt/homebrew/bin/tor",
     "C:\\Program Files\\Tor\\tor.exe",
 ];
 
 pub fn binary() -> Option<PathBuf> {
     let name = if cfg!(windows) { "tor.exe" } else { "tor" };
-    let from_path = std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .map(|dir| dir.join(name));
-    from_path.chain(CANDIDATES.iter().map(PathBuf::from)).find(|p| p.is_file())
+    let path: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    find_binary(CANDIDATES.iter().map(PathBuf::from), &path, name)
+}
+
+/// The first existing file among `candidates`, then among `name` in the `path` folders.
+fn find_binary(candidates: impl Iterator<Item = PathBuf>, path: &[PathBuf], name: &str) -> Option<PathBuf> {
+    candidates.chain(path.iter().map(|dir| dir.join(name))).find(|p| p.is_file())
 }
 
 impl TorService {
@@ -153,6 +156,22 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The system's `tor` wins over one placed earlier in PATH.
+    #[test]
+    fn prefers_the_installed_tor_over_path() {
+        let root = std::env::temp_dir().join(format!("ona-tor-binary-{}", std::process::id()));
+        let (system, early) = (root.join("system"), root.join("early"));
+        for dir in [&system, &early] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("tor"), b"").unwrap();
+        }
+        let found = find_binary(std::iter::once(system.join("tor")), std::slice::from_ref(&early), "tor");
+        assert_eq!(found, Some(system.join("tor")));
+        let fallback = find_binary(std::iter::once(root.join("absent/tor")), std::slice::from_ref(&early), "tor");
+        assert_eq!(fallback, Some(early.join("tor")));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn escapes_windows_paths_for_torrc() {

@@ -28,25 +28,85 @@ public struct Offer: Equatable, Sendable, Identifiable {
     }
 }
 
+/// What binds a payment confirmation to one mission, once (format v2, shared with ona-core).
+public struct PaymentBinding: Equatable, Sendable {
+    public let network: String
+    public let contract: String
+    public let missionID: String
+    public let nonce: String
+}
+
 /// A confirmation the agent waits for.
 public struct Pending: Equatable, Sendable, Identifiable {
     public enum Request: Equatable, Sendable {
         case plan([String])
         case recipient([Offer])
-        case payment(to: String, amount: String, screen: String, digest: String)
+        case payment(to: String, amount: String, screen: String, digest: String, binding: PaymentBinding)
     }
 
     public let id: String
     public let request: Request
 
-    var json: [String: Any] {
+    /// Digest of what the phone shows; the phone recomputes it from what it displays and signs it.
+    public var content: String {
         switch request {
-        case .plan(let steps): ["id": id, "kind": "plan", "plan": steps]
-        case .recipient(let offers): ["id": id, "kind": "recipient", "offers": offers.map(\.json)]
-        case .payment(let to, let amount, let screen, let digest):
-            ["id": id, "kind": "payment", "payment": ["to": to, "amount": amount, "screen": screen, "digest": digest]]
+        case .plan(let steps): ProtocolBytes.planDigest(id: id, steps: steps)
+        case .recipient(let offers):
+            ProtocolBytes.offersDigest(id: id, offers: offers.map { ($0.firmID, $0.priceCents, $0.delayDays, $0.sourceSpans) })
+        case .payment(_, _, _, let digest, _): digest
         }
     }
+
+    var json: [String: Any] {
+        switch request {
+        case .plan(let steps): return ["id": id, "kind": "plan", "plan": steps, "content": content]
+        case .recipient(let offers):
+            return ["id": id, "kind": "recipient", "offers": offers.map(\.json), "content": content]
+        case .payment(let to, let amount, let screen, let digest, let binding):
+            let payment: [String: Any] = [
+                "to": to, "amount": amount, "screen": screen, "digest": digest, "digest_version": 2,
+                "network": binding.network, "contract": binding.contract, "mission_id": binding.missionID,
+                "nonce": binding.nonce,
+            ]
+            return ["id": id, "kind": "payment", "payment": payment, "content": content]
+        }
+    }
+
+    /// Reads ona-core's `prepare_payment` reply: `screen`, `digest` and `payment` {`network`, `contract`,
+    /// `mission_id`, `nonce`, `to`, `amount`}. The digest must be `paymentDigestV2` of those six fields, and `to` and
+    /// `amount` those of the screen. Anything else is refused: the phone could not recompute what it signs.
+    public static func preparedPayment(_ reply: [String: Any]) -> Result<Request, ProtocolErrorText> {
+        guard let screen = reply["screen"] as? String, let parsed = ProtocolBytes.parsePaymentScreen(screen) else {
+            return .failure("unreadable payment screen")
+        }
+        guard let digest = reply["digest"] as? String, ProtocolBytes.isHex(digest, length: 64) else {
+            return .failure("malformed payment digest")
+        }
+        guard let payment = reply["payment"] as? [String: Any],
+              let network = payment["network"] as? String, let contract = payment["contract"] as? String,
+              let missionID = payment["mission_id"] as? String, let nonce = payment["nonce"] as? String,
+              let to = payment["to"] as? String, let amount = payment["amount"] as? String
+        else { return .failure("payment without its mission binding (digest v2 required)") }
+        guard to == parsed.to, amount == parsed.amount else {
+            return .failure("payment fields differ from the payment screen")
+        }
+        guard ProtocolBytes.isHex(nonce, length: 32), !missionID.isEmpty else {
+            return .failure("malformed payment binding")
+        }
+        guard ProtocolBytes.paymentDigestV2(network: network, contract: contract, missionID: missionID, nonce: nonce,
+                                            to: to, amount: amount) == digest else {
+            return .failure("payment digest does not match its fields")
+        }
+        return .success(.payment(to: to, amount: amount, screen: screen, digest: digest,
+                                 binding: PaymentBinding(network: network, contract: contract, missionID: missionID,
+                                                         nonce: nonce)))
+    }
+}
+
+/// An error message as an `Error` (for `Result`).
+public struct ProtocolErrorText: Error, Equatable, ExpressibleByStringLiteral, Sendable {
+    public let text: String
+    public init(stringLiteral text: String) { self.text = text }
 }
 
 public enum ChatStatus: String, Sendable {
@@ -158,7 +218,6 @@ fileprivate final class MissionRun {
     var readCount = 0
     var ranked: [Offer] = []
     var chosen: String?
-    var confirmations = 0
 
     init(core: any MissionCore) {
         self.core = core
@@ -174,8 +233,6 @@ public final class ChatEngine {
     public private(set) var mode = "mock"
 
     public static let maxText = 2000
-    /// Amount of the demo payment, in yoctoNEAR (1 NEAR), as in ona-core's demo.
-    static let demoAmount = "1000000000000000000000000"
     static let contactMessage = "Bonjour, je souhaite un devis pour une consultation en droit du travail."
 
     static let runningLabels = [
@@ -207,7 +264,8 @@ public final class ChatEngine {
     public func create(_ text: String) -> Result<Chat, ProtocolError> {
         guard let text = Self.clean(text) else { return .failure(.badText) }
         count += 1
-        let chat = Chat(id: "chat-\(count)", title: Self.title(text))
+        // Random, never reused: an old signed request cannot target a new chat that took the same id.
+        let chat = Chat(id: "chat-" + ProtocolBytes.randomHex16(), title: Self.title(text))
         chats.append(chat)
         say(text, in: chat)
         return .success(chat)
@@ -224,6 +282,11 @@ public final class ChatEngine {
         guard chats.contains(where: { $0.id == chatID }) else { return .unknownChat }
         chats.removeAll { $0.id == chatID }
         return nil
+    }
+
+    /// The content digest of a confirmation still pending (what the phone must have signed).
+    public func pendingContent(_ id: String) -> String? {
+        chats.lazy.compactMap(\.pending).first { $0.id == id }?.content
     }
 
     /// A decision on a pending confirmation. Returns an error code, or nil.
@@ -285,7 +348,8 @@ public final class ChatEngine {
     }
 
     private func start(_ text: String, in chat: Chat) {
-        let run = MissionRun(core: chat.run?.core ?? makeCore())
+        // A new core for every mission: the previous one (closed, or stopped by an error or a panic) is dropped.
+        let run = MissionRun(core: makeCore())
         chat.run = run
         let opened = run.core.dispatch(["cmd": "open", "mission": text])
         guard Self.ok(opened) else { return fail(chat, run, opened) }
@@ -326,15 +390,19 @@ public final class ChatEngine {
             guard Self.ok(reply) else { return fail(chat, run, reply) }
             chat.add(.activity(tool: tool, text: "Message générique envoyé à \(run.chosen ?? "?")"))
         case "prepare_payment":
-            let reply = run.core.dispatch(["cmd": "prepare_payment", "amount": Self.demoAmount])
-            guard Self.ok(reply), let screen = reply["screen"] as? String, let digest = reply["digest"] as? String,
-                  let parsed = ProtocolBytes.parsePaymentScreen(screen)
-            else { return fail(chat, run, reply) }
+            // No amount: ona-core computes it from the chosen offer's price and the policy's rate.
+            let reply = run.core.dispatch(["cmd": "prepare_payment"])
+            guard Self.ok(reply) else { return fail(chat, run, reply) }
+            let request: Pending.Request
+            switch Pending.preparedPayment(reply) {
+            case .success(let prepared): request = prepared
+            case .failure(let error): return fail(chat, run, ["error": error.text])
+            }
             chat.add(.activity(tool: tool, text: "Paiement préparé à partir de l'annuaire"))
             run.cursor += 1
             if run.cursor < run.plan.count, run.plan[run.cursor] == "confirm_payment" {
                 chat.add(.agent(Self.paymentMessage))
-                return wait(chat, run, .payment(to: parsed.to, amount: parsed.amount, screen: screen, digest: digest))
+                return wait(chat, run, request)
             }
             return
         case "confirm_payment":
@@ -350,8 +418,8 @@ public final class ChatEngine {
     }
 
     private func wait(_ chat: Chat, _ run: MissionRun, _ request: Pending.Request) {
-        run.confirmations += 1
-        let pending = Pending(id: "\(chat.id)-c-\(run.confirmations)", request: request)
+        // 16 random bytes: never the same id twice, across missions, chats and restarts.
+        let pending = Pending(id: "c-" + ProtocolBytes.randomHex16(), request: request)
         run.phase = .waiting(pending)
         chat.add(.confirmation(pending))
     }
