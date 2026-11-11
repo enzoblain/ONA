@@ -2,13 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt;
 
 use ed25519_dalek::SigningKey;
-use ona_crowd::chain::{check_event, check_exit_caps, execute, MemoryChain};
-use ona_crowd::near::{check_chain_id, check_settings, NearChain, NearSettings};
+use ona_crowd::chain::{check_event, check_exit_caps, execute, funding_plan, MemoryChain};
+use ona_crowd::near::{agent_needs, check_settings, check_spend, funding_amount, planned_spend, NearChain, NearSettings};
 use ona_crowd::parades::{agent_transactions, compare, scenarios, table};
 use ona_crowd::{
     candidates, guesses, implicit_account, posterior, posterior_from, privacy, simulate, simulate_secret, write_keys,
-    yield_guess, AgentRules, Config, EventKind, PublicEvent, Simulation, TrueRoute, Vault, VaultKind,
+    write_private, yield_guess, AgentRules, Config, EventKind, PublicEvent, Simulation, TrueRoute, Vault, VaultKind,
 };
+use ona_near::testing::{ok, rpc_error, FakeRpc};
+use serde_json::json;
 
 fn config(seed: u64) -> Config {
     Config {
@@ -969,10 +971,11 @@ fn keys_go_to_a_private_new_file_and_are_never_shown() {
     std::fs::remove_file(&path).unwrap();
 }
 
-fn settings(network: &str, rpc_url: &str) -> NearSettings {
+fn settings_on(network: &str, chain_id: &str, rpc_url: &str) -> NearSettings {
     NearSettings {
         rpc_url: rpc_url.into(),
         network: network.into(),
+        chain_id: chain_id.into(),
         mint: "mint.example.testnet".into(),
         funder_account: "funder.example.testnet".into(),
         agent_account: "agent.example.testnet".into(),
@@ -980,34 +983,98 @@ fn settings(network: &str, rpc_url: &str) -> NearSettings {
     }
 }
 
-#[test]
-fn mainnet_is_refused_before_any_call() {
-    let staking = [Vault { kind: VaultKind::Staking, contract: "s.testnet".into() }];
-    for (network, rpc) in [
-        ("mainnet", "https://rpc.testnet.near.org"),
-        ("testnet", "https://rpc.mainnet.near.org"),
-        ("", "http://127.0.0.1:3030"),
-    ] {
-        assert!(check_settings(&settings(network, rpc), &staking).is_err());
-        let tokens = temp_path("tokens-mainnet");
-        let key = || SigningKey::from_bytes(&[3u8; 32]);
-        let refused = NearChain::connect(settings(network, rpc), key(), key(), &[1], &staking, &tokens);
-        assert!(refused.is_err());
-        assert!(!tokens.exists(), "nothing may be created before the network is accepted");
-    }
-    assert!(check_settings(&settings("testnet", "https://rpc.testnet.near.org"), &staking).is_ok());
-    assert!(check_settings(&settings("sandbox", "http://127.0.0.1:3030"), &staking).is_ok());
+fn settings(network: &str, rpc_url: &str) -> NearSettings {
+    settings_on(network, network, rpc_url)
 }
 
 #[test]
+fn mainnet_is_refused_before_any_call() {
+    let staking = [Vault { kind: VaultKind::Staking, contract: "s.testnet".into() }];
+    for s in [
+        settings("mainnet", "https://rpc.testnet.near.org"),
+        settings("testnet", "https://rpc.mainnet.near.org"),
+        settings("", "http://127.0.0.1:3030"),
+        settings_on("testnet", "mainnet", "https://rpc.testnet.near.org"),
+        settings("testnet", "http://rpc.testnet.near.org"),
+    ] {
+        let tokens = temp_path("tokens-mainnet");
+        let key = || SigningKey::from_bytes(&[3u8; 32]);
+        assert!(check_settings(&s, &staking).is_err());
+        assert!(NearChain::connect(s, key(), key(), &[1], &staking, &tokens).is_err());
+        assert!(!tokens.exists(), "nothing may be created before the network is accepted");
+    }
+    assert!(check_settings(&settings("testnet", "https://rpc.testnet.near.org"), &staking).is_ok());
+    assert!(check_settings(&settings_on("sandbox", "localnet", "http://127.0.0.1:3030"), &staking).is_ok());
+    let mut bad = settings("testnet", "https://rpc.testnet.near.org");
+    bad.agent_account = "Agent.testnet".into();
+    assert!(check_settings(&bad, &staking).is_err());
+}
+
+// The node's own chain id decides, through the function `ona-deploy` uses too.
+#[test]
 fn the_chain_id_reported_by_the_node_is_checked() {
-    assert!(check_chain_id("testnet", "testnet").is_ok());
-    assert!(check_chain_id("sandbox", "localnet").is_ok());
-    assert!(check_chain_id("sandbox", "mainnet").is_err());
-    assert!(check_chain_id("testnet", "mainnet").is_err());
-    assert!(check_chain_id("local", "MAINNET").is_err());
-    assert!(check_chain_id("testnet", "localnet").is_err());
-    assert!(check_chain_id("sandbox", "").is_err());
+    let staking = [Vault { kind: VaultKind::Staking, contract: "s.testnet".into() }];
+    let key = || SigningKey::from_bytes(&[3u8; 32]);
+    for (expected, reported) in [("testnet", "mainnet"), ("localnet", "MAINNET"), ("testnet", "localnet"), ("localnet", "")] {
+        let rpc = FakeRpc::start(move |_, _| ok(json!({"chain_id": reported})));
+        let tokens = temp_path("tokens-chain");
+        let refused = NearChain::connect(settings_on("sandbox", expected, &rpc.url), key(), key(), &[1], &staking, &tokens);
+        assert!(refused.is_err(), "{expected} {reported}");
+        assert_eq!(rpc.methods(), ["status"], "nothing but status may be asked");
+        assert!(!tokens.exists());
+    }
+}
+
+// An RPC error while reading the mint's tiers is an error, not the end of the list.
+#[test]
+fn an_rpc_error_while_reading_tiers_is_reported() {
+    let staking = [Vault { kind: VaultKind::Staking, contract: "s.testnet".into() }];
+    let key = || SigningKey::from_bytes(&[3u8; 32]);
+    let rpc = FakeRpc::start(|method, _| match method {
+        "status" => ok(json!({"chain_id": "localnet"})),
+        _ => rpc_error(json!({"name": "INTERNAL_ERROR", "cause": {"name": "NODE_OVERLOADED"}})),
+    });
+    let tokens = temp_path("tokens-tiers");
+    let error = NearChain::connect(settings_on("sandbox", "localnet", &rpc.url), key(), key(), &[1], &staking, &tokens)
+        .err()
+        .expect("must fail");
+    assert!(format!("{error:#}").contains("cannot read tier 0"), "{error:#}");
+    assert!(!tokens.exists());
+}
+
+// Everything a run sends is known before it starts, and refused above the cap.
+#[test]
+fn a_run_is_refused_above_its_spending_cap() {
+    let (_, sim) = run(21);
+    let unit = 100_000_000_000_000_000_000_000u128;
+    let total = planned_spend(&sim, unit).unwrap();
+    let (spent, transactions) = agent_needs(&sim).unwrap();
+    let mut expected = funding_amount(unit, spent, transactions, 0).unwrap();
+    for (_, units, transactions, notes) in funding_plan(&sim) {
+        expected += funding_amount(unit, units, transactions, notes).unwrap();
+    }
+    assert_eq!(total, expected);
+    assert!(total > 0);
+    assert!(check_spend(total, total).is_ok());
+    assert!(check_spend(total, total - 1).is_err());
+    assert!(funding_amount(u128::MAX, 2, 0, 0).is_err(), "amounts must not wrap");
+    assert!(planned_spend(&sim, u128::MAX).is_err());
+
+    let mut chain = MemoryChain::default();
+    execute(&sim, &config(21), &mut chain, &mut |_| {}).unwrap();
+    let funded: u64 = funding_plan(&sim).iter().map(|f| f.1).sum();
+    assert_eq!(funded, sim.timeline.iter().filter(|e| e.kind == EventKind::Deposit).map(|e| e.amount).sum::<u64>());
+}
+
+// The ground truth and the timeline are private new files, never replaced.
+#[test]
+fn outputs_are_private_and_never_replaced() {
+    let path = temp_path("truth");
+    write_private(&path, "{}").unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(write_private(&path, "{\"other\":1}").is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+    std::fs::remove_file(&path).unwrap();
 }
 
 #[test]

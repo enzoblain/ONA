@@ -2000,6 +2000,7 @@ dependencies = [
  "rand_chacha",
  "serde",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -2008,10 +2009,12 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bs58 0.5.1",
  "ona-near",
  "ona-signer",
  "ona-token",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2033,9 +2036,11 @@ dependencies = [
  "base64 0.22.1",
  "bs58 0.5.1",
  "ed25519-dalek",
+ "libc",
  "serde_json",
  "sha2 0.10.9",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]

@@ -171,7 +171,9 @@ mod tests {
 
     #[test]
     fn issue_only_succeeds_on_an_explicit_success() {
-        assert!(chain_against(json!({"status": {"SuccessValue": ""}})).issue(1, vec![]).is_ok());
+        assert!(chain_against(json!({"final_execution_status": "FINAL", "status": {"SuccessValue": ""}, "receipts_outcome": []}))
+            .issue(1, vec![])
+            .is_ok());
         assert!(chain_against(json!({"status": {"Failure": {}}})).issue(1, vec![]).is_err());
         // The signer marks a record done when `issue` returns Ok, so this must be an error.
         assert!(chain_against(json!({"status": "Started"})).issue(1, vec![]).is_err());

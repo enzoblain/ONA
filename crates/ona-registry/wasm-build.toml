@@ -1,0 +1,4 @@
+# Flags for building the contract without cargo-near. Use verify.sh, which also rewrites local paths
+# (SPEC.md, "Reproducing the contract hashes").
+[build]
+rustflags = ["--cfg", "near", "-C", "link-arg=-s", "-C", "target-cpu=mvp"]

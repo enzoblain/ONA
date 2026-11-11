@@ -1,17 +1,23 @@
 //! Builds the transactions that deploy the ONA contracts.
 //!
 //! Each contract is created, funded, deployed and initialized in one transaction, with no access
-//! key. Nobody can initialize it first, and nobody holds a key to it afterwards.
-//! Mainnet is refused here on purpose.
+//! key. Nobody can initialize it first, and nobody holds a key to it afterwards, so a mistake in the
+//! plan cannot be corrected: every role is checked before anything is sent.
+//!
+//! Mainnet is refused twice: from the configured names here, and from the chain id the node reports
+//! (`ona_near::check_network`), which the binary asks before sending anything.
+#![forbid(unsafe_code)]
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use ona_near::{Action, TGAS};
+use ona_near::{check_account_id, check_chain_id, check_rpc_url, Action, TGAS};
 use ona_token::G2_LEN;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const INIT_TGAS: u64 = 300;
+pub const NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 const MAX_TIERS: usize = 8;
 /// `REDEEM_FEE + MIN_PAYOUT` in the contract: a smaller tier could never be redeemed.
 const MIN_TIER_VALUE: u128 = 20_000_000_000_000_000_000_000;
@@ -29,14 +35,78 @@ pub struct MintPlan {
     pub funding: u128,
 }
 
-pub fn check_network(network: &str, rpc_url: &str) -> Result<()> {
-    if network == "mainnet" || network.is_empty() || rpc_url.to_lowercase().contains("mainnet") {
-        bail!("only testnet and local networks are allowed");
+/// Checks the configuration before any request: names, chain id and RPC address. `network` is the name
+/// written into the contracts, `chain_id` the one the node must report.
+pub fn check_names(network: &str, chain_id: &str, rpc_url: &str) -> Result<()> {
+    if network.is_empty() || network.to_ascii_lowercase().contains("mainnet") {
+        bail!("only testnet and local networks are allowed (network {network:?})");
+    }
+    check_chain_id(chain_id, chain_id)?;
+    check_rpc_url(rpc_url)?;
+    if rpc_url.to_ascii_lowercase().contains("mainnet") {
+        bail!("only testnet and local networks are allowed (RPC {rpc_url})");
     }
     Ok(())
 }
 
+/// The account that creates the contracts. On testnet it must be a `.testnet` account, and a `.near`
+/// account (a mainnet name) is always refused.
+pub fn check_parent(chain_id: &str, parent: &str) -> Result<()> {
+    check_account_id(parent)?;
+    if parent.ends_with(".near") || parent == "near" {
+        bail!("{parent} is a mainnet account");
+    }
+    if chain_id == "testnet" && !parent.ends_with(".testnet") {
+        bail!("on testnet the parent account must end with .testnet, not {parent}");
+    }
+    Ok(())
+}
+
+/// Every role must be a well-formed account, and no account may hold two roles.
+pub fn check_roles(roles: &[(&str, &str)]) -> Result<()> {
+    for (i, (role, account)) in roles.iter().enumerate() {
+        check_account_id(account).map_err(|e| anyhow!("{role}: {e}"))?;
+        if let Some((other, _)) = roles[..i].iter().find(|(_, a)| a == account) {
+            bail!("{account} cannot be both {other} and {role}");
+        }
+    }
+    Ok(())
+}
+
+/// `value * unit`, refused instead of wrapping.
+pub fn amount(value: u128, unit: u128) -> Result<u128> {
+    value.checked_mul(unit).ok_or_else(|| anyhow!("amount too large"))
+}
+
+/// The NEAR sent to a new contract account, in yoctoNEAR. Every contract needs some, so zero is refused.
+pub fn funding(near: u128) -> Result<u128> {
+    if near == 0 {
+        bail!("the contract account needs funding");
+    }
+    amount(near, NEAR)
+}
+
+/// SHA-256 of a contract. NEAR records this as the account's `code_hash`, in base58 (not checked against
+/// a node).
+pub fn code_hash(code: &[u8]) -> [u8; 32] {
+    Sha256::digest(code).into()
+}
+
+/// Compares the `code_hash` of a deployed account (`view_account`) with the contract that was sent.
+pub fn check_deployed_code(account_view: &Value, code: &[u8]) -> Result<()> {
+    let expected = bs58::encode(code_hash(code)).into_string();
+    match account_view["code_hash"].as_str() {
+        Some(found) if found == expected => Ok(()),
+        found => bail!("the account runs code {found:?}, not the contract sent ({expected})"),
+    }
+}
+
 impl MintPlan {
+    fn tier_value(&self, tier: usize) -> Result<u128> {
+        let factor = 1u128.checked_shl(tier as u32).ok_or_else(|| anyhow!("too many tiers"))?;
+        amount(self.base_value, factor).map_err(|_| anyhow!("tier {tier} is worth more than a u128 holds"))
+    }
+
     pub fn check(&self) -> Result<()> {
         if self.denom_keys.is_empty() || self.denom_keys.len() > MAX_TIERS {
             bail!("between 1 and {MAX_TIERS} keys are required");
@@ -45,6 +115,7 @@ impl MintPlan {
             if self.denom_keys[..i].contains(key) {
                 bail!("each tier needs its own key");
             }
+            self.tier_value(i)?;
         }
         if self.base_value < MIN_TIER_VALUE {
             bail!("the lowest tier is too small to be redeemed");
@@ -52,40 +123,38 @@ impl MintPlan {
         if self.circulation_cap == 0 || self.hourly_redeem_cap == 0 {
             bail!("caps must be positive");
         }
-        for account in [&self.signer, &self.relay, &self.guardian] {
-            if account.is_empty() {
-                bail!("signer, relay and guardian accounts are required");
-            }
+        if self.funding == 0 {
+            bail!("the contract account needs funding");
         }
-        Ok(())
+        check_roles(&[("signer", &self.signer), ("relay", &self.relay), ("guardian", &self.guardian)])
     }
 
-    pub fn init_args(&self) -> Value {
-        let denoms: Vec<Value> = self
+    pub fn init_args(&self) -> Result<Value> {
+        self.check()?;
+        let denoms = self
             .denom_keys
             .iter()
             .enumerate()
             .map(|(i, key)| {
-                json!({
-                    "value": (self.base_value << i).to_string(),
+                Ok(json!({
+                    "value": self.tier_value(i)?.to_string(),
                     "pk_g2": B64.encode(key),
                     "circulation_cap": self.circulation_cap,
                     "hourly_redeem_cap": self.hourly_redeem_cap,
-                })
+                }))
             })
-            .collect();
-        json!({
+            .collect::<Result<Vec<Value>>>()?;
+        Ok(json!({
             "denoms": denoms,
             "signer": self.signer,
             "relay": self.relay,
             "guardian": self.guardian,
             "network": self.network,
-        })
+        }))
     }
 
     pub fn actions(&self, code: Vec<u8>) -> Result<Vec<Action>> {
-        self.check()?;
-        Ok(deploy_actions(self.funding, code, &self.init_args()))
+        Ok(deploy_actions(self.funding, code, &self.init_args()?))
     }
 }
 
@@ -96,6 +165,7 @@ pub fn registry_init_args(owners: [&str; 2], aggregator: &str) -> Result<Value> 
     if aggregator.is_empty() {
         bail!("the registry needs an aggregator");
     }
+    check_roles(&[("first owner", owners[0]), ("second owner", owners[1]), ("aggregator", aggregator)])?;
     Ok(json!({"owners": owners, "aggregator": aggregator}))
 }
 
@@ -156,18 +226,38 @@ mod tests {
     }
 
     #[test]
-    fn mainnet_is_refused() {
-        assert!(check_network("mainnet", "https://rpc.testnet.near.org").is_err());
-        assert!(check_network("testnet", "https://rpc.mainnet.near.org").is_err());
-        assert!(check_network("testnet", "https://RPC.MAINNET.example").is_err());
-        assert!(check_network("", "http://127.0.0.1:3030").is_err());
-        assert!(check_network("testnet", "https://rpc.testnet.near.org").is_ok());
-        assert!(check_network("sandbox", "http://127.0.0.1:3030").is_ok());
+    fn mainnet_names_are_refused() {
+        assert!(check_names("mainnet", "testnet", "https://rpc.testnet.near.org").is_err());
+        assert!(check_names("Mainnet", "testnet", "https://rpc.testnet.near.org").is_err());
+        assert!(check_names("testnet", "mainnet", "https://rpc.testnet.near.org").is_err());
+        assert!(check_names("testnet", "testnet", "https://rpc.mainnet.near.org").is_err());
+        assert!(check_names("testnet", "testnet", "https://RPC.MAINNET.example").is_err());
+        assert!(check_names("", "localnet", "http://127.0.0.1:3030").is_err());
+        assert!(check_names("testnet", "", "https://rpc.testnet.near.org").is_err());
+        assert!(check_names("testnet", "testnet", "https://rpc.testnet.near.org").is_ok());
+        assert!(check_names("sandbox", "localnet", "http://127.0.0.1:3030").is_ok());
+    }
+
+    // A plain http address outside this machine is refused.
+    #[test]
+    fn the_rpc_address_must_be_https() {
+        assert!(check_names("testnet", "testnet", "http://rpc.testnet.near.org").is_err());
+    }
+
+    // A mainnet parent account is refused even when every name says testnet.
+    #[test]
+    fn the_parent_account_must_match_the_network() {
+        assert!(check_parent("testnet", "ona.testnet").is_ok());
+        assert!(check_parent("localnet", "test.near.sandbox").is_ok());
+        assert!(check_parent("testnet", "ona.near").is_err());
+        assert!(check_parent("localnet", "ona.near").is_err());
+        assert!(check_parent("testnet", "ona.tesnet").is_err());
+        assert!(check_parent("testnet", "Ona.testnet").is_err());
     }
 
     #[test]
     fn tiers_double_and_carry_their_keys() {
-        let args = plan().init_args();
+        let args = plan().init_args().unwrap();
         assert_eq!(args["denoms"][0]["value"], UNIT.to_string());
         assert_eq!(args["denoms"][2]["value"], (4 * UNIT).to_string());
         assert_eq!(args["denoms"][1]["pk_g2"], B64.encode([2u8; G2_LEN]));
@@ -196,6 +286,7 @@ mod tests {
             |p| p.circulation_cap = 0,
             |p| p.hourly_redeem_cap = 0,
             |p| p.relay.clear(),
+            |p| p.funding = 0,
         ];
         for mutate in mutations {
             let mut p = plan();
@@ -204,12 +295,60 @@ mod tests {
         }
     }
 
+    // Roles that cannot be changed later must be distinct and well formed.
+    #[test]
+    fn roles_must_be_distinct_and_well_formed() {
+        let mutations: Vec<fn(&mut MintPlan)> = vec![
+            |p| p.guardian = p.signer.clone(),
+            |p| p.relay = p.guardian.clone(),
+            |p| p.signer = p.relay.clone(),
+            |p| p.guardian = "Guardian.testnet".into(),
+            |p| p.guardian = "guardian..testnet".into(),
+        ];
+        for mutate in mutations {
+            let mut p = plan();
+            mutate(&mut p);
+            assert!(p.check().is_err());
+        }
+        assert!(registry_init_args(["a.testnet", "b.testnet"], "a.testnet").is_err());
+        assert!(registry_init_args(["a.testnet", "B.testnet"], "x.testnet").is_err());
+    }
+
+    // A tier whose value does not fit is refused instead of wrapping.
+    #[test]
+    fn amounts_never_wrap() {
+        let mut p = plan();
+        p.base_value = u128::MAX / 2;
+        assert!(p.check().is_err(), "tier 2 would overflow");
+        p.denom_keys.truncate(2);
+        assert!(p.check().is_ok());
+        assert!(amount(u128::MAX, 2).is_err());
+        assert_eq!(amount(5, 3).unwrap(), 15);
+    }
+
+    #[test]
+    fn every_contract_needs_funding() {
+        assert!(funding(0).is_err());
+        assert_eq!(funding(5).unwrap(), 5 * NEAR);
+        assert!(funding(u128::MAX).is_err());
+    }
+
+    #[test]
+    fn the_deployed_code_hash_is_compared() {
+        let code = b"\0asm contract".to_vec();
+        let view = json!({"code_hash": bs58::encode(code_hash(&code)).into_string()});
+        assert!(check_deployed_code(&view, &code).is_ok());
+        assert!(check_deployed_code(&view, b"other").is_err());
+        assert!(check_deployed_code(&json!({}), &code).is_err());
+        assert_eq!(code_hash(b"abc")[..4], [0xba, 0x78, 0x16, 0xbf]);
+    }
+
     #[test]
     fn the_registry_needs_two_owners() {
-        assert!(registry_init_args(["a", "a"], "x").is_err());
-        assert!(registry_init_args(["a", ""], "x").is_err());
-        assert!(registry_init_args(["a", "b"], "").is_err());
-        assert_eq!(registry_init_args(["a", "b"], "x").unwrap()["owners"], json!(["a", "b"]));
+        assert!(registry_init_args(["a1", "a1"], "x1").is_err());
+        assert!(registry_init_args(["a1", ""], "x1").is_err());
+        assert!(registry_init_args(["a1", "b1"], "").is_err());
+        assert_eq!(registry_init_args(["a1", "b1"], "x1").unwrap()["owners"], json!(["a1", "b1"]));
     }
 
     #[test]

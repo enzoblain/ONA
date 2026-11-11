@@ -1,6 +1,13 @@
 //! Deploys `ona-mint` on a local `near-sandbox` node, runs every method with real transactions,
 //! prints the gas burnt and checks the reserve after each step. It then runs the real signer loop
 //! and the real relay exchange against the same node.
+//!
+//! `NEAR_SANDBOX_BIN_PATH` must name a `near-sandbox` binary: without it the `near-sandbox` library
+//! downloads one and runs it without checking a checksum, which this program refuses.
+#![forbid(unsafe_code)]
+
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
@@ -137,8 +144,38 @@ impl Env {
     }
 }
 
+/// The local node binary to run. Refuses to go on without one, so the library never downloads and runs an
+/// unchecked binary.
+fn sandbox_binary(value: Option<OsString>) -> Result<PathBuf> {
+    let path = PathBuf::from(value.filter(|v| !v.is_empty()).ok_or_else(|| {
+        anyhow!("set NEAR_SANDBOX_BIN_PATH to a near-sandbox binary you have checked (docs/INSTALL.md)")
+    })?);
+    if !path.is_file() {
+        bail!("NEAR_SANDBOX_BIN_PATH does not name a file: {}", path.display());
+    }
+    Ok(path)
+}
+
+/// Decodes lowercase or uppercase hexadecimal, refusing an odd length or another character.
+fn from_hex(text: &str) -> Result<Vec<u8>> {
+    if text.len() % 2 != 0 || !text.is_ascii() {
+        bail!("not hexadecimal: {text}");
+    }
+    (0..text.len()).step_by(2).map(|i| Ok(u8::from_str_radix(&text[i..i + 2], 16)?)).collect()
+}
+
+/// The 32-byte seed of an `ed25519:<base58>` key in the 64-byte form.
+fn key_seed(secret: &str) -> Result<[u8; 32]> {
+    let raw = bs58::decode(secret.trim_start_matches("ed25519:")).into_vec()?;
+    if raw.len() != 64 {
+        bail!("the genesis key is not a 64-byte ed25519 key");
+    }
+    Ok(raw[..32].try_into()?)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    sandbox_binary(std::env::var_os("NEAR_SANDBOX_BIN_PATH"))?;
     let config = near_sandbox::SandboxConfig {
         additional_config: Some(json!({"telemetry": {"endpoints": []}})),
         ..Default::default()
@@ -151,8 +188,7 @@ async fn main() -> Result<()> {
     let genesis = near_sandbox::GenesisAccount::default();
     let root = genesis.account_id.to_string();
     let secret = genesis.private_key.to_string();
-    let raw = bs58::decode(secret.trim_start_matches("ed25519:")).into_vec()?;
-    let seed: [u8; 32] = raw[..32].try_into()?;
+    let seed = key_seed(&secret)?;
     let chain = Client::new(&rpc_url, SigningKey::from_bytes(&seed));
 
     let sub = |name: &str| format!("{name}.{root}");
@@ -202,7 +238,7 @@ async fn main() -> Result<()> {
 
     // redeem pays the owner's implicit account, which did not exist before.
     let mut batch = e.issue(1, 8)?;
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let implicit = hex(&t.pk);
     if e.chain.balance(&implicit)?.is_some() {
         bail!("implicit account unexpectedly exists");
@@ -216,7 +252,7 @@ async fn main() -> Result<()> {
     println!("double redeem refused: {}", o.failure.is_some());
     e.check_reserve("double redeem")?;
 
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let mut forged = t.clone();
     forged.nonce[0] ^= 1;
     let o = e.redeem(&forged, &owner)?;
@@ -228,7 +264,7 @@ async fn main() -> Result<()> {
     e.check_reserve("outside callback")?;
 
     // spend without change
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let fee = 20 * MILLI;
     let before = e.chain.balance(&bob)?.unwrap_or(0);
     let o = e.spend_call(&t, &owner, &bob, (UNIT << 1) - fee, fee, &[])?;
@@ -236,7 +272,7 @@ async fn main() -> Result<()> {
     println!("spend paid the recipient: {} yocto", e.chain.balance(&bob)?.unwrap_or(0) - before);
 
     // spend with change, then the change is issued and redeemed
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let pending = PendingToken::new(&mut OsRng, 0, &e.dst).map_err(|x| anyhow!("{x}"))?;
     let change = [ChangeOut { denom_id: 0, blinded: pending.blinded }];
     let fee = 50 * MILLI;
@@ -256,7 +292,7 @@ async fn main() -> Result<()> {
     e.record("redeem the change", &o)?;
 
     // spend to an account that does not exist
-    let (t, owner) = batch.pop().unwrap();
+    let (t, owner) = batch.pop().ok_or_else(|| anyhow!("no token left in the batch"))?;
     let ghost = format!("ghost-does-not-exist.{root}");
     let before = e.chain.balance(&mint)?.unwrap_or(0);
     let fee = 20 * MILLI;
@@ -359,10 +395,7 @@ async fn main() -> Result<()> {
     println!("nullifier recorded as claimed by the relay: {spent_by_relay}");
 
     let sig_hex = reply["signatures"][0].as_str().ok_or_else(|| anyhow!("no signature"))?;
-    let sig_bytes: Vec<u8> = (0..sig_hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&sig_hex[i..i + 2], 16))
-        .collect::<Result<_, _>>()?;
+    let sig_bytes = from_hex(sig_hex)?;
     let blind_sig: [u8; G1_LEN] = sig_bytes.try_into().map_err(|_| anyhow!("bad signature length"))?;
     let unblinded = unblind(&blind_sig, &wallet[0].1).map_err(|x| anyhow!("{x}"))?;
     let mut request_token = wallet[0].0.to_vec();
@@ -391,4 +424,32 @@ async fn main() -> Result<()> {
     let s = e.chain.view(&mint, "reserve_status", json!({}))?;
     println!("\nfinal reserve: {s}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Without a binary of its own, the program stops before the library can download one.
+    #[test]
+    fn a_local_binary_is_required() {
+        assert!(sandbox_binary(None).is_err());
+        assert!(sandbox_binary(Some(OsString::new())).is_err());
+        assert!(sandbox_binary(Some(OsString::from("/nonexistent/near-sandbox"))).is_err());
+        let file = std::env::temp_dir().join(format!("ona-sandbox-bin-{}", std::process::id()));
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(sandbox_binary(Some(file.clone().into_os_string())).unwrap(), file);
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn malformed_inputs_are_errors_not_panics() {
+        assert_eq!(from_hex("0aFf").unwrap(), [0x0a, 0xff]);
+        assert!(from_hex("abc").is_err());
+        assert!(from_hex("zz").is_err());
+        assert!(from_hex("é1").is_err());
+        assert!(key_seed("ed25519:abc").is_err());
+        let key = bs58::encode([7u8; 64]).into_string();
+        assert_eq!(key_seed(&format!("ed25519:{key}")).unwrap(), [7u8; 32]);
+    }
 }

@@ -5,7 +5,8 @@
 ## Layout
 Under `crates/`: `ona-token` crypto and token format · `ona-mint` NEAR contract · `ona-registry` NEAR contract · `ona-signer` issuing
 loop · `ona-server` relay · `ona-wallet` encrypted wallet file · `ona-core` local mission core and CLI · `ona-sandbox` deployment and
-gas harness · `ona-anchor` journal anchoring aggregator · `ona-pool` NEAR contract holding the funds the agent places.
+gas harness · `ona-anchor` journal anchoring aggregator · `ona-pool` NEAR contract holding the funds the agent places · `ona-near` NEAR
+RPC client · `ona-deploy` deployment tool · `ona-crowd` crowd simulator.
 
 ## Curve choice
 Message and signature in **G1**, public key in **G2**. 48-byte tokens. All points reach `pairing_check`, which rejects
@@ -332,3 +333,76 @@ the chain confirms. A `false` from `relay_claim` is read again in a final block:
 anything else, such as the hourly limit, stays pending. Request tokens are recorded as used before the model call, and returned durably only when the
 service refused the connection or answered 401, 402 or 429. The journal cuts a last line without a newline at startup, stops after a failed write until
 restarted, and is rewritten with one line per credit and per used token.
+
+## NEAR RPC client (`crates/ona-near`)
+
+**The RPC node is a trusted component.** Views (`pending_deposits`, `relay_claim` results, `is_spent`, access keys), nonces and block times
+are taken as the node gives them; `view_final` protects against a reorganization, not against a lying node, and no light-client proof
+is checked. A dishonest node can therefore make the signer blind-sign a deposit that does not exist, or make the relay accept or refuse a
+claim wrongly. Only an operator-run node, or several independent nodes compared, would remove this; neither is built.
+
+What the client does refuse is being made to sign something else than what its caller asked for:
+- The transaction encoder takes a block hash of exactly 32 bytes, and a `block_hash` from the node that is not base58 of 32 bytes is an
+  error. A longer value would have let the node append actions of its choice to the signed bytes. The nonce is `nonce + 1`, refused on
+  overflow. Both are read with finality `final`. Signer and receiver must be well-formed account ids.
+- `ONA_RPC_URL` must be `https`, or `http` to `127.0.0.1`, `localhost` or `[::1]`. Plain `http` to a `.onion` address is accepted only by
+  the client that sends everything through Tor (`Client::with_agent`, used by `ona_tor::near_client`), never by `Client::new` or
+  `Client::connect`. Redirects are not followed (a 3xx is an error), proxy variables from the environment are ignored, and the body of an
+  HTTP error is read.
+
+What a result means. A send uses `send_tx` with `wait_until: FINAL`. A result is read only when it states `final_execution_status:
+"FINAL"`, lists its receipts (`receipts_outcome`) and has a status of `SuccessValue` or `Failure`; anything else is treated as an unclear
+answer (below). The outcome then keeps two things apart:
+- `failure`, the status of the transaction itself, which follows the chain of promises its first receipt returned;
+- `failed_receipts`, every receipt that failed, including a sub-call a contract handled in a callback (`on_spend_payout` in the mint;
+  `on_place`, `on_done`, `on_sync` in the pool) and promises it did not wait for. `Outcome::require_all_receipts_ok()` fails if either is set.
+
+Which to use: a caller that needs every effect to have happened (a transfer, a deployment, every call of `ona-crowd run`) uses
+`require_all_receipts_ok()`. A caller of a contract method whose callback handles a failed sub-call reads `failure`, then the contract's
+state, because a failed receipt there does not mean that nothing happened (a nullifier can be consumed while the payment came back).
+`ona-deploy` and `ona-crowd` use `require_all_receipts_ok()`; `ona-sandbox`, the signer and the relay read `failure`, as before. Neither
+guarantees that the node reported every receipt or that the contract reached the state the caller expected: when that matters, read the
+state again. Whether nodes always return `final_execution_status` is not verified; a node that leaves it out gets every send reported as
+of unknown fate.
+
+A failed send never means "did not happen". The outcome carries the transaction hash (SHA-256 of the unsigned transaction, as NEAR defines
+it; not checked against a node). A JSON-RPC error named `INVALID_TRANSACTION`, `PARSE_ERROR` or `REQUEST_VALIDATION_ERROR` is a refusal. Any
+other answer that is not a final result naming this transaction (timeout, HTTP error, unreadable reply, a result that is not final or
+lists no receipts, a result for another transaction hash) makes the client ask `tx` for its own hash, up to three times, two seconds
+apart, accepting only a final result naming that hash. If the node still cannot say, the error is `TxUnknown` with the hash. The
+transaction is never re-sent. It can still be included until its block hash expires, so a caller must check that hash before repeating the
+action. The error names, the `tx` method and its parameters come from the NEAR RPC documentation and were not checked against a node.
+Two programs using the same key read the same nonce: one of them is refused, with no retry.
+
+The account key file is opened once without following symbolic links, and must be a regular file of at most 4 KiB, owned by the current
+user, readable by them only. The decoded key material is wiped from memory after use; the key text in the caller's environment is not.
+
+Since the `ona-sandbox` run of 2026-11-10 this client changed (required finality, failed receipts listed, status checks). It has not run
+against a node since.
+
+## Deployment (`crates/ona-deploy`)
+
+The contracts have no access key, so a wrong role can never be corrected. Before sending, `ona-deploy` refuses: a network or chain id
+containing `mainnet`, an RPC address containing `mainnet` or not https, a parent account ending in `.near`, a non-`.testnet` parent when the
+chain id is `testnet`, then a node reporting another chain id than expected (`ona_near::check_network`, also used by `ona-crowd`). Every
+role must be a well-formed account that exists, and no account may hold two roles (mint: signer, relay, guardian; registry: two owners
+and the aggregator; pool: guardian and agent). Amounts are computed without wrapping: a tier worth more than a `u128` is refused, and so
+is a funding of zero for any of the three contracts. The plan
+and the SHA-256 of the contract are printed, and the operator must type the account name. Afterwards the tool checks that the account
+has no access key and that its `code_hash` is the base58 SHA-256 of the file sent (that NEAR's `code_hash` is this hash is not checked
+against a node). Comparing names and chain ids is not a full guarantee: a node lying about its chain id is not detected.
+
+## Reproducing the contract hashes
+
+`verify.sh` builds each contract with Rust 1.99.1, `--locked`, the `contract` profile (`opt-level = "z"`, `lto`, one codegen unit,
+`panic = "abort"`, overflow checks), the flags of `crates/<contract>/wasm-build.toml`, and three path rewrites: `$CARGO_HOME` to `/cargo`,
+the standard library sources of the toolchain to `/rustc/<rustc commit>` (the path rustc uses when those sources are not installed), and the
+repository to `/ona`. `RUSTFLAGS` and its variants are unset first, since they would replace those flags, and a path containing a quote,
+a backslash or `=` is refused. It then fails if a wasm contains the repository path, `$CARGO_HOME`, the toolchain path, the home
+directory, `/Users/` or `/home/`, and prints each SHA-256.
+
+To check a deployed contract: build the same commit with `verify.sh` and compare the printed SHA-256, in base58, with the `code_hash` of
+the account (`view_account`). Measured: the registry built here had 26 paths under the home directory without the rewrites and none with them. **Not
+verified:** that a second machine gets the same bytes. A different Rust version, a different `CARGO_HOME` layout or another crates.io index
+directory name gives other bytes, and C code compiled by build scripts was not checked. No reference hash is published yet. The Rust
+version is written in INSTALL.md only: the repository has no `rust-toolchain.toml` yet.

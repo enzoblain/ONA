@@ -67,6 +67,19 @@ pub fn check_exit_caps(timeline: &[PublicEvent], gains: &BTreeMap<String, u64>) 
     Ok(())
 }
 
+/// What each fake user is funded with before the timeline plays: `(account, units, transactions, notes)`,
+/// from its deposits. Sums saturate: a value that large is refused later as too large an amount.
+pub fn funding_plan(sim: &Simulation) -> Vec<(String, u64, u64, u64)> {
+    let mut owed: BTreeMap<&str, (u64, u64, u64)> = BTreeMap::new();
+    for e in sim.timeline.iter().filter(|e| e.kind == EventKind::Deposit) {
+        let entry = owed.entry(e.from.as_str()).or_default();
+        entry.0 = entry.0.saturating_add(e.amount);
+        entry.1 = entry.1.saturating_add(1);
+        entry.2 = entry.2.saturating_add(u64::from(e.count));
+    }
+    owed.into_iter().map(|(account, (units, transactions, notes))| (account.to_string(), units, transactions, notes)).collect()
+}
+
 /// Funds each fake user with what it deposits, then plays the events in order. `wait` receives the
 /// seconds between two events, so a caller can pace a real run. Stops at the first error.
 pub fn execute(sim: &Simulation, config: &Config, chain: &mut dyn Chain, wait: &mut dyn FnMut(u64)) -> Result<()> {
@@ -76,15 +89,8 @@ pub fn execute(sim: &Simulation, config: &Config, chain: &mut dyn Chain, wait: &
     let gains: BTreeMap<String, u64> = sim.truth.requests.iter().map(|r| (r.account.clone(), r.gain_paid)).collect();
     check_exit_caps(&sim.timeline, &gains)?;
     let by_account: BTreeMap<String, &FakeUser> = sim.users.iter().map(|u| (u.account(), u)).collect();
-    let mut owed: BTreeMap<&str, (u64, u64, u64)> = BTreeMap::new();
-    for e in sim.timeline.iter().filter(|e| e.kind == EventKind::Deposit) {
-        let entry = owed.entry(e.from.as_str()).or_default();
-        entry.0 += e.amount;
-        entry.1 += 1;
-        entry.2 += u64::from(e.count);
-    }
-    for (account, (units, transactions, notes)) in owed {
-        chain.fund(account, units, transactions, notes)?;
+    for (account, units, transactions, notes) in funding_plan(sim) {
+        chain.fund(&account, units, transactions, notes)?;
     }
 
     let vault = |contract: &str| -> Result<&Vault> {

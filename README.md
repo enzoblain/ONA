@@ -63,8 +63,8 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-pool` contract: listed staking vaults, share notes, switching vaults without an exit, exits only to depositors, 7-day escape | done, never deployed, lending not implemented | mocked NEAR VM only, never against a real staking pool |
 | `ona-crowd` crowd simulator for the pool demo | simulation and vault-privacy measure done; the NEAR runner has never run | in-memory chain only |
 | `ona-anchor` hourly journal anchoring, auditor key sealing in `ona-core` | library done, no program receives leaves yet | fake registry only, never on a NEAR node |
-| `ona-deploy` deployment tool | done, refuses mainnet, testnet not tried yet | unit tests |
-| `ona-near` RPC client | done | unit tests, and a local NEAR node through `ona-sandbox` |
+| `ona-deploy` deployment tool | done; refuses mainnet from the names, the parent account and the chain id the node reports; checks the roles and the deployed code hash; testnet not tried yet | unit tests |
+| `ona-near` RPC client | done; https only (except a local node, or an onion address through Tor), only final results are read, failed receipts are listed apart from the transaction status, an unclear send is looked up by its hash and never sent twice. Trusts its RPC node | unit tests against a fake node, and a local NEAR node through `ona-sandbox` before these changes |
 | `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
 | `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done; the `ona-relay` program has not run yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
 | `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
@@ -81,21 +81,23 @@ with the content, but the account, the network address, the payment and the agen
 
 Setup and details are in [docs/INSTALL.md](docs/INSTALL.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-`./verify.sh` runs every test and compiles the three contracts. It needs Rust and the `wasm32-unknown-unknown` target, and no key,
-no funded account, no Docker and no browser.
+`./verify.sh` runs every test, compiles the three contracts without local paths and prints their SHA-256. It needs Rust 1.99.1 and the
+`wasm32-unknown-unknown` target, and no key, no funded account, no Docker and no browser.
 
 ```
 cargo run -p ona-core --bin ona -- demo     # a full mission against the fakes
 cargo run -p ona-server --bin ona-mock-relay -- 8787     # a fake relay on localhost for front-end work
 ```
 
-To measure gas on a local node, build the contract as in `verify.sh`, set `NEAR_SANDBOX_BIN_PATH` to a `near-sandbox` binary, and run
-`cargo run -p ona-sandbox`.
+To measure gas on a local node, run `verify.sh`, set `NEAR_SANDBOX_BIN_PATH` to a `near-sandbox` binary you have checked (required: the
+program refuses to let the library download one), and run `cargo run -p ona-sandbox`.
 
 ## Known limitations
 
 - At launch the anonymity set is one, so ONA claims no unlinkability until a measured number of users is published.
 - Deposits are public on chain and show that an account uses ONA.
+- Every program trusts the NEAR RPC node it is given: no proof is checked, so a lying node can make the signer sign for a deposit
+  that does not exist. Run your own node for the signer and the relay.
 - The model enclave reads the pseudonymized prompt by design, under a TEE assumption.
 - NEAR AI Cloud keeps one usage row per request.
 - The computer must be on for a mission to progress.
@@ -114,6 +116,8 @@ More in [SPEC.md](SPEC.md).
 ## Libraries and AI-generated code
 
 Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`.
+The NEAR client, the deployment tool and the crowd simulator also use `ureq` (with `rustls`), `bs58`, `base64`, `anyhow`, `libc`,
+`zeroize`, `rand` and `rand_chacha`. `Cargo.lock` fixes every version, and `verify.sh` builds with `--locked`.
 
 The code and tests in this repository were written with Claude (Anthropic), under human direction.
 
