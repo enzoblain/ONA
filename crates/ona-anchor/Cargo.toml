@@ -1,0 +1,12 @@
+[package]
+name = "ona-anchor"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+base64 = "0.22"
+ona-core = { path = "../ona-core" }
+ona-near = { path = "../ona-near" }
+serde_json = "1"

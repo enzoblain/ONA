@@ -1960,6 +1960,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ona-anchor"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "ona-core",
+ "ona-near",
+ "serde_json",
+]
+
+[[package]]
 name = "ona-core"
 version = "0.0.1"
 dependencies = [
@@ -1972,6 +1982,7 @@ dependencies = [
  "sha2 0.10.9",
  "ureq",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

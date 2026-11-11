@@ -5,7 +5,7 @@
 ## Layout
 Under `crates/`: `ona-token` crypto and token format · `ona-mint` NEAR contract · `ona-registry` NEAR contract · `ona-signer` issuing
 loop · `ona-server` relay · `ona-wallet` encrypted wallet file · `ona-core` local mission core and CLI · `ona-sandbox` deployment and
-gas harness.
+gas harness · `ona-anchor` journal anchoring aggregator.
 
 ## Curve choice
 Message and signature in **G1**, public key in **G2**. 48-byte tokens. All points reach `pairing_check`, which rejects
@@ -97,7 +97,26 @@ Local only, model faked and every fake response labelled `mode: mock`. Mission s
 read; closed-schema reader output; payment gate with allowlisted templates, recipient list and amount cap (code, not model);
 hash-chained journal with one-byte tamper detection; exposure report built from the journal; `dispatch(json) -> json`; CLI
 (`ona demo`). `Journal::seal` produces the auditor form: XChaCha20-Poly1305 per entry, keys from HKDF, padded to 512-byte blocks,
-chain verifiable without a key, one entry can be disclosed alone. Sealing the master key to the auditor's public key is not implemented.
+chain verifiable without a key, one entry can be disclosed alone. The master key is sealed to the auditor's public key by
+`auditor::seal_master_key` (see below); nothing in the mission calls it yet.
+
+## Journal anchoring (`crates/ona-core/src/checkpoint.rs`, `crates/ona-anchor`)
+- Leaf of a checkpoint: `SHA-256(0x00 || "ona/leaf/v1" || salt || journal head)`, with a new random salt for each checkpoint, so two
+  leaves of one mission cannot be linked. Nodes: `SHA-256(0x01 || left || right)`, as in RFC 9162.
+- The tree always has depth 10 (1024 leaves). Real leaves sit at random positions and the rest are random filler leaves, so a root is
+  always 32 bytes and an inclusion proof always 2 + 10 × 32 bytes (index, then siblings), whatever the batch size.
+- `ona-anchor` collects leaves, refuses duplicates and more than 1024 per batch, anchors one tree per hour even when empty, and returns
+  the proofs. It keeps nothing once a batch is anchored. A refused anchor keeps the leaves for the next attempt with a new tree.
+- `anchor(root, count)` is always sent with `count = 1024`: the real number would reveal how busy the hour was. The contract field
+  therefore says nothing about activity.
+- Not built: a program that receives leaves and delivers proofs over the network, and the agent side that submits checkpoints. Before
+  such a program exists it needs a per-client limit, or one client can fill every batch. Today only the submitter of a leaf can notice
+  that it was left out.
+
+## Auditor key (`crates/ona-core/src/auditor.rs`)
+The journal's 32-byte master key is sealed to the auditor's X25519 public key: ephemeral X25519 key, HKDF-SHA256 bound to both public
+keys, XChaCha20-Poly1305. Format: version (1) · ephemeral public key (32) · nonce (24) · ciphertext and tag (48). The caller's copy
+is wiped after a successful seal and kept after a failed one. Copies made elsewhere in memory are not reached.
 
 ## Chat retention (`crates/ona-core/src/vault.rs`)
 Local history only if the user chooses it, otherwise automatic deletion after 24 hours. Chat results stay encrypted on the device with one key per chat, 24 hours from the first save by default; saving again does not

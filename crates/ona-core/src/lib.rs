@@ -2,6 +2,8 @@
 //! the chain are faked in this version, and the model is faked unless a real one is configured.
 //! Every reply is labelled with its `mode` so a fake can't pass for a result.
 
+pub mod auditor;
+pub mod checkpoint;
 pub mod e2ee;
 pub mod gate;
 pub mod journal;
