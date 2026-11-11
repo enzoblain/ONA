@@ -16,12 +16,51 @@ contact a professional, make a payment), and asks for your explicit confirmation
 
 The difference is who sees what. ONA is designed so that no single party gets both who you are and what you asked:
 
-- **the model** reads your request with names replaced by pseudonyms, inside an enclave (NEAR AI Cloud);
+- **the model** reads your request with the names and identifiers you declare replaced by pseudonyms, inside an enclave (NEAR AI
+  Cloud). Until this client verifies the enclave's quotes, the relay in front of the model can read the request and make up replies;
 - **websites and the people the agent contacts** see Tor traffic and a generic message, not you;
 - **payments** use blind tokens: the mint that holds your deposit cannot link it to what you pay for;
 - **your phone** talks to your own computer over Tor, and the agent runs on that computer, not on our servers.
 
-After each mission, ONA shows an **exposure report**: every party that received something, and exactly what it received.
+After each mission, ONA shows an **exposure report**: every party that received something, how many requests and how many bytes
+it received (not the content itself).
+
+### What pseudonyms cover
+
+Before any text goes to the model (the planner and the page reader), `ona-core` replaces every occurrence of each protected term
+(the terms of the policy and those declared when the mission is opened: names, case numbers, company names) with a random 12-letter
+pseudonym such as `KQXMZBTRWLDN` (letters only, so it can never be read as a price). The model's reply is put back locally, whatever
+the case of the pseudonym. The table stays on the computer and is forgotten when the mission closes. A text that still contains a
+protected term after replacement is refused, not sent.
+
+Texts and terms are compared on a normalized view:
+
+- HTML tags and comments are removed (`<br>`, `<p>`, `<div>`, `<li>`, `<tr>` count as a line break). Pages reach the reader exactly as
+  the web layer returns them: today the web is a fake that returns plain text, and a real one may return HTML, so tags are handled
+  either way.
+- One level of decoding: numeric HTML references (with or without `;`, any number of leading zeros, `&#128;` to `&#159;` read as
+  Windows-1252 like browsers do); named references of Latin-1 (also without `;`), Latin Extended-A, common punctuation and invisible
+  characters (`&ZeroWidthSpace;`, `&NoBreak;`, `&it;`...); URL escapes (`%70`), bytes that are not valid UTF-8 being dropped.
+- Unicode default-ignorable characters (soft hyphens, zero-width spaces and joiners, direction marks, variation selectors...) and the
+  line separators U+2028, U+2029, U+0085 are removed.
+- A dash or a soft hyphen at the end of a line, between letters, may be there or not: `Du-` / `pont` matches "Dupont", and `Jean-` /
+  `Luc` matches "Jean-Luc".
+- These dashes become `-`: U+002D, U+058A, U+05BE, U+1400, U+1806, U+2010 to U+2015, U+2043, U+2053, U+207B, U+208B, U+2212, U+2E17,
+  U+2E1A, U+2E3A, U+2E3B, U+2E40, U+2E5D, U+301C, U+3030, U+30A0, U+FE31, U+FE32, U+FE58, U+FE63, U+FF0D, U+10EAD, U+02D7, U+2796.
+  These apostrophes become `'`: U+0027, U+0060, U+00B4, U+02B9, U+02BB to U+02BE, U+0384, U+055A, U+05F3, U+1FBD, U+1FBF, U+1FEF,
+  U+1FFD, U+2018, U+2019, U+201B, U+2032, U+2035, U+A78B, U+A78C, U+FF07, U+FF40.
+- Unicode NFKD (full-width and mathematical letters, ligatures), every combining mark removed (accents never matter: "ELODIE" matches
+  "Élodie"; stray underline or strike-through marks are ignored), lowercase, `ß` read as `ss`.
+- Every run of white space (spaces, tabs, line breaks, no-break spaces) is one space: "Jean\nDupont" matches "Jean Dupont".
+
+A term matches as a whole word ("Ali" is not replaced in "alibi"); a term written `*between asterisks*` matches inside words too.
+
+**Not covered:** a term you did not declare; a term written another way (misspelled, abbreviated, inflected, initials, nickname,
+transliterated, a rephrasing); a name split by a line break without a hyphen (`Du` / `pont`); look-alike letters from another script
+(Cyrillic `у` in "Dupont"); small capitals and other letters that NFKD does not fold; escapes nested twice or more (`%2570`,
+`&amp;#112;`, `%26%23112%3B`); `+` written for a space in a URL; HTML named references outside the sets above (such as `&Dopf;`); a
+numeric reference whose digits run into the next letters (`&#x2019Brien` reads `&#x2019B`, as a browser does); and the context around
+a name (job, city, dates, a rare situation), which can be enough to identify someone.
 
 This is the design. Today the model, the web and the payments in the app are still fakes; see
 [what works today](#what-works-today) and the [known limitations](#known-limitations).
@@ -38,7 +77,7 @@ with the content, but the account, the network address, the payment and the agen
 
 | Component | Role | Language |
 |---|---|---|
-| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Reaches the network through a local `tor` over SOCKS5 (`ona-tor`) | Rust |
+| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Planned to reach the network through a local `tor` over SOCKS5 (`ona-tor`); today `ona real` connects to the relay directly | Rust |
 | Desktop app | Connects a NEAR wallet for deposits, starts missions, asks for confirmations, shows the exposure report | Swift (SwiftUI) on macOS; Rust + Tauri with HTML/JavaScript on Windows and Linux; both on `ona-core` (to be confirmed) |
 | iOS app | Remote control of the computer over Tor: mission progress and confirmations. Holds no tokens and no pseudonym table | Swift |
 | `ona-server` | Thin relay in a TEE (Phala dstack): holds the NEAR AI Cloud key, enforces a flat request size, submits transactions | Rust |
@@ -67,7 +106,7 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-near` RPC client | done; https only (except a local node, or an onion address through Tor), only final results are read, failed receipts are listed apart from the transaction status, an unclear send is looked up by its hash and never sent twice. Trusts its RPC node | unit tests against a fake node, and a local NEAR node through `ona-sandbox` before these changes |
 | `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
 | `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done; the `ona-relay` program has not run yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
-| `ona-wallet` encrypted wallet file | done, keychain not wired in | native tests |
+| `ona-wallet` encrypted wallet file | done, keychain not wired in; a wallet without its seal file is refused by design (`open_adopting_unsealed` adopts one explicitly) | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
 | Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol; no wallet yet | Mac tests with the real `ona-core`, one end-to-end run with the iOS simulator on the local network ([notes](docs/desktop/app.md)) |
@@ -98,7 +137,12 @@ program refuses to let the library download one), and run `cargo run -p ona-sand
 - Deposits are public on chain and show that an account uses ONA.
 - Every program trusts the NEAR RPC node it is given: no proof is checked, so a lying node can make the signer sign for a deposit
   that does not exist. Run your own node for the signer and the relay.
-- The model enclave reads the pseudonymized prompt by design, under a TEE assumption.
+- The model enclave reads the pseudonymized prompt by design, under a TEE assumption. Pseudonyms replace declared terms only (see
+  [what pseudonyms cover](#what-pseudonyms-cover)).
+- **The relay can read what goes to the model and invent replies.** The client takes the model key from an attestation report that the
+  relay delivers and does not verify the Intel and NVIDIA quotes yet. Every exposure report with a real call says so.
+- The payment confirmation is a digest bound to the network, the contract, the mission, a random nonce, the recipient and the amount
+  of the chosen offer; it proves the caller saw these fields, not that a human did, since it is not signed by a separate device.
 - NEAR AI Cloud keeps one usage row per request.
 - The computer must be on for a mission to progress.
 - The same team would operate the relay, the signer and the anchoring.
@@ -123,9 +167,16 @@ More in [SPEC.md](SPEC.md).
 
 ## Libraries and AI-generated code
 
-Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`.
+Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`,
+`unicode-normalization`.
 The NEAR client, the deployment tool and the crowd simulator also use `ureq` (with `rustls`), `bs58`, `base64`, `anyhow`, `libc`,
 `zeroize`, `rand` and `rand_chacha`. `Cargo.lock` fixes every version, and `verify.sh` builds with `--locked`.
+
+Client core (`crates/ona-core`), pinned exactly:
+
+| Library | Version | Used by | Notes |
+|---|---|---|---|
+| `unicode-normalization` | 0.1.26 | `ona-core` (pseudonyms) | NFKD and combining marks, before protected terms are compared |
 
 The code and tests in this repository were written with Claude (Anthropic), under human direction.
 

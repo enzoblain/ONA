@@ -2,10 +2,10 @@
 //! `ona demo` runs a full mission against the fakes. `ona real` uses the real model, configured by
 //! the `ONA_REAL_*` variables: only then does anything here touch a network. Never a chain.
 
-use std::io::{self, BufRead};
+use std::io;
 
 use ona_core::remote::RemoteConfig;
-use ona_core::Core;
+use ona_core::{serve, Core};
 use serde_json::{json, Value};
 
 fn run_demo() {
@@ -15,7 +15,7 @@ fn run_demo() {
         println!("> {request}\n< {reply}");
         serde_json::from_str(&reply).unwrap_or(Value::Null)
     };
-    send(json!({"cmd":"open","mission":"Trouver un avocat en droit du travail"}));
+    send(json!({"cmd":"open","mission":"Trouver un avocat en droit du travail pour M. Dupont","protected":["M. Dupont"]}));
     send(json!({"cmd":"propose_plan"}));
     send(json!({"cmd":"accept_plan"}));
     send(json!({"cmd":"search","template":"lawyer","value":"paris"}));
@@ -24,7 +24,8 @@ fn run_demo() {
     send(json!({"cmd":"compare"}));
     send(json!({"cmd":"confirm_recipient","firm":"cabinet-b"}));
     send(json!({"cmd":"contact","message":"Bonjour, demande de devis pour un litige prud'homal."}));
-    let prepared = send(json!({"cmd":"prepare_payment","amount":"1000000000000000000000000"}));
+    // No amount: the chosen offer's price, converted with the demo rate.
+    let prepared = send(json!({"cmd":"prepare_payment"}));
     send(json!({"cmd":"confirm_payment","digest":prepared["digest"]}));
     send(json!({"cmd":"pay"}));
     send(json!({"cmd":"close"}));
@@ -43,13 +44,8 @@ fn main() {
             std::process::exit(1);
         }
     }
-    for line in io::stdin().lock().lines() {
-        match line {
-            Ok(request) => println!("{}", core.dispatch(&request)),
-            Err(e) => {
-                eprintln!("cannot read stdin: {e}");
-                std::process::exit(1);
-            }
-        }
+    if let Err(e) = serve(&mut core, io::stdin().lock(), io::stdout().lock()) {
+        eprintln!("cannot read stdin or write stdout: {e}");
+        std::process::exit(1);
     }
 }

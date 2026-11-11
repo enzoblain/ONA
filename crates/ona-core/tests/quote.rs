@@ -4,8 +4,8 @@
 use std::cell::Cell;
 
 use ona_core::quote::{
-    observed_2026_11_10, observed_compose_2026_11_10, verify_model_attestation, IntelQuoteVerifier, Measurements,
-    NvidiaVerifier, Policy,
+    observed_2026_11_10, observed_compose_2026_11_10, verify_model_attestation, IntelQuoteVerifier, IntelVerdict,
+    Measurements, NvidiaVerifier, Policy, TcbStatus,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256, Sha384};
@@ -43,11 +43,24 @@ fn set_quote(r: &mut Value, quote: &[u8]) {
     r["intel_quote"] = Value::String(hex(quote));
 }
 
+/// The time the tests judge collateral at, and a collateral issued one day before.
+const NOW: u64 = 1_793_000_000;
+const DAY: u64 = 86_400;
+
+fn up_to_date(quote: &[u8]) -> IntelVerdict {
+    IntelVerdict {
+        tcb_status: TcbStatus::UpToDate,
+        advisory_ids: vec![],
+        collateral_issued_at: NOW - DAY,
+        report_body: quote.get(48..48 + 584).map(<[u8]>::to_vec).unwrap_or_default(),
+    }
+}
+
 /// Stands for a real signature check: accepts only the exact quote it was given.
 struct ExactQuote(Vec<u8>);
 impl IntelQuoteVerifier for ExactQuote {
-    fn verify(&self, quote: &[u8]) -> Result<(), String> {
-        if quote == self.0 { Ok(()) } else { Err("bad quote signature".into()) }
+    fn verify(&self, quote: &[u8]) -> Result<IntelVerdict, String> {
+        if quote == self.0 { Ok(up_to_date(quote)) } else { Err("bad quote signature".into()) }
     }
 }
 
@@ -55,16 +68,30 @@ impl IntelQuoteVerifier for ExactQuote {
 /// check catches a problem on its own.
 struct AnyQuote;
 impl IntelQuoteVerifier for AnyQuote {
-    fn verify(&self, _: &[u8]) -> Result<(), String> {
-        Ok(())
+    fn verify(&self, quote: &[u8]) -> Result<IntelVerdict, String> {
+        Ok(up_to_date(quote))
     }
 }
 
 struct RefuseQuote;
 impl IntelQuoteVerifier for RefuseQuote {
-    fn verify(&self, _: &[u8]) -> Result<(), String> {
+    fn verify(&self, _: &[u8]) -> Result<IntelVerdict, String> {
         Err("collateral unavailable".into())
     }
+}
+
+/// A verifier that accepts the signature and reports what it is given.
+struct Reports(IntelVerdict);
+impl IntelQuoteVerifier for Reports {
+    fn verify(&self, _: &[u8]) -> Result<IntelVerdict, String> {
+        Ok(self.0.clone())
+    }
+}
+
+const ONLY_UP_TO_DATE: &[TcbStatus] = &[TcbStatus::UpToDate];
+
+fn policy<'a>(systems: &'a [Measurements], composes: &'a [[u8; 32]]) -> Policy<'a> {
+    Policy { systems, compose_hashes: composes, accepted_tcb: ONLY_UP_TO_DATE, max_collateral_age_secs: 30 * DAY, now_unix: NOW }
 }
 
 struct Nras {
@@ -99,7 +126,7 @@ fn composes() -> Vec<[u8; 32]> {
 }
 
 fn check_with(r: &Value, intel: &dyn IntelQuoteVerifier, systems: &[Measurements], composes: &[[u8; 32]]) -> Result<[u8; 32], String> {
-    let policy = Policy { systems, compose_hashes: composes };
+    let policy = policy(systems, composes);
     verify_model_attestation(r, &nonce(&report()), &policy, intel, &Nras::pass())
 }
 
@@ -348,7 +375,8 @@ fn another_signing_key_is_refused() {
 #[test]
 fn another_nonce_is_refused() {
     let r = report();
-    let policy = Policy { systems: &systems(), compose_hashes: &composes() };
+    let (s, c) = (systems(), composes());
+    let policy = policy(&s, &c);
     for bad in ["22".repeat(32), String::new(), "abc".into(), "zz".repeat(32), "22".repeat(33)] {
         assert!(verify_model_attestation(&r, &bad, &policy, &AnyQuote, &Nras::pass()).is_err(), "{bad}");
     }
@@ -364,7 +392,7 @@ fn the_gpu_evidence_must_answer_our_nonce_and_pass() {
     let r = report();
     let n = nonce(&r);
     let (s, c) = (systems(), composes());
-    let policy = Policy { systems: &s, compose_hashes: &c };
+    let policy = policy(&s, &c);
     let nras = Nras::fail();
     assert!(verify_model_attestation(&r, &n, &policy, &exact(), &nras).is_err());
     assert_eq!(nras.calls.get(), 1);
@@ -429,4 +457,38 @@ fn every_missing_field_is_a_refusal() {
     let mut r = report();
     forge_log(&mut r, |log| log.retain(|e| e["event"] != "os-image-hash"));
     assert!(check(&r, &AnyQuote).unwrap_err().contains("os-image-hash"));
+}
+
+// ---------- Intel verdict: TCB status and collateral age ----------
+
+#[test]
+fn a_tcb_status_the_policy_does_not_accept_is_refused() {
+    let r = report();
+    for status in [TcbStatus::OutOfDate, TcbStatus::Revoked, TcbStatus::SwHardeningNeeded, TcbStatus::Other("Unknown".into())] {
+        let verdict = IntelVerdict { tcb_status: status.clone(), ..up_to_date(&quote_bytes(&r)) };
+        assert!(check(&r, &Reports(verdict)).unwrap_err().contains("TCB status"), "{status:?}");
+    }
+    let lenient = [TcbStatus::UpToDate, TcbStatus::SwHardeningNeeded];
+    let (s, c) = (systems(), composes());
+    let policy = Policy { accepted_tcb: &lenient, ..policy(&s, &c) };
+    let verdict = IntelVerdict { tcb_status: TcbStatus::SwHardeningNeeded, ..up_to_date(&quote_bytes(&r)) };
+    assert!(verify_model_attestation(&r, &nonce(&r), &policy, &Reports(verdict), &Nras::pass()).is_ok());
+}
+
+#[test]
+fn old_or_future_collateral_is_refused() {
+    let r = report();
+    let old = IntelVerdict { collateral_issued_at: NOW - 31 * DAY, ..up_to_date(&quote_bytes(&r)) };
+    assert!(check(&r, &Reports(old)).unwrap_err().contains("too old"));
+    let future = IntelVerdict { collateral_issued_at: NOW + DAY, ..up_to_date(&quote_bytes(&r)) };
+    assert!(check(&r, &Reports(future)).unwrap_err().contains("future"));
+}
+
+#[test]
+fn the_fields_are_read_from_the_body_the_verifier_checked() {
+    let r = report();
+    let mut body = up_to_date(&quote_bytes(&r)).report_body;
+    body[0] ^= 1;
+    let verdict = IntelVerdict { report_body: body, ..up_to_date(&quote_bytes(&r)) };
+    assert!(check(&r, &Reports(verdict)).unwrap_err().contains("another report"));
 }

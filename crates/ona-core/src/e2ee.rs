@@ -23,19 +23,22 @@
 //! the prompt.
 //!
 //! Not done here: verifying the Intel TDX and NVIDIA quotes. Until that check is added, the key
-//! returned by `attested_model_key` is only as trustworthy as the party that returned the report.
+//! returned by `attested_model_key` is only as trustworthy as the party that returned the report:
+//! a relay that answers with its own key reads every prompt and can write every reply, signed
+//! "validly" with that key. Nothing here can detect it.
 
 use std::time::Duration;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
+use zeroize::Zeroizing;
 
 const INFO: &[u8] = b"ed25519_encryption";
 const HEADER_LEN: usize = 32 + 24;
@@ -58,6 +61,17 @@ const MAX_SIGNATURE_RETRY_DELAY: Duration = Duration::from_secs(8);
 const MIN_CIPHERTEXT_LEN: usize = HEADER_LEN + 16 + 1;
 /// Added to the prompt estimate for the role markers the model's template wraps around it.
 const PROMPT_OVERHEAD_TOKENS: u64 = 16;
+/// Longest reply id accepted before it goes into a request path and the journal.
+const MAX_REPLY_ID_LEN: usize = 128;
+
+/// A reply id goes into `/v1/signature/{id}` and the journal: letters, digits, `-`, `_`, `.` only.
+fn reply_id_is_acceptable(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_REPLY_ID_LEN
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && id != "."
+        && id != ".."
+}
 
 /// Deliberately high estimate of the tokens in a prompt: one per byte.
 fn estimate_prompt_tokens(prompt: &str) -> u64 {
@@ -80,10 +94,11 @@ fn sha256_hex(data: &[u8]) -> String {
     to_hex(&Sha256::digest(data))
 }
 
-fn derive_key(shared: &[u8; 32]) -> [u8; 32] {
-    let mut key = [0u8; 32];
+/// The key is wiped from memory when it goes out of scope.
+fn derive_key(shared: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    let mut key = Zeroizing::new([0u8; 32]);
     Hkdf::<Sha256>::new(None, shared)
-        .expand(INFO, &mut key)
+        .expand(INFO, key.as_mut())
         .expect("32 bytes is a valid HKDF output length");
     key
 }
@@ -138,7 +153,7 @@ pub fn encrypt_with_aad(recipient_ed: &[u8; 32], plaintext: &[u8], aad: &[u8]) -
     let key = derive_key(shared.as_bytes());
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
-    let ciphertext = XChaCha20Poly1305::new((&key).into())
+    let ciphertext = XChaCha20Poly1305::new(key.as_ref().into())
         .encrypt(XNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
         .map_err(|_| "encryption failed".to_string())?;
     let mut out = XPublic::from(&ephemeral).as_bytes().to_vec();
@@ -164,13 +179,13 @@ impl ClientKey {
             return Err("ciphertext too short".into());
         }
         let peer: [u8; 32] = blob[..32].try_into().map_err(|_| "bad peer key".to_string())?;
-        let secret = StaticSecret::from(self.0.to_scalar_bytes());
+        let secret = StaticSecret::from(*Zeroizing::new(self.0.to_scalar_bytes()));
         let shared = secret.diffie_hellman(&XPublic::from(peer));
         if !shared.was_contributory() {
             return Err("key exchange produced a low-order result".into());
         }
         let key = derive_key(shared.as_bytes());
-        XChaCha20Poly1305::new((&key).into())
+        XChaCha20Poly1305::new(key.as_ref().into())
             .decrypt(XNonce::from_slice(&blob[32..56]), &blob[56..])
             .map_err(|_| "reply cannot be decrypted".to_string())
     }
@@ -224,7 +239,7 @@ pub fn verify_reply_signature(
         .ok_or("bad signature encoding")?;
     VerifyingKey::from_bytes(&signer)
         .map_err(|_| "invalid signer key".to_string())?
-        .verify(text.as_bytes(), &Signature::from_bytes(&bytes))
+        .verify_strict(text.as_bytes(), &Signature::from_bytes(&bytes))
         .map_err(|_| "signature is invalid".to_string())
 }
 
@@ -243,7 +258,9 @@ impl<T: Transport> Transport for &mut T {
     }
 }
 
-/// HTTP to a relay. Compression is off because the signature covers the exact bytes.
+/// HTTP to a relay. Compression is off because the signature covers the exact bytes. Proxies from
+/// the environment (`HTTP_PROXY`, `ALL_PROXY`...) are ignored and redirects are not followed, so the
+/// request token goes only to the configured relay. No `User-Agent` header is sent.
 pub struct HttpTransport {
     base: String,
     agent: ureq::Agent,
@@ -252,6 +269,9 @@ pub struct HttpTransport {
 impl HttpTransport {
     pub fn new(base: &str) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
+            .proxy(None)
+            .max_redirects(0)
+            .user_agent(ureq::config::AutoHeaderValue::None)
             .http_status_as_error(false)
             .timeout_global(Some(REQUEST_TIMEOUT))
             .build()
@@ -423,6 +443,9 @@ impl<T: Transport> E2eeClient<T> {
         }
         let response: Value = serde_json::from_slice(&raw).map_err(|_| "reply is not JSON".to_string())?;
         let id = response["id"].as_str().ok_or("reply has no id")?;
+        if !reply_id_is_acceptable(id) {
+            return Err("reply id is malformed".into());
+        }
         let signature = self.fetch_signature(id)?;
         verify_reply_signature(&signature, &self.model, &body, &raw, &model_key)?;
 
@@ -473,6 +496,7 @@ mod tests {
         chats: u32,
         request: Vec<u8>,
         raw: Vec<u8>,
+        reply_id: &'static str,
     }
 
     fn fake(usage: Value) -> Fake {
@@ -490,6 +514,7 @@ mod tests {
             chats: 0,
             request: vec![],
             raw: vec![],
+            reply_id: "reply-1",
         }
     }
 
@@ -534,7 +559,7 @@ mod tests {
             let recipient = if self.encrypt_to_other_key { ClientKey::generate().public_bytes() } else { client_key };
             let reply = encrypt_to(&recipient, b"secret reply").unwrap();
             let content = if self.empty_content { String::new() } else { to_hex(&reply) };
-            let mut response = json!({"id": "reply-1", "choices": [{"message": {"content": content}}]});
+            let mut response = json!({"id": self.reply_id, "choices": [{"message": {"content": content}}]});
             if !self.usage.is_null() {
                 response["usage"] = self.usage.clone();
             }
@@ -679,6 +704,20 @@ mod tests {
         assert_eq!(c.chat("x").unwrap().content, "secret reply");
         assert_eq!(t.signature_calls, SIGNATURE_ATTEMPTS);
         assert_eq!(t.chats, 1);
+    }
+
+    #[test]
+    fn a_malformed_reply_id_never_reaches_a_request_path() {
+        for id in ["../../v1/chat", "reply?x=1", "reply#1", "a/b", "..", &"x".repeat(MAX_REPLY_ID_LEN + 1)] {
+            let mut t = fake(json!({"total_tokens": 40}));
+            t.reply_id = Box::leak(id.to_string().into_boxed_str());
+            let mut c = client(&mut t, 100, 1000);
+            assert_eq!(c.chat("x").unwrap_err(), "reply id is malformed", "{id}");
+            assert_eq!(t.signature_calls, 0, "{id}");
+        }
+        let mut t = fake(json!({"total_tokens": 40}));
+        t.reply_id = "chatcmpl-AbC_1.2";
+        assert!(client(&mut t, 100, 1000).chat("x").is_ok());
     }
 
     #[test]

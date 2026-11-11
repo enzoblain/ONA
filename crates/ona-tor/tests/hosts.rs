@@ -25,3 +25,20 @@ fn ordinary_names_still_pass() {
     assert!(accepted("https://rpc.testnet.near.org"));
     assert!(accepted(&format!("http://{}.onion", "a".repeat(56))));
 }
+
+#[test]
+fn ports_with_signs_local_names_and_queries_are_refused() {
+    for base in [
+        "https://example.com:+443",
+        "https://example.com:-1",
+        "https://localhost",
+        "https://LOCALHOST:443",
+        "https://relay.localhost",
+        "https://intranet",
+        "https://example.com?x",
+        "https://example.com/#x",
+    ] {
+        assert!(!accepted(base), "{base}");
+    }
+    assert!(accepted("https://example.com:443/v1"));
+}

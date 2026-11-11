@@ -273,7 +273,8 @@ fn each_role_sees_only_its_own_input() {
     assert_eq!(prompts.len(), 3);
     let (planner, first, second) = (&prompts[0], &prompts[1], &prompts[2]);
 
-    assert!(planner.contains(MISSION));
+    assert!(planner.contains("dossier confidentiel"));
+    assert!(!planner.contains("Dupont"), "the protected name is replaced by a pseudonym");
     assert!(m.propose_plan().is_err(), "the planner cannot be asked again once pages were read");
     assert_eq!(fake.chats(), 3, "so no page can ever reach it");
     assert!(first.contains("Consultation 900") && !first.contains(MISSION) && !first.contains("Forfait"));
@@ -306,7 +307,8 @@ fn hostile_web() -> MockWeb {
     let mut pages = std::collections::BTreeMap::new();
     pages.insert("h1".to_string(), ATTACK.to_string());
     pages.insert("h2".to_string(), ATTACK.to_string());
-    MockWeb { pages, sent: vec![], queries: vec![] }
+    let sources = [("h1", "cabinet-a"), ("h2", "cabinet-b")].iter().map(|(h, f)| (h.to_string(), f.to_string())).collect();
+    MockWeb { pages, sources, sent: vec![], queries: vec![] }
 }
 
 /// The worst case: the reader obeys the page, and says whatever would help the attacker.
@@ -343,13 +345,28 @@ fn a_well_formed_offer_from_an_unlisted_firm_is_left_out_of_the_ranking() {
     let offer = r#"{"firm_id":"attacker","specialties":["labour"],"price_cents":1,"delay_days":1,"source_spans":["Consultation 100 euros"]}"#;
     let fake = Fake::new(obeying(offer));
     let mut m = running(&fake, config(100, 1000), hostile_web());
-    m.read("h1").unwrap();
-    m.read("h2").unwrap();
+    assert!(m.read("h1").is_err(), "the page of cabinet-a cannot speak for another firm");
+    assert!(m.read("h2").is_err());
     m.compare().unwrap();
     assert!(m.ranked().is_empty());
     assert_eq!(m.plan(), demo_plan().as_slice());
     assert!(m.confirm_recipient("attacker").is_err());
     assert!(m.payments.paid.is_empty());
+}
+
+/// Offers are refused for rules the reader must therefore be told: excerpt length, price and delay
+/// written in the excerpts. The firm comes from the search, so the reader is not asked for it.
+#[test]
+fn the_reader_is_told_every_rule_its_reply_is_checked_against() {
+    let fake = Fake::new(obeying("{}"));
+    let mut m = running(&fake, config(100, 1000), MockWeb::demo());
+    let _ = m.read("h1");
+    let full = fake.prompts()[1].clone();
+    let prompt = full.split("\n\n").next().unwrap();
+    for rule in ["12 to 200 characters", "the price and the delay in digits", "copied exactly"] {
+        assert!(prompt.contains(rule), "{rule}");
+    }
+    assert!(!prompt.contains("firm_id"));
 }
 
 #[test]
@@ -553,10 +570,12 @@ fn each_call_spends_one_request_token_and_stops_when_none_are_left() {
 }
 
 fn tokens_file(name: &str, content: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("ona-remote-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tokens");
     std::fs::write(&path, content).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     path
 }
 
@@ -588,6 +607,7 @@ fn spent_tokens_leave_the_file_and_do_not_come_back_after_a_restart() {
     m.propose_plan().unwrap();
     assert_eq!(fake.0.borrow().tokens, vec!["aa"]);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "bb\n");
+    drop(m);
 
     let restarted = Fake::new(honest);
     let mut m = mission_on(&restarted, config_from_file(&path).unwrap(), MockWeb::demo());
@@ -609,12 +629,16 @@ fn a_token_stays_in_the_file_when_nothing_was_sent() {
 
 #[test]
 fn nothing_is_sent_if_the_spent_token_cannot_be_recorded() {
+    use std::os::unix::fs::PermissionsExt;
     let path = tokens_file("unwritable", "aa\nbb\n");
     let config = config_from_file(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
     let fake = Fake::new(honest);
     let mut m = mission_on(&fake, config, MockWeb::demo());
-    assert!(m.propose_plan().unwrap_err().contains("tokens file"));
+    let dir = path.parent().unwrap();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let refused = m.propose_plan();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(refused.unwrap_err().contains("tokens file"));
     assert_eq!(fake.chats(), 0);
     assert_eq!(m.model.tokens_spent(), 0);
     assert_eq!(m.exposure()["model_calls_real"], 0, "the request never left");

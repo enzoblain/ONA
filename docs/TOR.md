@@ -4,7 +4,7 @@
 is tested, the wiring into the wallet and the app is still to do.
 
 **Do not publish the relay as an onion service yet.** It handles one connection at a time, so an anonymous client can stall it. Requests
-may also share a Tor circuit, so the relay could link requests from different missions. Never run `ona-mock-relay` with the onion
+of one transport share a Tor circuit, so the relay can link them; build one transport per mission (see below). Never run `ona-mock-relay` with the onion
 service active: it hands out free test credits. The `/opt/homebrew` paths below are for Apple Silicon Macs.
 
 ## Choice: SOCKS5 to a local `tor`
@@ -21,15 +21,19 @@ the same `Transport` trait.
 
 ## What the code guarantees
 
-Each point has a test in `crates/ona-tor/tests/tor.rs`, run against a fake SOCKS5 server on localhost.
+Each point has a test in `crates/ona-tor` (`tests/` and the unit tests in `src/lib.rs`), run against a fake SOCKS5 server on localhost.
 
 - Host names go to Tor unresolved (`socks5h`), as a SOCKS domain name.
 - **Fails closed.** If Tor is down, refuses the connection, or is not speaking SOCKS, the request returns an error and nothing is
   attempted directly. A listener standing for the destination confirms it receives no connection.
 - The proxy must be on this machine.
-- Destinations must be `http://` to a version 3 onion address or `https://` to a host name. Plain `http` to the public internet and
-  IP addresses are refused.
-- Redirects are not followed.
+- Destinations must be `http://` to a version 3 onion address or `https://` to a public host name. Plain `http` to the public internet,
+  IP addresses (also written as names: `127.1`, `0x7f.1`, `2130706433`), `localhost` and `*.localhost`, names without a dot, a port that
+  is not plain digits (`:+443`), and a query or fragment in the base address are refused.
+- Redirects are not followed. No `User-Agent` header is sent.
+- Each `TorTransport` and each `near_client` gets its own random SOCKS username and password. Tor's `IsolateSOCKSAuth`, on by default
+  according to the Tor manual, puts streams with different credentials on different circuits; this is not verified on the real network.
+  Requests made through one transport can still share a circuit, so use one transport per mission.
 
 ## Run the relay as an onion service
 
@@ -76,7 +80,7 @@ Tor network:
 
 - reaching a real onion service, or an `https` RPC endpoint through a Tor exit, including TLS through the tunnel;
 - whether a public NEAR RPC endpoint accepts connections from Tor exits;
-- that the two SOCKS ports really get separate circuits;
+- that the two SOCKS ports really get separate circuits, and that different SOCKS credentials do too;
 - publishing the onion service. Locally, `tor --verify-config` accepted both templates, and Tor created the service's `hostname`
   file while offline. The relay template was validated with a temporary directory in place of its `HiddenServiceDir`.
 

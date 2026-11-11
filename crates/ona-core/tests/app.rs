@@ -5,7 +5,8 @@ use ona_core::*;
 use serde_json::{json, Value};
 
 const SALT: [u8; 32] = [7u8; 32];
-const CAP_OK: u128 = 1_000_000_000_000_000_000_000_000;
+/// What cabinet-b's offer (600 euros) pays with the demo rate.
+const B_AMOUNT: u128 = 60_000 * DEMO_YOCTO_PER_CENT;
 
 fn mission_with(model: MockModel, web: MockWeb) -> DemoMission {
     Mission::open(model, web, MockPayments::default(), demo_policy(), SALT, "secret mission text")
@@ -286,7 +287,7 @@ fn hostile_page_does_not_change_the_plan_or_the_recipient() {
 
     m.confirm_recipient("cabinet-a").unwrap();
     m.contact("Demande de devis").unwrap();
-    let prepared = m.prepare_payment(CAP_OK).unwrap();
+    let prepared = m.prepare_payment(m.offer_amount().unwrap()).unwrap();
     assert_eq!(m.payments.paid.len(), 0);
     assert!(prepared["screen"].as_str().unwrap().contains("cabinet-a.testnet"));
     assert!(!prepared["screen"].as_str().unwrap().contains("eve"));
@@ -302,21 +303,22 @@ fn offer_json(id: &str, span: &str) -> String {
 
 #[test]
 fn reader_accepts_a_cited_value() {
-    let o = parse_offer(&offer_json("cabinet-a", "Consultation 900 euros"), PAGE).unwrap();
+    let o = parse_offer(&offer_json("cabinet-a", "Consultation 900 euros, sous 7 jours"), PAGE, "cabinet-a").unwrap();
     assert_eq!(o.specialties, vec![Specialty::Labour]);
     assert_eq!(o.price_cents, 90000);
 }
 
 #[test]
 fn reader_refusals() {
-    assert_eq!(parse_offer(&offer_json("cabinet-a", "absent"), PAGE), Err(ReadError::SpanNotOnPage));
-    assert_eq!(parse_offer(&offer_json("Cabinet A!", "Consultation"), PAGE), Err(ReadError::BadFirmId));
-    assert_eq!(parse_offer(&offer_json("", "Consultation"), PAGE), Err(ReadError::BadFirmId));
-    let none = json!({"firm_id":"a","specialties":[],"price_cents":1,"delay_days":1,"source_spans":[]}).to_string();
-    assert_eq!(parse_offer(&none, PAGE), Err(ReadError::MissingSpan));
-    assert_eq!(parse_offer("{}", PAGE), Err(ReadError::Schema));
-    let negative = json!({"firm_id":"a","specialties":[],"price_cents":-1,"delay_days":1,"source_spans":["Consultation"]}).to_string();
-    assert_eq!(parse_offer(&negative, PAGE), Err(ReadError::Schema));
+    let a = "cabinet-a";
+    assert_eq!(parse_offer(&offer_json(a, "absent from this page"), PAGE, a), Err(ReadError::SpanNotOnPage));
+    assert_eq!(parse_offer(&offer_json("Cabinet A!", "Consultation"), PAGE, a), Err(ReadError::BadFirmId));
+    assert_eq!(parse_offer(&offer_json("cabinet-b", "Consultation 900 euros, sous 7 jours"), PAGE, a), Err(ReadError::NotTheSource));
+    let none = json!({"firm_id":a,"specialties":[],"price_cents":1,"delay_days":1,"source_spans":[]}).to_string();
+    assert_eq!(parse_offer(&none, PAGE, a), Err(ReadError::MissingSpan));
+    assert_eq!(parse_offer("{}", PAGE, a), Err(ReadError::Schema));
+    let negative = json!({"firm_id":a,"specialties":[],"price_cents":-1,"delay_days":1,"source_spans":["Consultation"]}).to_string();
+    assert_eq!(parse_offer(&negative, PAGE, a), Err(ReadError::Schema));
 }
 
 #[test]
@@ -381,29 +383,29 @@ fn only_a_compared_firm_can_be_chosen() {
 #[test]
 fn payment_limits() {
     let p = demo_policy();
-    assert_eq!(p.build_payment("eve", 1), Err(GateError::RecipientNotAllowed));
-    assert_eq!(p.build_payment("cabinet-a", 0), Err(GateError::ZeroAmount));
-    assert_eq!(p.build_payment("cabinet-a", p.amount_cap + 1), Err(GateError::AmountOverCap));
-    assert!(p.build_payment("cabinet-a", p.amount_cap).is_ok());
+    assert_eq!(p.build_payment("eve", 1, "m"), Err(GateError::RecipientNotAllowed));
+    assert_eq!(p.build_payment("cabinet-a", 0, "m"), Err(GateError::ZeroAmount));
+    assert_eq!(p.build_payment("cabinet-a", p.amount_cap + 1, "m"), Err(GateError::AmountOverCap));
+    assert!(p.build_payment("cabinet-a", p.amount_cap, "m").is_ok());
 }
 
 #[test]
 fn payment_needs_a_confirmation_of_these_exact_bytes() {
     let p = demo_policy();
-    let intent = p.build_payment("cabinet-a", CAP_OK).unwrap();
-    assert!(p.check_payment(&intent, &intent.digest()).is_ok());
-    let other = p.build_payment("cabinet-a", CAP_OK + 1).unwrap();
-    assert_eq!(p.check_payment(&intent, &other.digest()), Err(GateError::ConfirmationMismatch));
-    let forged = gate::PaymentIntent { to: "eve.testnet".into(), amount: 1 };
-    assert_eq!(p.check_payment(&forged, &forged.digest()), Err(GateError::RecipientNotAllowed));
-    let huge = gate::PaymentIntent { to: "cabinet-a.testnet".into(), amount: p.amount_cap + 1 };
-    assert_eq!(p.check_payment(&huge, &huge.digest()), Err(GateError::AmountOverCap));
+    let intent = p.build_payment("cabinet-a", B_AMOUNT, "m").unwrap();
+    assert!(p.check_payment(&intent, &intent.digest(), "m").is_ok());
+    let other = p.build_payment("cabinet-a", B_AMOUNT + 1, "m").unwrap();
+    assert_eq!(p.check_payment(&intent, &other.digest(), "m"), Err(GateError::ConfirmationMismatch));
+    let forged = gate::PaymentIntent { to: "eve.testnet".into(), amount: 1, ..intent.clone() };
+    assert_eq!(p.check_payment(&forged, &forged.digest(), "m"), Err(GateError::RecipientNotAllowed));
+    let huge = gate::PaymentIntent { amount: p.amount_cap + 1, ..intent.clone() };
+    assert_eq!(p.check_payment(&huge, &huge.digest(), "m"), Err(GateError::AmountOverCap));
 }
 
 #[test]
 fn wrong_confirmation_stops_the_payment() {
     let mut m = until_payment();
-    m.prepare_payment(CAP_OK).unwrap();
+    m.prepare_payment(B_AMOUNT).unwrap();
     assert!(m.confirm_payment("00").is_err());
     assert!(m.pay().is_err(), "pay cannot skip the confirmation step");
     assert!(m.payments.paid.is_empty());
@@ -412,12 +414,13 @@ fn wrong_confirmation_stops_the_payment() {
 #[test]
 fn full_mission_pays_the_confirmed_amount_once() {
     let mut m = until_payment();
-    let prepared = m.prepare_payment(CAP_OK).unwrap();
+    let prepared = m.prepare_payment(B_AMOUNT).unwrap();
     m.confirm_payment(prepared["digest"].as_str().unwrap()).unwrap();
     let paid = m.pay().unwrap();
     assert!(paid["tx"].as_str().unwrap().starts_with("mock-tx-"));
     assert!(m.pay().is_err(), "no second payment");
-    assert_eq!(m.payments.paid, vec![demo_policy().build_payment("cabinet-b", CAP_OK).unwrap()]);
+    assert_eq!(m.payments.paid.len(), 1);
+    assert_eq!((m.payments.paid[0].to.as_str(), m.payments.paid[0].amount), ("cabinet-b.testnet", B_AMOUNT));
 
     let closed = m.close().unwrap();
     assert_eq!(closed["mode"], "mock");
@@ -429,14 +432,14 @@ fn full_mission_pays_the_confirmed_amount_once() {
 #[test]
 fn exposure_report_comes_from_the_journal() {
     let mut m = until_payment();
-    let prepared = m.prepare_payment(CAP_OK).unwrap();
+    let prepared = m.prepare_payment(B_AMOUNT).unwrap();
     m.confirm_payment(prepared["digest"].as_str().unwrap()).unwrap();
     m.pay().unwrap();
     m.close().unwrap();
     let r = m.exposure();
     assert_eq!(r["outputs"], json!({"search": 1, "fetch": 2, "contact": 1}));
     assert_eq!(r["firms_contacted"], json!(["cabinet-b"]));
-    assert_eq!(r["payments"], json!([{"to":"cabinet-b.testnet","amount":CAP_OK.to_string()}]));
+    assert_eq!(r["payments"], json!([{"to":"cabinet-b.testnet","amount":B_AMOUNT.to_string()}]));
     assert_eq!(r["model_calls"], json!(3));
     assert_eq!(r["mode"], "mock");
     assert_eq!(r, exposure_report(&m.journal), "rebuilt from the journal alone");
@@ -467,8 +470,9 @@ fn dispatch_runs_a_whole_mission_and_labels_every_reply() {
         assert_eq!(reply["ok"], true, "{request}: {reply}");
         assert_eq!(reply["mode"], "mock", "{request}");
     }
-    let prepared = ask(&mut core, json!({"cmd":"prepare_payment","amount":CAP_OK.to_string()}));
+    let prepared = ask(&mut core, json!({"cmd":"prepare_payment"}));
     assert!(prepared["screen"].as_str().unwrap().contains("cabinet-a.testnet"));
+    assert_eq!(prepared["amount_near"], "0.9", "900 euros at the demo rate");
     assert_eq!(ask(&mut core, json!({"cmd":"confirm_payment","digest":prepared["digest"]}))["ok"], true);
     assert_eq!(ask(&mut core, json!({"cmd":"pay"}))["ok"], true);
     assert_eq!(ask(&mut core, json!({"cmd":"close"}))["ok"], true);

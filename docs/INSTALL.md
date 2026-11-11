@@ -33,6 +33,10 @@ cargo run -p ona-core --bin ona -- demo
 ```
 
 Without `demo`, `ona` reads one JSON request per line on stdin and prints one JSON reply per line. Every reply says `"mode":"mock"`.
+A line that is not UTF-8 or is longer than 64 KiB gets an error reply. `open` takes an optional `protected` list of terms (names,
+identifiers) to replace by pseudonyms before anything goes to the model. `prepare_payment` without `amount` pays the chosen offer's
+price at the policy's rate; with `amount`, it must be that same amount. It returns the fields of the confirmation digest (`payment`) and
+the digest to send back with `confirm_payment`.
 
 A fake relay on localhost, for front-end work:
 
@@ -59,10 +63,11 @@ Nothing selects this mode by default: without the word `real`, or with any requi
 | `ONA_REAL_MODEL` | model name, which the relay must allow |
 | `ONA_REAL_MAX_TOKENS` | ceiling on the reply tokens of one call, at most the relay's own limit. The prompt counts on top of it |
 | `ONA_REAL_TOKEN_BUDGET` | most tokens in total for this run of `ona`, prompts and replies, at least one call's ceiling |
-| `ONA_REAL_TOKENS_FILE` | optional, a file with one request token per line, one spent per call and removed from the file before it is sent. Refused if empty. `ona-relay` refuses a chat without one |
+| `ONA_REAL_TOKENS_FILE` | optional, a file with one request token per line, one spent per call and removed from the file before it is sent. Refused if empty or readable by other accounts (`chmod 600`). Only one `ona real` can use a file at a time: a lock file `<file>.lock` is created next to it. `ona-relay` refuses a chat without one |
 
 **Until the enclave quotes are verified in this client, the relay can read the content of a mission and make up replies. Do not run a
-sensitive mission in this mode.**
+sensitive mission in this mode.** Proxy variables of the environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) are ignored and
+redirects are not followed. `ona real` connects to the relay directly, not through Tor.
 
 ```
 cargo run -p ona-core --bin ona -- real
@@ -74,7 +79,9 @@ a page to 32 KB. The budget is counted in memory, so restarting `ona` starts it 
 request tokens run out, and the model stops after three failures in a row where nothing was sent. Only the model is real: the web and
 the payments stay fake, and those replies still say `"mode":"mock"`. For each real call the journal keeps the response id, the model,
 the token count and salted fingerprints, never the content. The exposure report counts real and fake calls apart (`model_calls_real`,
-`model_calls_mock`, `real_calls`), and its `mode` is `mixed` when real calls and fake parts are both present. This mode has never run against NEAR AI.
+`model_calls_mock`, `real_calls`), and its `mode` is `mixed` when real calls and fake parts are both present. Its `parties` list names the
+relay and the model with the requests and bytes each received, attestation and signature requests included, and
+`content_readable_by_relay` is `true` as soon as one request reached the relay. This mode has never run against NEAR AI.
 
 ## Measure gas on a local node
 

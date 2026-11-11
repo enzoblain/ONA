@@ -298,6 +298,41 @@ disclosed entry does not give the chain head before it. `open_all` checks the se
 exact plaintext lines. The sealed head changes at every seal; nothing anchors it yet. The plaintext journal still holds the chosen
 firm, recipient, amount and transaction in clear. Nothing in the mission calls the sealing yet.
 
+- **Pseudonyms** (`pseudonym.rs`): a local table gives each protected term (policy terms, plus terms declared with `protect` or the
+  `protected` list of `open`, before the planner is asked; 2 to 200 characters, at most 64) a random pseudonym of 12 letters from
+  `BCDFGHJKLMNPQRSTVWXZ` (no digit, so no pseudonym can supply a price or a delay). Texts and terms are compared on the view built
+  by `pseudonym.rs`, in this order: HTML tags and comments removed (block tags as a line break); one level of decoding of numeric HTML
+  references (with or without `;`, leading zeros, 128 to 159 as Windows-1252), named references (Latin-1 also without `;` and longest
+  name first, Latin Extended-A, punctuation, invisible ones) and `%XX` runs (invalid UTF-8 bytes dropped); Unicode
+  Default_Ignorable_Code_Point, U+2028, U+2029 and U+0085 removed; a dash or soft hyphen ending a line between letters kept as optional
+  (a term matches with or without it); the dashes of `DASHES` folded to `-` and the apostrophes of `APOSTROPHES` to `'` (lists in
+  README); NFKD (`unicode-normalization` 0.1.26) with every combining mark removed, Unicode lowercasing, `ß` as `ss`; every run of
+  Unicode white space collapsed to one space. Pages are compared as `Web::fetch` returns them (the fake web returns text; HTML is
+  handled the same way). A term matches as a whole word, or anywhere when
+  written `*term*`. Occurrences are replaced longest term first, in the mission text before the planner and in each page before the
+  reader; replies are put back locally, pseudonyms matched without regard to case. The gate (`check_terms`, also used for searches and
+  messages) uses the same comparison and refuses any text that still contains a term. Rephrasings, undeclared terms, look-alike letters
+  of other alphabets and double escapes are not caught. The table is dropped at `close`.
+- **Plan**: every `read` sits in one block between `search` and `compare`.
+- **Reader**: the reader is not asked for a firm: an offer counts for the firm the search tied the page to (`Web::source`); a
+  `firm_id` given by the reader must be that firm. Each page is read once, a firm has one offer. Each excerpt is 12 to 200 characters
+  and appears word for word in the text the reader was given (pseudonyms in place); pseudonyms are put back in the excerpts afterwards.
+  Numbers are read from the excerpts one way only: digits grouped by three with a space, `.`, `,` or `'`; after `.` or `,` any other
+  group ending the number is its decimals, never a second number ("12,5" is 12.50). One number must equal the price exactly (units × 100
+  plus one or two decimals) and one number written without decimals must equal the delay. The reader's instructions state these rules.
+- **Payment confirmation v2**: `digest = SHA-256(fields("ona/pay/v2", network, contract, mission_id, nonce_hex, to, amount_decimal))`,
+  where `fields` is, for each field, its length as a little-endian u32 then its UTF-8 bytes; `nonce_hex` is 16 random bytes drawn at
+  `prepare_payment` in lowercase hex, `mission_id` is random per mission, `amount_decimal` is the yoctoNEAR amount in base 10. The amount
+  must equal the chosen offer's `price_cents × yocto_per_cent` (a rate in the policy, never from a page; zero refuses every payment).
+  `prepare_payment` returns the six fields, the digest, the screen text and `amount_near`. A confirmation is checked against the
+  mission's own payment, network and contract, and is used up by `pay`. It is a digest, not a signature by a separate device.
+- **Exposure report**: rebuilt from the journal; `parties` names each party (search engine, each site, each contacted firm, the chain,
+  the relay, the NEAR AI model through the relay) with its requests, bytes sent and bytes received. Bytes are those handed to the
+  transport (path, headers, body), without HTTP framing or TLS; for the fake web they are the query, the handle and the message. A
+  request that reached the relay is never counted as a gate refusal, even when only the attestation request left
+  (`outcome: prompt_not_sent`). `content_readable_by_relay` and `warnings` say when a real call was made without quote verification.
+- **CLI**: a line that is not UTF-8 or is longer than 64 KiB gets an error reply; the loop goes on.
+
 ## Journal anchoring (`crates/ona-core/src/checkpoint.rs`, `crates/ona-anchor`)
 - Checkpoints of one journal form a chain. Checkpoint `n` has a commitment
   `SHA-256("ona/cp/commit/v1" || salt_n || n (u64 LE) || journal head || leaf of checkpoint n-1)` (zero before rank 0) and a
@@ -365,11 +400,17 @@ failed call never falls back to it. Version 3 does not bind a reply to one preci
 processed, and the relay still sees sizes and counters. Each request gets a new client key and a fresh attestation nonce. A reply counts only
 if the signature comes from the attested model key (`provider_tee`) and covers the exact bytes sent and received. Every request carries
 `max_tokens`, and a per-client budget stops calls before they spend. The relay sees the usage counters, so pricing must be flat per
-request. TDX and NVIDIA quotes are not verified yet.
+request. TDX and NVIDIA quotes are not verified yet, so the relay that delivers the attestation report can answer with its own key,
+read every prompt and sign replies of its own: nothing in the client detects it. The HTTP transport ignores proxies named in the
+environment, follows no redirect and sends no `User-Agent`. A reply id must be 1 to 128 letters, digits, `-`, `_` or `.` before it is
+used in a request path. Reply signatures are checked with strict ed25519 verification.
 
 `crates/ona-core/src/quote.rs` checks a model attestation, not yet called by the client. **It is worth nothing until the Intel signature
-check is implemented:** that check (meant for `dcap-qvl`) and NVIDIA's service are traits with no implementation, so nothing passes outside
-tests, and without the signature anyone can write a quote holding any value. With it, a quote passes only if MRTD and RTMR0 to RTMR2 are
+check is implemented:** that check (meant for `dcap-qvl`, which was not available offline when this was written) and NVIDIA's service are
+traits with no implementation, so nothing passes outside tests, and without the signature anyone can write a quote holding any value. The
+Intel trait returns a verdict: TCB status, advisory ids, collateral issue date and the verified report body. The policy lists the accepted
+TCB statuses and the oldest collateral accepted at a given time; the report fields are read from the verified body, which must equal the
+quote's. With it, a quote passes only if MRTD and RTMR0 to RTMR2 are
 on the caller's list, the event log replays to RTMR3, its `os-image-hash` and `compose-hash` events name a listed image and the hash of the
 reported `app_compose`, `report_data = signing_address || nonce` (32 + 32 bytes), `mr_config_id = 0x01 || compose hash || 15 zero bytes`,
 the enclave is not in debug mode, and the deployment hash is listed. `mr_config_id` alone proves nothing: the host chooses it. **The GPU
@@ -380,7 +421,17 @@ in `observed_2026_11_10` were seen in that report, not published by NEAR AI, and
 
 ## Wallet (`crates/ona-wallet`)
 Append-only encrypted file, synced before the action it protects: token secrets before the deposit, spending mark before a spend.
-Removing lines from the end is not detected. Key storage in the operating system's keychain is not implemented.
+Each line is written in one write. The file is locked while open (a second open is refused) and must be readable by its owner only. A
+seal file next to it (`<wallet>.seal`, XChaCha20-Poly1305 with the wallet key) holds the line count and a SHA-256 chain over the lines,
+rewritten after each line: a wallet with fewer lines than its seal (older copy, lines cut from the end) or a different chain is refused,
+and a missing wallet whose seal shows lines is refused instead of being recreated empty. A wallet with lines but no seal is refused by
+design (a deleted seal could hide a rollback); `open_adopting_unsealed` adopts such a wallet explicitly, every line still decrypting.
+Nothing is written to the file before every check has passed. A last line without a newline that does not decrypt (a crash during an
+append) is cut and reported by `dropped_torn_line`, but only once the key is shown to be right by a complete line or by the seal;
+otherwise the open fails and the file is left as it was. After a failed write, nothing more is written until the
+wallet is opened again. Restoring the wallet and its seal together from one backup is detected only if the caller keeps `state()` out
+of reach of that backup and opens with `open_expecting`. A spend mark needs a token of the wallet not already being spent; a release
+needs a spend mark. Key storage in the operating system's keychain is not implemented.
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit
