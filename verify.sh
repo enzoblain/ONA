@@ -6,6 +6,57 @@ set -eu
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 
+# The desktop apps are built outside the workspace, each with its own Cargo.lock. Each lock must match its
+# Cargo.toml (`--locked` would fail otherwise), and a package it shares with the root must have the root's version
+# within the same compatible series (same major version, or same minor for 0.x). Another series, such as an
+# older major version a desktop library needs, is not compared.
+#
+# `cache-may-lack` (the Tauri app): when some of its crates are not in the offline cache, cargo cannot check the
+# lock at all. The step then says so, prints any version that differs from the root as a warning, and goes on.
+check_desktop_lock() {
+    dir="$1"
+    update="cargo update --manifest-path $dir/Cargo.toml --workspace"
+    align="cargo update --manifest-path $dir/Cargo.toml -p <name>@<listed version> --precise <root version>"
+    differing="$(awk 'function series(v,   p) {
+            gsub(/"/, "", v); split(v, p, /[.+-]/)
+            if (p[1] != "0") return p[1]
+            if (p[2] != "0") return "0." p[2]
+            return "0.0." p[3]
+        }
+        FNR == 1 { file++; name = "" }
+        /^\[\[package\]\]/ { name = "" }
+        /^name = / { name = $3 }
+        /^version = / && name != "" {
+            key = name " " series($3)
+            if (file == 1) root[key] = $3
+            else if ((key in root) && root[key] != $3) print "  " name " " $3 " (root has " root[key] ")"
+        }' Cargo.lock "$dir/Cargo.lock")"
+    if errors="$(cargo metadata --offline --locked --format-version 1 --manifest-path "$dir/Cargo.toml" 2>&1 >/dev/null)"; then
+        if [ -n "$differing" ]; then
+            echo "$dir/Cargo.lock has versions that differ from the root Cargo.lock:" >&2
+            echo "$differing" >&2
+            echo "Align each one with: $align" >&2
+            exit 1
+        fi
+        echo "$dir/Cargo.lock is up to date"
+    elif printf '%s\n' "$errors" | grep -q -e "locked was passed" -e "needs to be updated"; then
+        echo "$dir/Cargo.lock does not match its Cargo.toml. Update it with: $update" >&2
+        exit 1
+    elif [ "${2:-}" = "cache-may-lack" ] && printf '%s\n' "$errors" | grep -q -e "no matching package" -e "failed to download" -e "HTTP request"; then
+        echo "warning: $dir/Cargo.lock not checked: some of its crates are not in the offline cache"
+        if [ -n "$differing" ]; then
+            echo "warning: versions that differ from the root Cargo.lock:"
+            echo "$differing"
+            echo "warning: align them online with: $align"
+        fi
+    else
+        printf '%s\n' "$errors" >&2
+        exit 1
+    fi
+}
+check_desktop_lock desktop/OnaCoreBridge
+check_desktop_lock desktop/tauri/src-tauri cache-may-lack
+
 cargo test --locked --workspace
 
 # A contract keeps the source path of every panic location. Each machine-specific prefix is rewritten, so the

@@ -4,9 +4,16 @@ Tested only on macOS on Apple Silicon, with Rust 1.99.1. Other platforms are unt
 
 ## Prerequisites
 
+Rust 1.99.1 with the `wasm32-unknown-unknown` target. The contract hashes depend on the exact compiler version, so install
+that version by name once (this downloads it):
+
 ```
-rustup target add wasm32-unknown-unknown
+rustup toolchain install 1.99.1 --profile minimal --target wasm32-unknown-unknown
 ```
+
+The repository has no `rust-toolchain.toml` yet: until it has one, check that `rustc --version` prints 1.99.1, or run the
+commands with `cargo +1.99.1`. A `rust-toolchain.toml` naming 1.99.1 would make rustup download that version, or its wasm
+target, on a machine that does not have it under that name, even when the `stable` toolchain is the same version.
 
 A C compiler is also needed, for `blst`. On macOS: `xcode-select --install`.
 
@@ -16,7 +23,21 @@ A C compiler is also needed, for `blst`. On macOS: `xcode-select --install`.
 ./verify.sh
 ```
 
-This runs all tests with the locked dependency versions (`--locked`), compiles the three contracts to wasm with every local path
+It first checks the `Cargo.lock` of each desktop app (`desktop/OnaCoreBridge`, `desktop/tauri/src-tauri`), which are built outside
+the workspace: each must match its `Cargo.toml`, and a package shared with the root must have the root's version within the same
+compatible series (an older major version that only a desktop library needs is allowed). When `ona-core` gains a dependency, this
+step fails and prints the command that updates the lock:
+
+```
+cargo update --manifest-path desktop/OnaCoreBridge/Cargo.toml --workspace
+```
+
+(the same with `desktop/tauri/src-tauri/Cargo.toml` for the Tauri app; a version that differs from the root is aligned with
+`cargo update --manifest-path … -p <name>@<version> --precise <root version>`). When some crates of the Tauri app (Tauri itself,
+`qrcode`) are not in the offline cache, cargo cannot check its lock: the step says so, prints any version that differs from the root as
+a warning, and goes on.
+
+It then runs all tests with the locked dependency versions (`--locked`), compiles the three contracts to wasm with every local path
 rewritten, fails if a wasm still names a local directory or the user, and prints the SHA-256 of each contract. It needs no key, no
 funded account, no Docker and no browser. How to compare these hashes with a deployed contract is in
 [SPEC.md](../SPEC.md#reproducing-the-contract-hashes).
