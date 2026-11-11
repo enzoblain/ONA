@@ -1,4 +1,8 @@
-"""Pairing and signed confirmations of the mock computer (docs/ios/protocol-draft.md, step 3)."""
+"""Pairing, signed requests and signed replies of the mock computer, protocol v1 (docs/ios/protocol-draft.md).
+
+Same bytes as the desktop apps (desktop/tauri/src-tauri/src/protocol.rs, desktop/ONADesktop/Core/Protocol) and the
+iPhone app (ios/ONA/ONA/Pairing/SignedFields.swift): the tests share vectors.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +12,24 @@ import json
 import secrets
 import struct
 import threading
+import time
 
 import p256
 
-PAIR_DOMAIN = "ona/pair/v0"
-CONFIRM_DOMAIN = "ona/confirm/v0"
-MESSAGE_DOMAIN = "ona/message/v0"
-DELETE_DOMAIN = "ona/delete/v0"
-SAS_DOMAIN = "ona/sas/v0"
+COMMIT_DOMAIN = "ona/pair-commit/v1"
+PAIR_DOMAIN = "ona/pair/v1"
+SAS_DOMAIN = "ona/sas/v1"
+REPLY_DOMAIN = "ona/reply/v1"
+CONFIRM_DOMAIN = "ona/confirm/v1"
+MESSAGE_DOMAIN = "ona/message/v1"
+DELETE_DOMAIN = "ona/delete/v1"
+PLAN_DOMAIN = "ona/plan/v1"
+OFFERS_DOMAIN = "ona/offers/v1"
+PAY_DOMAIN = "ona/pay/v2"
 PAYLOAD_PREFIX = "ona-pair:"
+CODE_LIFETIME = 600          # seconds a pairing code is valid
+REVEAL_WINDOW = 120          # seconds between commitment and reveal
+MAX_COUNTER = 9_007_199_254_740_991
 
 
 def fields(*items: str | bytes | None) -> bytes:
@@ -33,24 +46,62 @@ def fields(*items: str | bytes | None) -> bytes:
     return bytes(out)
 
 
-def sas(computer_key: bytes, phone_key: bytes, code: str) -> str:
+def sha_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def random_hex16() -> str:
+    return secrets.token_hex(16)
+
+
+def commitment(phone_key: bytes, phone_nonce: str) -> str:
+    return sha_hex(fields(COMMIT_DOMAIN, phone_key, phone_nonce))
+
+
+def pair_message(pairing_id: str, code: str, phone_key: bytes, computer_key: bytes, phone_nonce: str,
+                 computer_nonce: str) -> bytes:
+    return fields(PAIR_DOMAIN, pairing_id, code, phone_key, computer_key, phone_nonce, computer_nonce)
+
+
+def sas(computer_key: bytes, phone_key: bytes, code: str, phone_nonce: str, computer_nonce: str) -> str:
     """6-digit verification code shown on both sides."""
-    digest = hashlib.sha256(fields(SAS_DOMAIN, computer_key, phone_key, code)).digest()
+    digest = hashlib.sha256(fields(SAS_DOMAIN, computer_key, phone_key, code, phone_nonce, computer_nonce)).digest()
     return f"{int.from_bytes(digest[:4], 'big') % 1_000_000:06d}"
 
 
-def confirm_message(pairing_id: str, body: dict) -> bytes:
-    return fields(CONFIRM_DOMAIN, pairing_id, body.get("id"), body.get("decision"), body.get("firm"),
-                  body.get("digest"))
+def confirm_message(pairing_id: str, counter: int, body: dict, content: str) -> bytes:
+    return fields(CONFIRM_DOMAIN, pairing_id, str(counter), body.get("id"), body.get("decision"), body.get("firm"),
+                  body.get("digest"), content)
 
 
-def message_message(pairing_id: str, chat_id: str | None, text: str | None) -> bytes:
+def chat_message(pairing_id: str, counter: int, chat_id: str | None, text: str | None) -> bytes:
     """A message sent to the agent: new chat when chat_id is empty."""
-    return fields(MESSAGE_DOMAIN, pairing_id, chat_id, text)
+    return fields(MESSAGE_DOMAIN, pairing_id, str(counter), chat_id, text)
 
 
-def delete_message(pairing_id: str, chat_id: str) -> bytes:
-    return fields(DELETE_DOMAIN, pairing_id, chat_id)
+def delete_message(pairing_id: str, counter: int, chat_id: str) -> bytes:
+    return fields(DELETE_DOMAIN, pairing_id, str(counter), chat_id)
+
+
+def reply_message(nonce: str, method: str, path: str, status: int, reply: bytes) -> bytes:
+    return fields(REPLY_DOMAIN, nonce, method, path, str(status), reply)
+
+
+def plan_digest(confirmation_id: str, steps: list[str]) -> str:
+    return sha_hex(fields(PLAN_DOMAIN, confirmation_id, str(len(steps)), *steps))
+
+
+def offers_digest(confirmation_id: str, offers: list[dict]) -> str:
+    items: list[str] = [OFFERS_DOMAIN, confirmation_id, str(len(offers))]
+    for offer in offers:
+        spans = offer["source_spans"]
+        items += [offer["firm_id"], str(offer["price_cents"]), str(offer["delay_days"]), str(len(spans)), *spans]
+    return sha_hex(fields(*items))
+
+
+def payment_digest(network: str, contract: str, mission_id: str, nonce: str, to: str, amount: str) -> str:
+    """Digest version 2, the bytes of ona-core's payment gate."""
+    return sha_hex(fields(PAY_DOMAIN, network, contract, mission_id, nonce, to, amount))
 
 
 def b64url(data: bytes) -> str:
@@ -64,8 +115,18 @@ def b64decode(text: str) -> bytes:
     return base64.b64decode(text + "=" * (-len(text) % 4), validate=True)
 
 
+def valid_counter(value) -> int | None:
+    """A JSON integer from 1 to 2^53 − 1: `1.0`, `"1"` and `true` are refused."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_COUNTER:
+        return None
+    return value
+
+
 class Pairing:
-    """One computer key, one pending pairing code, at most one paired phone (enough for the mock)."""
+    """One computer key, one pairing code, at most one paired phone (enough for the mock).
+
+    The mock has no screen to click « Les codes sont identiques »: it prints the code and confirms it itself.
+    """
 
     def __init__(self, name: str, address: str | None, onion: str | None = None):
         self.lock = threading.Lock()
@@ -73,66 +134,118 @@ class Pairing:
         self.address = address
         self.onion = onion
         self._private, self.computer_key = p256.generate_keypair()
-        self.code = b64url(secrets.token_bytes(16))
         self.phone_key: bytes | None = None
         self.pairing_id: str | None = None
-        self.count = 0
+        self.token: str | None = None
+        self.last_counter = 0
+        self.executed: set[str] = set()   # confirmation ids already executed
+        self._commit: dict | None = None
+        self.new_code()
 
     def payload(self) -> str:
         """Text of the pairing QR code."""
-        data = {"v": 0, "name": self.name, "address": self.address, "onion": self.onion,
-                "computer_key": base64.b64encode(self.computer_key).decode("ascii"), "code": self.code}
+        data = {"v": 1, "name": self.name, "address": self.address, "onion": self.onion,
+                "computer_key": base64.b64encode(self.computer_key).decode("ascii"), "code": self.code,
+                "expires_at": self.expires_at}
         return PAYLOAD_PREFIX + b64url(json.dumps(data, separators=(",", ":")).encode("utf-8"))
 
-    def pair(self, body: dict) -> tuple[str | None, str | None, str | None]:
-        """Returns (error, pairing_id, sas)."""
+    def new_code(self) -> None:
+        """Forgets the paired phone and issues a new pairing code."""
+        self.code = b64url(secrets.token_bytes(16))
+        self.expires_at = int(time.time()) + CODE_LIFETIME
+        self.phone_key = self.pairing_id = self.token = None
+        self.last_counter = 0
+        self.executed = set()
+        self._commit = None
+
+    # -- replies -------------------------------------------------------------------------------------
+    def sign_reply(self, nonce: str, path: str, status: int, reply: bytes) -> str:
+        der = p256.sign(self._private, reply_message(nonce, "POST", path, status, reply))
+        return base64.b64encode(der).decode("ascii")
+
+    # -- pairing -------------------------------------------------------------------------------------
+    def commit(self, body: dict) -> tuple[str | None, dict | None]:
+        """`POST /v1/pair`. Returns (error, reply). The code is consumed whatever happens next."""
         with self.lock:
-            if not self.code or body.get("code") != self.code:
-                return "unknown or used pairing code", None, None
+            if not self.code or not secrets.compare_digest(str(body.get("code", "")), self.code):
+                return "unknown or used pairing code", None
+            if time.time() > self.expires_at:
+                self.new_code()
+                return "expired pairing code", None
+            value = body.get("commitment")
+            if not isinstance(value, str) or len(value) != 64:
+                return "bad request", None
+            self.code_used = self.code
+            self.code = ""
+            self._commit = {"pairing_id": "p-" + random_hex16(), "computer_nonce": random_hex16(),
+                            "commitment": value, "at": time.time(), "code": self.code_used}
+            return None, {"pairing_id": self._commit["pairing_id"], "computer_nonce": self._commit["computer_nonce"]}
+
+    def reveal(self, body: dict) -> tuple[str | None, dict | None, str | None]:
+        """`POST /v1/pair/reveal`. Returns (error, reply, verification code). One attempt per commitment."""
+        with self.lock:
+            commit, self._commit = self._commit, None
+            if commit is None or body.get("pairing_id") != commit["pairing_id"]:
+                return "unknown pairing", None, None
+            if time.time() - commit["at"] > REVEAL_WINDOW:
+                self.new_code()
+                return "expired pairing code", None, None
             try:
                 phone_key = b64decode(body.get("phone_key"))
-                signature = b64decode(body.get("signature"))
                 p256.decode_x963(phone_key)
-            except ValueError as e:
-                return f"bad phone key or signature: {e}", None, None
-            message = fields(PAIR_DOMAIN, self.code, phone_key, self.computer_key)
-            if not p256.verify(phone_key, message, signature):
+                signature = b64decode(body.get("signature"))
+            except ValueError:
+                self.new_code()
+                return "missing or malformed signature", None, None
+            phone_nonce = body.get("phone_nonce")
+            if not isinstance(phone_nonce, str) or commitment(phone_key, phone_nonce) != commit["commitment"]:
+                self.new_code()
+                return "pairing commitment does not match", None, None
+            message = pair_message(commit["pairing_id"], commit["code"], phone_key, self.computer_key, phone_nonce,
+                                   commit["computer_nonce"])
+            if not p256.verify(phone_key, message, signature, low_s=True):
+                self.new_code()
                 return "pairing signature does not verify", None, None
-            code = self.code
-            self.code = ""  # single use
-            self.count += 1
             self.phone_key = phone_key
-            self.pairing_id = f"p-{self.count}-{b64url(secrets.token_bytes(6))}"
-            return None, self.pairing_id, sas(self.computer_key, phone_key, code)
+            self.pairing_id = commit["pairing_id"]
+            self.token = b64url(secrets.token_bytes(32))
+            self.last_counter = 0
+            code = sas(self.computer_key, phone_key, commit["code"], phone_nonce, commit["computer_nonce"])
+            return None, {"pairing_id": self.pairing_id, "token": self.token}, code
 
-    def check_confirmation(self, body: dict) -> str | None:
-        """Error message, or None if the confirmation is signed by the paired phone."""
-        return self.check_signed(body, lambda pairing_id: confirm_message(pairing_id, body))
-
-    def check_message(self, body: dict, chat_id: str | None) -> str | None:
-        return self.check_signed(body, lambda pairing_id: message_message(pairing_id, chat_id, body.get("text")))
-
-    def check_delete(self, body: dict, chat_id: str) -> str | None:
-        return self.check_signed(body, lambda pairing_id: delete_message(pairing_id, chat_id))
-
-    def check_signed(self, body: dict, signed_bytes) -> str | None:
-        """Error message, or None if `signed_bytes(pairing_id)` is signed by the paired phone."""
+    # -- requests ------------------------------------------------------------------------------------
+    def authorize(self, body: dict) -> str | None:
+        """Reads need the token."""
         with self.lock:
-            if self.phone_key is None or self.pairing_id is None:
+            if self.token is None:
                 return "not paired"
+            if not secrets.compare_digest(str(body.get("token", "")), self.token):
+                return "missing or wrong token"
+            return None
+
+    def check_write(self, body: dict, signed_bytes, confirmation: str | None = None) -> str | None:
+        """Token, pairing id, a counter above the last one, the phone's signature. The counter is recorded before
+        the request runs, so a replayed request is refused even if it failed later."""
+        error = self.authorize(body)
+        if error:
+            return error
+        with self.lock:
             if body.get("pairing_id") != self.pairing_id:
                 return "unknown pairing"
+            counter = valid_counter(body.get("counter"))
+            if counter is None or counter <= self.last_counter:
+                return "replayed request"
+            if confirmation is not None and confirmation in self.executed:
+                return "replayed request"
+            self.last_counter = counter
             try:
                 signature = b64decode(body.get("signature"))
             except ValueError:
                 return "missing or malformed signature"
-            if not p256.verify(self.phone_key, signed_bytes(self.pairing_id), signature):
+            if not p256.verify(self.phone_key, signed_bytes(self.pairing_id, counter), signature, low_s=True):
                 return "signature does not verify"
             return None
 
-    def new_code(self) -> None:
-        """Forgets the paired phone and issues a new pairing code."""
+    def record_confirmation(self, confirmation_id: str) -> None:
         with self.lock:
-            self.code = b64url(secrets.token_bytes(16))
-            self.phone_key = None
-            self.pairing_id = None
+            self.executed.add(confirmation_id)

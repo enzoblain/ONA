@@ -331,7 +331,11 @@ private struct ConfirmationCard: View {
         case .plan(let steps): "\(steps.count) étapes, figées avant toute lecture du web."
         case .recipient(let offers): "\(offers.count) offres trouvées. Seule celle choisie sera contactée."
         case .payment(let payment):
-            UInt128(payment.amount, radix: 10).map { "\(NEARAmount.format($0)) NEAR à \(payment.to)" } ?? payment.to
+            // Only a payment the phone verified shows its account (F-14: no look-alike names).
+            switch PaymentCheck.verify(payment) {
+            case .success(let verified): "\(NEARAmount.format(verified.amount)) NEAR à \(verified.to)"
+            case .failure: "Paiement incohérent : à refuser."
+            }
         case .unknown: "Cette version de l'app ne sait pas l'afficher."
         }
     }

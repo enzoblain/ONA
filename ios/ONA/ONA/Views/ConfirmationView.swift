@@ -231,8 +231,11 @@ private struct PaymentConfirmation: View {
 
     private func message(for failure: PaymentCheck.Failure) -> String {
         switch failure {
+        case .unsupportedVersion: "Version de paiement inconnue : mettez ONA à jour des deux côtés"
+        case .missingField: "Le paiement est incomplet"
+        case .badAccount: "Le destinataire n'a pas la forme d'un compte NEAR"
         case .badAmount: "Montant illisible"
-        case .digestMismatch: "L'empreinte ne correspond pas au montant et au destinataire"
+        case .digestMismatch: "L'empreinte ne correspond pas au paiement"
         case .screenMismatch: "Le texte affiché ne correspond pas au paiement"
         }
     }

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Fake ONA computer for the iOS app. Everything it returns is labelled "mode": "mock".
 
-Follows docs/ios/protocol-draft.md (draft v0) and replays the demo mission of ona-core
-(crates/ona-core on main): same plan, same two offers, same payment bytes and digest.
+Speaks protocol v1 (docs/ios/protocol-draft.md), like the desktop apps: POST only, every reply signed with the
+computer's key, pairing with a commitment, a token for reads, a counter and the phone's signature for writes, and
+confirmations signed over the digest of what the phone shows. Replays the demo mission of ona-core (same plan, same two
+offers); the payment uses digest version 2.
 
-Step 3: the phone pairs with a QR code (printed in the terminal as text; `--qr` also opens it as an image) and every
-confirmation must be signed by the paired phone's key.
+The phone pairs with a QR code (printed in the terminal as text; `--qr` also opens it as an image). The mock has no
+screen: it prints the 6-digit code and confirms it itself.
 
 Standard library only. Usage:
     python3 mock_computer.py [--port 8790] [--host 127.0.0.1] [--step-seconds 3] [--qr]
@@ -15,10 +17,9 @@ Use --host 0.0.0.0 to reach it from an iPhone on the same network.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import socket
-import struct
+import secrets
 import subprocess
 import sys
 import threading
@@ -27,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from chats import MAX_TEXT, Chat
+import pairing as proto
 from pairing import Pairing
 
 MODE = "mock"
@@ -47,14 +49,8 @@ DEMO_AMOUNT = 1_000_000_000_000_000_000_000_000  # 1 NEAR in yoctoNEAR, as in on
 CONFIRM_STEPS = {"confirm_recipient": "recipient", "confirm_payment": "payment"}
 
 
-def payment_bytes(to: str, amount: int) -> bytes:
-    """Same bytes as ona-core gate::PaymentIntent::bytes: u32 LE length, UTF-8 account, u128 LE amount."""
-    account = to.encode("utf-8")
-    return struct.pack("<I", len(account)) + account + amount.to_bytes(16, "little")
-
-
-def payment_digest(to: str, amount: int) -> str:
-    return hashlib.sha256(payment_bytes(to, amount)).hexdigest()
+NETWORK = "testnet"
+CONTRACT = "mock-pay.ona.testnet"
 
 
 def payment_screen(to: str, amount: int) -> str:
@@ -64,8 +60,8 @@ def payment_screen(to: str, amount: int) -> str:
 class Mission:
     """A replay of the demo mission. The computer advances on its own and stops at each human confirmation."""
 
-    def __init__(self, number: int):
-        self.id = f"m-{number}"
+    def __init__(self):
+        self.id = "m-" + secrets.token_hex(16)
         self.phase = "plan_proposed"
         self.cursor = 0  # index in DEMO_PLAN of the current step
         self.events: list[dict] = []
@@ -73,7 +69,7 @@ class Mission:
         self.outputs: dict[str, int] = {}
         self.payments: list[dict] = []
         self.model_calls = 1  # the plan
-        self.confirm_count = 0
+        self._payment: dict | None = None
         self.pending = self._new_pending("plan", plan=list(DEMO_PLAN))
         self.log("Mission ouverte, plan proposé")
 
@@ -83,17 +79,28 @@ class Mission:
         self.events.append({"at": int(time.time()), "text": text, "tool": tool})
 
     def _new_pending(self, kind: str, **data) -> dict:
-        self.confirm_count += 1
-        # Unique across missions: several chats can each wait for a confirmation.
-        return {"id": f"{self.id}-c-{self.confirm_count}", "kind": kind, **data}
+        """A confirmation with a random id and `content`, the digest of what the phone must show."""
+        pending = {"id": "c-" + secrets.token_hex(16), "kind": kind, **data}
+        if kind == "plan":
+            pending["content"] = proto.plan_digest(pending["id"], data["plan"])
+        elif kind == "recipient":
+            pending["content"] = proto.offers_digest(pending["id"], data["offers"])
+        else:
+            pending["content"] = data["payment"]["digest"]
+        return pending
 
     def _count(self, tool: str) -> None:
         self.outputs[tool] = self.outputs.get(tool, 0) + 1
 
     def payment(self) -> dict:
-        to = DIRECTORY[self.chosen]
-        return {"to": to, "amount": str(DEMO_AMOUNT), "screen": payment_screen(to, DEMO_AMOUNT),
-                "digest": payment_digest(to, DEMO_AMOUNT)}
+        """Prepared once per mission, with a fresh nonce: its digest changes from one payment to the next."""
+        if self._payment is None:
+            to, amount, nonce = DIRECTORY[self.chosen], str(DEMO_AMOUNT), proto.random_hex16()
+            self._payment = {"to": to, "amount": amount, "screen": payment_screen(to, DEMO_AMOUNT),
+                             "digest": proto.payment_digest(NETWORK, CONTRACT, self.id, nonce, to, amount),
+                             "digest_version": 2, "network": NETWORK, "contract": CONTRACT, "mission_id": self.id,
+                             "nonce": nonce}
+        return self._payment
 
     # -- progress --------------------------------------------------------------------------------
     def tick(self) -> None:
@@ -156,7 +163,7 @@ class Mission:
             self.log(f"Cabinet choisi sur le téléphone : {firm}")
         elif pending["kind"] == "payment":
             if body.get("digest") != pending["payment"]["digest"]:
-                return "digest does not match the payment screen"
+                return "payment digest does not match"
             self.log("Paiement confirmé sur le téléphone")
         else:
             self.log("Plan accepté sur le téléphone")
@@ -170,18 +177,6 @@ class Mission:
     def plan_steps(self) -> list[str]:
         return list(DEMO_PLAN)
 
-    def steps(self) -> list[dict]:
-        out = []
-        for i, step in enumerate(DEMO_PLAN):
-            if self.phase == "closed" or i < self.cursor:
-                status = "done"
-            elif i == self.cursor and self.phase in ("running", "waiting"):
-                status = "current"
-            else:
-                status = "pending"
-            out.append({"step": step, "status": status})
-        return out
-
     def exposure(self) -> dict | None:
         if self.phase not in ("closed", "cancelled"):
             return None
@@ -194,19 +189,12 @@ class Mission:
                 "mode": MODE,
             }
 
-    def view(self) -> dict:
-        return {"id": self.id, "title": DEMO_TITLE, "phase": self.phase, "steps": self.steps(),
-                "events": self.events[-50:], "pending": self.pending, "exposure": self.exposure()}
-
 
 class Computer:
     def __init__(self, step_seconds: float, pairing: Pairing):
         self.pairing = pairing
         self.lock = threading.Lock()
-        self.mission: Mission | None = None
-        self.missions_started = 0
         self.chats: dict[str, Chat] = {}
-        self.chats_started = 0
         self.step_seconds = step_seconds
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -214,42 +202,37 @@ class Computer:
         while True:
             time.sleep(self.step_seconds)
             with self.lock:
-                if self.mission:
-                    self.mission.tick()
                 for chat in self.chats.values():
                     chat.tick()
 
-    def _new_mission(self) -> Mission:
-        self.missions_started += 1
-        return Mission(self.missions_started)
-
-    def start(self) -> None:
-        with self.lock:
-            self.mission = self._new_mission()
-
-    def reset(self) -> None:
-        with self.lock:
-            self.mission = None
-
-    def state(self) -> dict:
-        with self.lock:
-            return {"mode": MODE, "computer": {"name": "Ordinateur simulé"},
-                    "mission": self.mission.view() if self.mission else None}
+    def _pending(self, confirmation_id) -> dict | None:
+        for chat in self.chats.values():
+            if chat.waits_for(confirmation_id):
+                return chat.mission.pending
+        return None
 
     def confirm(self, body: dict) -> str | None:
-        signature_error = self.pairing.check_confirmation(body)
-        if signature_error:
-            print(f"   confirmation refused: {signature_error}", flush=True)
-            return signature_error
+        with self.lock:
+            pending = self._pending(body.get("id"))
+        if pending is None:
+            error = self.pairing.authorize(body)
+            return error or ("replayed request" if body.get("id") in self.pairing.executed else "stale confirmation")
+        # The phone signs the digest of what it showed; the computer puts the digest of what it asked.
+        error = self.pairing.check_write(
+            body, lambda pid, counter: proto.confirm_message(pid, counter, body, pending["content"]),
+            confirmation=pending["id"])
+        if error:
+            print(f"   confirmation refused: {error}", flush=True)
+            return error
         with self.lock:
             for chat in self.chats.values():
                 if chat.waits_for(body.get("id")):
-                    return chat.confirm(body)
-            if not self.mission:
-                return "stale confirmation"
-            return self.mission.confirm(body)
+                    error = chat.confirm(body)
+                    if error is None:
+                        self.pairing.record_confirmation(pending["id"])
+                    return error
+        return "stale confirmation"
 
-    # -- conversations ---------------------------------------------------------------------------
     def chat_list(self) -> dict:
         with self.lock:
             chats = sorted(self.chats.values(), key=lambda c: c.updated_at, reverse=True)
@@ -262,25 +245,25 @@ class Computer:
 
     def create_chat(self, body: dict) -> tuple[str | None, str | None]:
         """Returns (error, chat_id)."""
+        error = self.pairing.check_write(body, lambda pid, counter: proto.chat_message(pid, counter, None, body.get("text")))
+        if error:
+            return error, None
         text = _clean_text(body.get("text"))
         if text is None:
             return "empty or too long message", None
-        error = self.pairing.check_message(body, None)
-        if error:
-            return error, None
         with self.lock:
-            self.chats_started += 1
-            chat = Chat(self.chats_started, text, self._new_mission)
+            chat = Chat(text, Mission)
             self.chats[chat.id] = chat
             return None, chat.id
 
     def post_message(self, chat_id: str, body: dict) -> str | None:
+        error = self.pairing.check_write(body, lambda pid, counter: proto.chat_message(pid, counter, chat_id,
+                                                                                         body.get("text")))
+        if error:
+            return error
         text = _clean_text(body.get("text"))
         if text is None:
             return "empty or too long message"
-        error = self.pairing.check_message(body, chat_id)
-        if error:
-            return error
         with self.lock:
             chat = self.chats.get(chat_id)
             if chat is None:
@@ -289,7 +272,7 @@ class Computer:
             return None
 
     def delete_chat(self, chat_id: str, body: dict) -> str | None:
-        error = self.pairing.check_delete(body, chat_id)
+        error = self.pairing.check_write(body, lambda pid, counter: proto.delete_message(pid, counter, chat_id))
         if error:
             return error
         with self.lock:
@@ -305,10 +288,9 @@ def _clean_text(text) -> str | None:
 
 def make_handler(computer: Computer):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "ona-mock-computer/0"
+        server_version = "ona-mock-computer/1"
 
-        def _send(self, status: int, payload: dict) -> None:
-            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        def _raw(self, status: int, data: bytes) -> None:
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -316,70 +298,79 @@ def make_handler(computer: Computer):
             self.end_headers()
             self.wfile.write(data)
 
-        def _error(self, status: int, message: str) -> None:
-            self._send(status, {"ok": False, "error": message, "mode": MODE})
+        def _send(self, status: int, payload: dict, nonce: str = "") -> None:
+            """Every reply: {"reply": "<JSON text>", "signature": "<computer's signature>"}."""
+            reply = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            signature = computer.pairing.sign_reply(nonce, self.path, status, reply.encode("utf-8"))
+            self._raw(status, json.dumps({"reply": reply, "signature": signature}).encode("utf-8"))
+
+        def _error(self, status: int, message: str, nonce: str = "") -> None:
+            self._send(status, {"ok": False, "error": message, "mode": MODE}, nonce)
+
+        def _ok(self, nonce: str, **data) -> None:
+            self._send(200, {"ok": True, "mode": MODE, **data}, nonce)
 
         def do_GET(self):  # noqa: N802 (http.server naming)
-            if self.path == "/v0/state":
-                self._send(200, computer.state())
-            elif self.path == "/v0/mock/pairing":
-                self._send(200, {"payload": computer.pairing.payload(), "mode": MODE})
-            elif self.path == "/v0/chats":
-                self._send(200, computer.chat_list())
-            elif self.path.startswith("/v0/chats/") and self.path.count("/") == 3:
-                view = computer.chat_view(self.path.rsplit("/", 1)[1])
-                self._send(200, view) if view else self._error(404, "unknown chat")
-            else:
-                self._error(404, "not found")
+            self._error(404, "not found")
 
         def do_POST(self):  # noqa: N802
             length = int(self.headers.get("Content-Length") or 0)
             if length > 16_384:
-                return self._error(413, "body too large")
+                # Unreadable request: the only kind of reply left unsigned, always a failure.
+                return self._raw(413, b'{"ok":false,"error":"body too large"}')
             try:
                 body = json.loads(self.rfile.read(length) or b"{}")
             except json.JSONDecodeError:
-                return self._error(400, "body is not JSON")
+                body = None
             if not isinstance(body, dict):
-                return self._error(400, "body must be an object")
-            if self.path == "/v0/pair":
-                error, pairing_id, code = computer.pairing.pair(body)
+                return self._error(400, "body is not a JSON object")
+            nonce = body.get("nonce") if isinstance(body.get("nonce"), str) and len(body["nonce"]) <= 64 else ""
+            path = self.path
+            if path == "/v1/pair":
+                error, reply = computer.pairing.commit(body)
+                return self._error(403, error, nonce) if error else self._ok(nonce, **reply)
+            if path == "/v1/pair/reveal":
+                error, reply, code = computer.pairing.reveal(body)
                 if error:
                     print(f"   pairing refused: {error}", flush=True)
-                    return self._error(403, error)
-                print(f"==> Phone paired ({pairing_id}). Verification code: {code[:3]} {code[3:]}", flush=True)
-                return self._send(200, {"ok": True, "pairing_id": pairing_id, "mode": MODE})
-            if self.path == "/v0/confirm":
+                    return self._error(403, error, nonce)
+                print(f"==> Phone paired ({reply['pairing_id']}). Verification code: {code[:3]} {code[3:]} "
+                      "(confirmed by the mock itself)", flush=True)
+                return self._ok(nonce, **reply)
+            if path == "/v1/chats/list":
+                error = computer.pairing.authorize(body)
+                return self._error(403, error, nonce) if error else self._send(200, computer.chat_list(), nonce)
+            parts = path.split("/")  # ["", "v1", "chats", "<id>", "view" | "messages" | "delete"]
+            if len(parts) == 5 and parts[1:3] == ["v1", "chats"] and parts[4] == "view":
+                error = computer.pairing.authorize(body)
+                if error:
+                    return self._error(403, error, nonce)
+                view = computer.chat_view(parts[3])
+                return self._send(200, view, nonce) if view else self._error(404, "unknown chat", nonce)
+            if path == "/v1/confirm":
                 error = computer.confirm(body)
-                return self._error(409, error) if error else self._send(200, {"ok": True, "mode": MODE})
-            if self.path == "/v0/chats":
+                return self._error(_status(error), error, nonce) if error else self._ok(nonce)
+            if path == "/v1/chats":
                 error, chat_id = computer.create_chat(body)
-                return self._error(409, error) if error else self._send(200, {"ok": True, "chat_id": chat_id,
-                                                                              "mode": MODE})
-            parts = self.path.split("/")  # ["", "v0", "chats", "<id>", "messages" | "delete"]
-            if len(parts) == 5 and parts[1:3] == ["v0", "chats"] and parts[4] in ("messages", "delete"):
+                return self._error(_status(error), error, nonce) if error else self._ok(nonce, chat_id=chat_id)
+            if len(parts) == 5 and parts[1:3] == ["v1", "chats"] and parts[4] in ("messages", "delete"):
                 chat_id = parts[3]
                 if parts[4] == "messages":
                     error = computer.post_message(chat_id, body)
                 else:
                     error = computer.delete_chat(chat_id, body)
-                return self._error(409, error) if error else self._send(200, {"ok": True, "mode": MODE})
-            if self.path == "/v0/mock/start":
-                computer.start()
-                return self._send(200, {"ok": True, "mode": MODE})
-            if self.path == "/v0/mock/reset":
-                computer.reset()
-                return self._send(200, {"ok": True, "mode": MODE})
-            if self.path == "/v0/mock/unpair":
-                computer.pairing.new_code()
-                print_pairing(computer.pairing, qr=False)
-                return self._send(200, {"ok": True, "mode": MODE})
-            self._error(404, "not found")
+                return self._error(_status(error), error, nonce) if error else self._ok(nonce)
+            self._error(404, "not found", nonce)
 
         def log_message(self, fmt, *args):  # one short line per request
             print(f"{self.command} {self.path} -> {args[1] if len(args) > 1 else ''}", flush=True)
 
     return Handler
+
+
+def _status(error: str) -> int:
+    """403 for a missing pairing or token, as the desktop apps; 409 for any other refused write."""
+    return 403 if error in ("not paired", "missing or wrong token") else 409
 
 
 def public_host(host: str) -> str:
@@ -413,10 +404,9 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8790)
     parser.add_argument("--step-seconds", type=float, default=3.0)
-    parser.add_argument("--no-start", action="store_true", help="do not open a demo mission at launch")
     parser.add_argument("--address", help="address put in the pairing QR (default: guessed from --host)")
     parser.add_argument("--qr", action="store_true", help="also open the pairing QR as an image (macOS)")
-    parser.add_argument("--onion", help="step 4: put this .onion address in the QR instead of a local address "
+    parser.add_argument("--onion", help="put this .onion address in the QR instead of a local address "
                                         "(see run_onion.sh)")
     args = parser.parse_args()
 
@@ -430,10 +420,8 @@ def main() -> None:
         onion = None
     pairing = Pairing("Ordinateur simulé", address, onion)
     computer = Computer(args.step_seconds, pairing)
-    if not args.no_start:
-        computer.start()
     server = ThreadingHTTPServer((args.host, args.port), make_handler(computer))
-    print(f"ONA mock computer (mode: mock) on http://{args.host}:{args.port}/v0/state", flush=True)
+    print(f"ONA mock computer (mode: mock, protocol v1) on http://{args.host}:{args.port}", flush=True)
     print_pairing(pairing, qr=args.qr)
     try:
         server.serve_forever()

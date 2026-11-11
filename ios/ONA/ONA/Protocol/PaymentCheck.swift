@@ -1,12 +1,15 @@
-import CryptoKit
 import Foundation
 
 /// Checks a payment request on the phone, without trusting the computer's `screen` or `digest`.
 ///
-/// The bytes are the same as ona-core's `gate::PaymentIntent::bytes`: length of the account as u32 little-endian, the
-/// account in UTF-8, the amount as u128 little-endian. The digest is their SHA-256 in lowercase hex.
+/// Digest version 2, the bytes of ona-core's payment gate:
+/// `SHA-256(fields("ona/pay/v2", network, contract, mission_id, nonce, to, amount))`, lowercase hex. The nonce makes
+/// every payment's digest different: an old confirmation cannot be replayed on a new payment.
 enum PaymentCheck {
     enum Failure: Error, Equatable {
+        case unsupportedVersion
+        case missingField
+        case badAccount
         case badAmount
         case digestMismatch
         case screenMismatch
@@ -19,28 +22,23 @@ enum PaymentCheck {
         let digest: String
     }
 
-    static func bytes(to: String, amount: UInt128) -> Data {
-        let account = Data(to.utf8)
-        var out = Data()
-        withUnsafeBytes(of: UInt32(account.count).littleEndian) { out.append(contentsOf: $0) }
-        out.append(account)
-        withUnsafeBytes(of: amount.littleEndian) { out.append(contentsOf: $0) }
-        return out
-    }
-
-    static func digest(to: String, amount: UInt128) -> String {
-        SHA256.hash(data: bytes(to: to, amount: amount)).map { String(format: "%02x", $0) }.joined()
-    }
-
     /// The confirmation text, rebuilt from the payment itself (same format as ona-core `PaymentIntent::screen`).
     static func screen(to: String, amount: UInt128) -> String {
         "Pay \(amount) yoctoNEAR to \(to)"
     }
 
     static func verify(_ request: PaymentRequest) -> Result<Verified, Failure> {
-        guard let amount = UInt128(request.amount, radix: 10) else { return .failure(.badAmount) }
-        let digest = digest(to: request.to, amount: amount)
-        guard digest == request.digest.lowercased() else { return .failure(.digestMismatch) }
+        guard request.digestVersion == 2 else { return .failure(.unsupportedVersion) }
+        guard let network = request.network, let contract = request.contract, let missionID = request.missionId,
+              let nonce = request.nonce, !network.isEmpty, !contract.isEmpty, !missionID.isEmpty, !nonce.isEmpty
+        else { return .failure(.missingField) }
+        // Shown only if it looks like a NEAR account: no look-alike characters, no right-to-left tricks.
+        guard SignedFields.isNearAccount(request.to) else { return .failure(.badAccount) }
+        guard request.amount.utf8.allSatisfy({ (48...57).contains($0) }), let amount = UInt128(request.amount, radix: 10)
+        else { return .failure(.badAmount) }
+        let digest = SignedFields.paymentDigest(network: network, contract: contract, missionID: missionID, nonce: nonce,
+                                                to: request.to, amount: String(amount))
+        guard digest == request.digest else { return .failure(.digestMismatch) }
         guard screen(to: request.to, amount: amount) == request.screen else { return .failure(.screenMismatch) }
         return .success(Verified(to: request.to, amount: amount, digest: digest))
     }

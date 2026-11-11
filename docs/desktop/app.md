@@ -56,7 +56,8 @@ code » (presse-papiers général) n'existe qu'en Debug.
   partagés avec l'app Tauri (dont une signature produite par `p256`), engagement et révélation, rejeu refusé après
   redémarrage, jeton, `Host`, navigateur, contenu signé, empreinte de paiement v2. `swift test` lui-même n'a pas pu
   tourner (pas de Xcode dans l'environnement de test). La cible App (SwiftUI) n'a pas été compilée.
-- Pas de nouvel essai de bout en bout : l'app iPhone parle encore le protocole v0.
+- Pas de nouvel essai de bout en bout avec l'app Mac. L'app iPhone parle la v1 depuis le 2026-11-11 (essai fait avec
+  l'app Tauri, voir `docs/desktop/tauri.md`).
 
 ## Vérifié le 2026-11-10 (protocole v0, avant les correctifs)
 

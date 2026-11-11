@@ -3,8 +3,8 @@
 Document interne. Version 1 du 2026-11-11 : remplace la version 0 (2026-11-10), après l'inspection de sécurité
 (rejeu, code à 6 chiffres sans engagement, lectures ouvertes, ordinateur non authentifié, signatures incomplètes).
 Implémentée par les apps bureau (`desktop/tauri/src-tauri/src/{protocol,pairing,router}.rs`,
-`desktop/ONADesktop/Core/`). **L'app iPhone et le faux ordinateur (`ios/MockComputer`) parlent encore la version 0** :
-ils ne peuvent plus joindre les apps bureau tant qu'ils ne sont pas passés à la version 1.
+`desktop/ONADesktop/Core/`), par l'app iPhone (`ios/ONA/ONA/Pairing/SignedFields.swift`, `Protocol/ComputerLink.swift`)
+et par le faux ordinateur (`ios/MockComputer`), le 2026-11-11.
 
 Elle calque les trois confirmations humaines d'`ona-core` : `accept_plan`, `confirm_recipient`, `confirm_payment`.
 

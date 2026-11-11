@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 /// What the remote control knows about the computer. Only the pairing is kept (Keychain); the conversations live on
-/// the computer and are rebuilt in memory by polling.
+/// the computer and are rebuilt in memory by polling. Protocol version 1 (docs/ios/protocol-draft.md).
 @MainActor
 @Observable
 final class RemoteModel {
@@ -11,6 +11,8 @@ final class RemoteModel {
         case idle
         case connecting
         case connected(Date)
+        /// Paired on this phone; the person has not yet confirmed the codes on the computer.
+        case awaitingComputer
         case failed(String)
     }
 
@@ -36,10 +38,17 @@ final class RemoteModel {
     private(set) var sawSimulation = false
 
     static let pollInterval: Duration = .seconds(2)
+    /// The computer waits this long for the person to confirm the codes, then shows a new QR.
+    static let computerConfirmationWindow: TimeInterval = 5 * 60
 
-    private var link: (any ComputerLink)?
+    private var client: ComputerClient?
     private var key: (any DeviceKey)?
+    /// A pairing whose codes the person has not compared yet: kept in memory only, saved once the codes match.
+    private var unconfirmed: StoredPairing?
+    private var unconfirmedKey: (any DeviceKey)?
     private var pollTask: Task<Void, Never>?
+    /// Writes go one at a time: their counters must reach the computer in order.
+    private var writing = false
     private let store: any PairingStore
     private let makeLink: @Sendable (Endpoint) -> any ComputerLink
     private let makeKey: @Sendable () throws -> any DeviceKey
@@ -74,9 +83,9 @@ final class RemoteModel {
         }
     }
 
-    // MARK: - Pairing
+    // MARK: - Pairing: commit to the key, reveal it, compare the codes
 
-    /// Pairs with the computer named in a scanned (or pasted) pairing code.
+    /// Pairs with the computer named in a scanned (or pasted) pairing code. Nothing is saved until the codes match.
     func pair(with text: String) async {
         let payload: PairingPayload
         switch PairingPayload.parse(text) {
@@ -93,43 +102,69 @@ final class RemoteModel {
         defer { sending = false }
         do {
             let makeKey = self.makeKey
-            // Creating and using a Secure Enclave key can show the Face ID sheet: off the main thread.
-            let (key, request) = try await Task.detached {
-                let key = try makeKey()
-                let message = SignedFields.pairMessage(code: payload.code, phoneKey: key.publicKey,
-                                                       computerKey: payload.computerKey)
-                let request = PairRequest(code: payload.code, phoneKey: key.publicKey.base64EncodedString(),
-                                          signature: try key.sign(message).base64EncodedString())
-                return (key, request)
-            }.value
-            let link = makeLink(endpoint)
-            let ack = try await link.pair(request)
-            if ack.mode?.isSimulation == true { sawSimulation = true }
-            guard ack.ok, let pairingID = ack.pairingId else {
-                actionError = ack.error.map(ComputerMessages.french) ?? "L'ordinateur a refusé l'appairage."
-                return
-            }
-            let stored = StoredPairing(
-                pairingID: pairingID, name: payload.name, address: payload.address, onion: payload.onion,
+            // Creating a Secure Enclave key can show the system sheet: off the main thread.
+            let key = try await Task.detached { try makeKey() }.value
+            let client = ComputerClient(link: makeLink(endpoint), computerKey: payload.computerKey)
+            let phoneNonce = SignedFields.randomHex16()
+
+            // 1. Commit to the key before the computer's nonce exists.
+            let commitment = SignedFields.commitment(phoneKey: key.publicKey, phoneNonce: phoneNonce)
+            let committed = try await client.call(Paths.pair, ["code": payload.code, "commitment": commitment],
+                                                  as: PairCommitReply.self)
+            // 2. Reveal it, signed over both nonces.
+            let message = SignedFields.pairMessage(pairingID: committed.pairingId, code: payload.code,
+                                                   phoneKey: key.publicKey, computerKey: payload.computerKey,
+                                                   phoneNonce: phoneNonce, computerNonce: committed.computerNonce)
+            let signature = try await Task.detached { try key.sign(message).base64EncodedString() }.value
+            let revealed = try await client.call(Paths.reveal, [
+                "pairing_id": committed.pairingId, "phone_key": key.publicKey.base64EncodedString(),
+                "phone_nonce": phoneNonce, "signature": signature,
+            ], as: PairRevealReply.self)
+            guard revealed.pairingId == committed.pairingId else { throw LinkError.badReply }
+
+            // 3. The person compares the codes; the pairing is saved only then.
+            unconfirmed = StoredPairing(
+                pairingID: committed.pairingId, name: payload.name, address: payload.address, onion: payload.onion,
                 computerKey: payload.computerKey, keyKind: key.kind, keyRepresentation: key.storedRepresentation,
-                pairedAt: .now
+                pairedAt: .now, token: revealed.token, counter: 0
             )
-            try store.save(stored)
-            try use(stored, key: key, link: link)
+            unconfirmedKey = key
             verification = PendingVerification(
                 code: SignedFields.verificationCode(computerKey: payload.computerKey, phoneKey: key.publicKey,
-                                                    code: payload.code),
+                                                    code: payload.code, phoneNonce: phoneNonce,
+                                                    computerNonce: committed.computerNonce),
                 computerName: payload.name
             )
             actionError = nil
-            await refresh()
+        } catch let error as LinkError {
+            actionError = error.code.map(ComputerMessages.french) ?? error.localizedDescription
         } catch {
             actionError = error.localizedDescription
         }
     }
 
-    /// The person saw the same code on both screens.
+    /// The person saw the same code on both screens: the pairing is saved.
     func verificationMatches() {
+        guard let stored = unconfirmed, let key = unconfirmedKey else {
+            verification = nil
+            return
+        }
+        do {
+            try store.save(stored)
+            try use(stored, key: key)
+            connection = .awaitingComputer
+        } catch {
+            actionError = error.localizedDescription
+        }
+        unconfirmed = nil
+        unconfirmedKey = nil
+        verification = nil
+    }
+
+    /// The codes differ: nothing is saved, the computer will show a new QR.
+    func cancelPairing() {
+        unconfirmed = nil
+        unconfirmedKey = nil
         verification = nil
     }
 
@@ -143,19 +178,19 @@ final class RemoteModel {
         }
         pairing = nil
         key = nil
-        link = nil
+        client = nil
+        cancelPairing()
         chats = []
         chatsLoaded = false
         openChat = nil
         openChatID = nil
-        verification = nil
         connection = .notPaired
     }
 
     // MARK: - Polling (foreground only: no push, no background refresh)
 
     func startPolling() {
-        guard pollTask == nil, link != nil else { return }
+        guard pollTask == nil, client != nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
@@ -170,21 +205,26 @@ final class RemoteModel {
     }
 
     func refresh() async {
-        guard let link else { return }
+        guard let client, let pairing else { return }
         if case .idle = connection { connection = .connecting }
         do {
-            let list = try await link.chats()
+            let list = try await client.call(Paths.list, ["token": pairing.token], as: ChatList.self)
             chats = list.chats
             chatsLoaded = true
             if list.mode.isSimulation { sawSimulation = true }
             if let id = openChatID {
                 do {
-                    openChat = try await link.chat(id).chat
-                } catch LinkError.badStatus(404, _) {
+                    let reply = try await client.call(Paths.view(id), ["token": pairing.token], as: ChatReply.self)
+                    openChat = reply.chat
+                } catch LinkError.refused(404, _) {
                     openChat = nil  // deleted elsewhere
                 }
             }
             connection = .connected(.now)
+        } catch LinkError.refused(403, .some("not paired"))
+            where Date.now.timeIntervalSince(pairing.pairedAt) < Self.computerConfirmationWindow + 60 {
+            // Paired here, not yet confirmed on the computer: wait, this is not a failure.
+            connection = .awaitingComputer
         } catch {
             connection = .failed(error.localizedDescription)
         }
@@ -206,134 +246,148 @@ final class RemoteModel {
 
     /// Starts a conversation with a first message. Returns the new chat's id.
     func startChat(_ text: String) async -> String? {
-        guard let text = Self.clean(text), let pairing else { return nil }
-        guard let request = await signedMessage(text, pairingID: pairing.pairingID, chatID: nil) else { return nil }
-        guard let link else { return nil }
-        sending = true
-        defer { sending = false }
-        do {
-            let ack = try await link.newChat(request)
-            if ack.mode?.isSimulation == true { sawSimulation = true }
-            guard ack.ok, let id = ack.chatId else {
-                actionError = ack.error.map(ComputerMessages.french) ?? "L'ordinateur a refusé le message."
-                return nil
-            }
-            await open(chat: id)
-            return id
-        } catch {
-            actionError = error.localizedDescription
-            return nil
+        guard let text = Self.clean(text) else { return nil }
+        let ack: NewChatAck? = await write(Paths.chats, ["text": text], refusal: "L'ordinateur a refusé le message.") {
+            SignedFields.chatMessage(pairingID: $0, counter: $1, chatID: nil, text: text)
         }
+        guard let ack else { return nil }
+        await open(chat: ack.chatId)
+        return ack.chatId
     }
 
     /// Sends a message in an existing conversation.
     func send(_ text: String, in chatID: String) async -> Bool {
-        guard let text = Self.clean(text), let pairing, let link else { return false }
-        guard let request = await signedMessage(text, pairingID: pairing.pairingID, chatID: chatID) else { return false }
-        sending = true
-        defer { sending = false }
-        do {
-            let ack = try await link.send(request, to: chatID)
-            if ack.mode?.isSimulation == true { sawSimulation = true }
-            guard ack.ok else {
-                actionError = ack.error.map(ComputerMessages.french) ?? "L'ordinateur a refusé le message."
-                return false
-            }
-            await refresh()
-            return true
-        } catch {
-            actionError = error.localizedDescription
-            return false
+        guard let text = Self.clean(text) else { return false }
+        let ack: Ack? = await write(Paths.messages(chatID), ["text": text], refusal: "L'ordinateur a refusé le message.") {
+            SignedFields.chatMessage(pairingID: $0, counter: $1, chatID: chatID, text: text)
         }
+        await refresh()
+        return ack != nil
     }
 
     /// Deletes a conversation on the computer.
     func delete(chat chatID: String) async {
-        guard let pairing, let link else { return }
-        let pairingID = pairing.pairingID
-        guard let signature = await sign(SignedFields.deleteChat(pairingID: pairingID, chatID: chatID)) else { return }
-        do {
-            let ack = try await link.deleteChat(chatID, ChatDeleteRequest(pairingId: pairingID, signature: signature))
-            guard ack.ok else {
-                actionError = ack.error.map(ComputerMessages.french) ?? "L'ordinateur a refusé la suppression."
-                return
-            }
+        let ack: Ack? = await write(Paths.delete(chatID), [:], refusal: "L'ordinateur a refusé la suppression.") {
+            SignedFields.deleteMessage(pairingID: $0, counter: $1, chatID: chatID)
+        }
+        if ack != nil {
             chats.removeAll { $0.id == chatID }
             if openChatID == chatID { closeChat() }
-            await refresh()
-        } catch {
-            actionError = error.localizedDescription
         }
+        await refresh()
     }
 
-    // MARK: - Confirmations (each one signed, each signature asks for Face ID on an iPhone)
+    // MARK: - Confirmations (each signed over the digest of what the phone shows)
 
     func acceptPlan(_ pending: Pending) async {
-        await confirm(ConfirmationAnswer(id: pending.id, decision: .accept))
+        await confirm(pending, .accept)
     }
 
     func chooseRecipient(_ pending: Pending, firm: String) async {
-        await confirm(ConfirmationAnswer(id: pending.id, decision: .accept, firm: firm))
+        await confirm(pending, .accept, firm: firm)
     }
 
     /// Only a payment verified on the phone can be confirmed; the digest sent is the phone's own.
     func confirmPayment(_ pending: Pending, verified: PaymentCheck.Verified) async {
-        await confirm(ConfirmationAnswer(id: pending.id, decision: .accept, digest: verified.digest))
+        await confirm(pending, .accept, digest: verified.digest)
     }
 
     func reject(_ pending: Pending) async {
-        await confirm(ConfirmationAnswer(id: pending.id, decision: .reject))
+        await confirm(pending, .reject)
     }
 
     func clearActionError() {
         actionError = nil
     }
 
-    private func confirm(_ answer: ConfirmationAnswer) async {
-        guard let link, let pairing else {
-            actionError = "Ce téléphone n'est appairé à aucun ordinateur."
+    /// The phone's digest of what it shows for `pending` (never the computer's `content`). Nil if it cannot be shown.
+    static func content(of pending: Pending, rejecting: Bool = false) -> String? {
+        switch pending.request {
+        case .plan(let steps): SignedFields.planDigest(id: pending.id, steps: steps.map(\.raw))
+        case .recipient(let offers): SignedFields.offersDigest(id: pending.id, offers: offers)
+        case .payment(let request):
+            switch PaymentCheck.verify(request) {
+            case .success(let verified): verified.digest
+            // A payment the phone cannot verify can still be refused.
+            case .failure: rejecting ? request.digest : nil
+            }
+        case .unknown: nil
+        }
+    }
+
+    private func confirm(_ decision: Pending, _ choice: ConfirmationAnswer.Decision, firm: String? = nil,
+                         digest: String? = nil) async {
+        guard let content = Self.content(of: decision, rejecting: choice == .reject) else {
+            actionError = "Cette demande ne peut pas être vérifiée sur ce téléphone : mettez ONA à jour."
             return
         }
-        let pairingID = pairing.pairingID
-        sending = true
-        guard let signature = await sign(SignedFields.confirmMessage(answer.unsigned, pairingID: pairingID)) else {
-            sending = false
-            return
+        let answer = ConfirmationAnswer(id: decision.id, decision: choice, firm: firm, digest: digest, content: content)
+        var fields: [String: any Sendable] = ["id": answer.id, "decision": answer.decision.rawValue]
+        fields["firm"] = answer.firm
+        fields["digest"] = answer.digest
+        let ack: Ack? = await write(Paths.confirm, fields, refusal: "L'ordinateur a refusé la demande.") {
+            SignedFields.confirmMessage(pairingID: $0, counter: $1, id: answer.id, decision: answer.decision.rawValue,
+                                        firm: answer.firm, digest: answer.digest, content: answer.content)
         }
-        var signed = answer.unsigned
-        signed.pairingId = pairingID
-        signed.signature = signature
-        do {
-            let ack = try await link.confirm(signed)
-            if ack.mode?.isSimulation == true { sawSimulation = true }
-            actionError = ack.ok ? nil : (ack.error.map(ComputerMessages.french) ?? "L'ordinateur a refusé la demande.")
-        } catch {
-            actionError = error.localizedDescription
-        }
-        sending = false
+        if ack != nil { actionError = nil }
         await refresh()
     }
 
-    // MARK: - Signing
+    // MARK: - Writes: token, pairing id, a new counter, the phone's signature
 
-    /// Signs off the main thread (a Secure Enclave key can show Face ID). Nil, with a message, if it was refused.
-    private func sign(_ bytes: Data) async -> String? {
-        guard let key else {
+    /// Sends one write. The counter is taken and saved before signing, so it is never reused, even if the person
+    /// cancels Face ID or the network fails. Nil (with a message) on failure.
+    private func write<T: Decodable & Sendable>(_ path: String, _ fields: [String: any Sendable], refusal: String,
+                                     signed: @escaping @Sendable (String, UInt64) -> Data) async -> T? {
+        guard client != nil, pairing != nil, key != nil else {
             actionError = "Ce téléphone n'est appairé à aucun ordinateur."
             return nil
         }
+        while writing { try? await Task.sleep(for: .milliseconds(50)) }
+        writing = true
+        sending = true
+        defer {
+            writing = false
+            sending = false
+        }
+        guard let client, var pairing, let key else { return nil }
+        guard pairing.counter < 9_007_199_254_740_991 else {
+            actionError = "Cet appairage est épuisé : refaites l'appairage."
+            return nil
+        }
+        pairing.counter += 1
         do {
-            return try await Task.detached { try key.sign(bytes).base64EncodedString() }.value
+            try store.save(pairing)
+        } catch {
+            actionError = error.localizedDescription
+            return nil
+        }
+        self.pairing = pairing
+        let counter = pairing.counter, pairingID = pairing.pairingID
+        let signature: String
+        do {
+            signature = try await Task.detached { try key.sign(signed(pairingID, counter)).base64EncodedString() }.value
         } catch {
             actionError = "Action annulée : elle n'a pas été signée."
             return nil
         }
-    }
-
-    private func signedMessage(_ text: String, pairingID: String, chatID: String?) async -> ChatMessageRequest? {
-        let bytes = SignedFields.chatMessage(pairingID: pairingID, chatID: chatID, text: text)
-        guard let signature = await sign(bytes) else { return nil }
-        return ChatMessageRequest(text: text, pairingId: pairingID, signature: signature)
+        var body = fields
+        body["token"] = pairing.token
+        body["pairing_id"] = pairingID
+        body["counter"] = counter
+        body["signature"] = signature
+        do {
+            let reply = try await client.call(path, body, as: T.self)
+            if let ack = reply as? Ack, ack.mode?.isSimulation == true { sawSimulation = true }
+            if let ack = reply as? NewChatAck, ack.mode?.isSimulation == true { sawSimulation = true }
+            return reply
+        } catch let error as LinkError {
+            actionError = error.code.map(ComputerMessages.french) ?? (error == .badReply ? refusal : error.localizedDescription)
+            return nil
+        } catch {
+            actionError = error.localizedDescription
+            return nil
+        }
     }
 
     /// Longest message accepted by the computer.
@@ -344,12 +398,12 @@ final class RemoteModel {
         return trimmed.isEmpty || trimmed.count > maxMessageLength ? nil : trimmed
     }
 
-    private func use(_ stored: StoredPairing, key: (any DeviceKey)? = nil, link: (any ComputerLink)? = nil) throws {
+    private func use(_ stored: StoredPairing, key: (any DeviceKey)? = nil) throws {
         guard let endpoint = Endpoint(onion: stored.onion, address: stored.address) else {
             throw LinkError.unreachable("L'appairage enregistré est incomplet : refaites-le.")
         }
         self.key = try key ?? DeviceKeys.load(kind: stored.keyKind, representation: stored.keyRepresentation)
-        self.link = link ?? makeLink(endpoint)
+        client = ComputerClient(link: makeLink(endpoint), computerKey: stored.computerKey)
         pairing = stored
         chats = []
         chatsLoaded = false
@@ -360,9 +414,10 @@ final class RemoteModel {
         switch failure {
         case .notAPairingCode: "Ce n'est pas un code d'appairage ONA."
         case .unreadable: "Code d'appairage illisible."
-        case .unsupportedVersion(let v): "Version d'appairage \(v) non prise en charge : mettez l'app à jour."
+        case .unsupportedVersion(let v): "Version d'appairage \(v) non prise en charge : mettez ONA à jour des deux côtés."
         case .badComputerKey: "La clé de l'ordinateur dans ce code est invalide."
-        case .noAddress: "Ce code ne contient pas l'adresse de l'ordinateur."
+        case .noAddress: "Ce code ne contient pas d'adresse utilisable pour joindre l'ordinateur."
+        case .expired: "Ce code d'appairage a expiré : affichez-en un nouveau sur l'ordinateur."
         }
     }
 }

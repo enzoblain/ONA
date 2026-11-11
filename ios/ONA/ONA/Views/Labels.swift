@@ -30,27 +30,6 @@ extension Step {
     }
 }
 
-extension Mission.Phase {
-    var label: String {
-        switch self {
-        case .planProposed: "Plan à valider"
-        case .running: "En cours"
-        case .waiting: "En attente de vous"
-        case .closed: "Terminée"
-        case .cancelled: "Arrêtée"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .planProposed, .waiting: .orange
-        case .running: .blue
-        case .closed: .green
-        case .cancelled: .secondary
-        }
-    }
-}
-
 enum Format {
     static func euros(cents: Int) -> String {
         (Decimal(cents) / 100).formatted(.currency(code: "EUR").locale(Locale(identifier: "fr_FR")))

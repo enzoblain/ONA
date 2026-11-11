@@ -3,64 +3,112 @@ import Foundation
 import Testing
 @testable import ONA
 
-/// Fixed software key used to produce the cross-language vector checked by ios/MockComputer/test_pairing.py.
-private let vectorKey = try! P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 0x2A, count: 32))
+func sha(_ data: Data) -> String { SignedFields.sha256Hex(data) }
 
-private func payloadText(computerKey: Data, code: String = "Y29kZS0xMjM0NTY3OA",
-                         address: String? = "http://computer.test:8790", version: Int = 0) -> String {
-    var object: [String: Any] = ["v": version, "name": "Mac de test", "computer_key": computerKey.base64EncodedString(),
-                                 "code": code, "onion": NSNull()]
-    object["address"] = address ?? NSNull()
-    let json = try! JSONSerialization.data(withJSONObject: object)
-    let base64url = json.base64EncodedString()
-        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-        .replacingOccurrences(of: "=", with: "")
-    return PairingPayload.prefix + base64url
+/// Values shared with the desktop apps' tests (`protocol_v1_vectors` in Rust, `protocolV1Vectors` in Swift).
+enum Vector {
+    static let computerKey = Data([4] + (1...64).map { UInt8($0) })
+    static let phoneKey = Data([4] + (65...128).map { UInt8($0) })
+    static let phoneNonce = "00112233445566778899aabbccddeeff"
+    static let computerNonce = "ffeeddccbbaa99887766554433221100"
+    static let code = "c29tZS1jb2Rl"
+    static let pairingID = "p-0123456789abcdef0123456789abcdef"
 }
 
-@Suite("Signed fields")
-struct SignedFieldsTests {
-    @Test func layoutMatchesThePythonMock() {
-        // Same expectation as FieldsTests.test_layout in test_pairing.py.
+func payloadText(computerKey: Data, code: String = "Y29kZS0xMjM0NTY3OA", address: String? = "http://computer.test:8790",
+                 onion: String? = nil, version: Int = 1, expiresAt: Int? = Int(Date.now.timeIntervalSince1970) + 600)
+    -> String {
+    var object: [String: Any] = ["v": version, "name": "Mac de test", "computer_key": computerKey.base64EncodedString(),
+                                 "code": code]
+    object["address"] = address ?? NSNull()
+    object["onion"] = onion ?? NSNull()
+    object["expires_at"] = expiresAt
+    let json = try! JSONSerialization.data(withJSONObject: object)
+    return PairingPayload.prefix + json.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
+
+@Suite("Protocol v1 vectors")
+struct ProtocolV1Tests {
+    @Test func layout() {
         let encoded = SignedFields.encode([.text("ab"), .bytes(Data([1])), .text(nil)])
         #expect(Array(encoded) == [2, 0, 0, 0, 0x61, 0x62, 1, 0, 0, 0, 1, 0, 0, 0, 0])
     }
 
-    @Test func sasVector() {
-        let computerKey = Data([4] + (1...64).map { UInt8($0) })
-        let phoneKey = Data([4] + (65...128).map { UInt8($0) })
-        let code = SignedFields.verificationCode(computerKey: computerKey, phoneKey: phoneKey, code: "c29tZS1jb2Rl")
-        #expect(code.count == 6)
-        let allDigits = code.allSatisfy { $0.isNumber }
-        #expect(allDigits)
-        print("SAS_EXPECTED = \"\(code)\"")
+    @Test func pairing() {
+        #expect(SignedFields.commitment(phoneKey: Vector.phoneKey, phoneNonce: Vector.phoneNonce)
+                == "6c2ee677c6aa3c2c1721f781e55f7e223caf87d729cc5e68bd6414de0a17bb7b")
+        #expect(SignedFields.verificationCode(computerKey: Vector.computerKey, phoneKey: Vector.phoneKey, code: Vector.code,
+                                              phoneNonce: Vector.phoneNonce, computerNonce: Vector.computerNonce) == "587047")
+        #expect(sha(SignedFields.pairMessage(pairingID: Vector.pairingID, code: Vector.code, phoneKey: Vector.phoneKey,
+                                             computerKey: Vector.computerKey, phoneNonce: Vector.phoneNonce,
+                                             computerNonce: Vector.computerNonce))
+                == "3332d89e36dd9adeb88e8f5f18861d92fdcc048357c78bc7c7ed6284c1a069cd")
     }
 
-    @Test func confirmMessageCoversEveryDecisionField() {
-        let base = ConfirmationAnswer(id: "c-2", decision: .accept, firm: "cabinet-b")
-        let message = SignedFields.confirmMessage(base, pairingID: "p-1")
-        #expect(message != SignedFields.confirmMessage(ConfirmationAnswer(id: "c-2", decision: .accept, firm: "cabinet-a"), pairingID: "p-1"))
-        #expect(message != SignedFields.confirmMessage(ConfirmationAnswer(id: "c-3", decision: .accept, firm: "cabinet-b"), pairingID: "p-1"))
-        #expect(message != SignedFields.confirmMessage(ConfirmationAnswer(id: "c-2", decision: .reject, firm: "cabinet-b"), pairingID: "p-1"))
-        #expect(message != SignedFields.confirmMessage(base, pairingID: "p-2"))
-        // The signature fields themselves are not signed.
-        var signed = base
-        signed.pairingId = "p-1"
-        signed.signature = "xyz"
-        #expect(SignedFields.confirmMessage(signed.unsigned, pairingID: "p-1") == message)
+    @Test func writes() {
+        #expect(sha(SignedFields.confirmMessage(pairingID: Vector.pairingID, counter: 7, id: "c-1", decision: "accept",
+                                                firm: nil, digest: "ab", content: "cd"))
+                == "1c61312dbd420b5f78b85dc82cf6f3c505386043f9704f4cd087f882a9389139")
+        #expect(sha(SignedFields.chatMessage(pairingID: Vector.pairingID, counter: 8, chatID: nil, text: "bonjour"))
+                == "7f4041bdaaef1fae3f26bd2abf1ad93d65e5f0b086c585ac5cb2e5979e5da082")
+        #expect(sha(SignedFields.deleteMessage(pairingID: Vector.pairingID, counter: 9, chatID: "chat-1"))
+                == "ee3c7db20a817bb5c643f005a052fbf5af413ce9780a6fa31f3acc0e91ed959c")
     }
 
-    @Test func crossLanguageVector() throws {
-        let message = SignedFields.confirmMessage(ConfirmationAnswer(id: "c-3", decision: .accept, digest: "ab"), pairingID: "p-1")
-        let signature = try vectorKey.signature(for: message)
-        #expect(vectorKey.publicKey.isValidSignature(signature, for: message))
-        print("SWIFT_PUBLIC_KEY = \"\(vectorKey.publicKey.x963Representation.base64EncodedString())\"")
-        print("SWIFT_MESSAGE_HEX = \"\(message.map { String(format: "%02x", $0) }.joined())\"")
-        print("SWIFT_SIGNATURE = \"\(signature.derRepresentation.base64EncodedString())\"")
+    @Test func reply() {
+        #expect(sha(SignedFields.replyMessage(nonce: "00112233445566778899aabbccddeeff", method: "POST",
+                                              path: "/v1/chats/list", status: 200, reply: Data(#"{"ok":true}"#.utf8)))
+                == "c9e6dc8eb32a3f5a97b226281a3151a023754cf518c0828468f3b25dd4e855b0")
+    }
+
+    @Test func digestsOfWhatIsShown() {
+        #expect(SignedFields.planDigest(id: "c-1", steps: ["search", "read"])
+                == "10b2ecd6ff60485e505b911709ed14b162137f0237abaa8aed21eee7c26edb84")
+        let offer = Offer(firmId: "cabinet-b", priceCents: 60000, delayDays: 10, sourceSpans: ["Forfait 600 euros, sous 10 jours"])
+        #expect(SignedFields.offersDigest(id: "c-2", offers: [offer])
+                == "5127c86b14fc1406536bc274ea9c5b9e85e4a9b7e2adaf0c7b156ccf2dfb97b6")
+    }
+
+    /// Signature made by the Rust desktop app (p256, RFC 6979) with the private key 0x07…07.
+    @Test func verifiesTheRustSignature() throws {
+        let key = try #require(Data(base64Encoded: "BB4YUy/UdUwC8wQdnHXOszuD/9gax85P6ILMscmLxYlupGwxHE4v9A3ZajZT5uRURdMt/khuztdcepDGoYiBwKM="))
+        let signature = "MEUCIQCKpmfTBH6QHkQjK+2OSErWZ8NWVddjujyvnAIvA9OSSAIgPYwZ31pcNKYUz59ysuap+EQESYYeUfOI8n8sUxE/SHU="
+        let message = SignedFields.confirmMessage(pairingID: Vector.pairingID, counter: 7, id: "c-1", decision: "accept",
+                                                  firm: nil, digest: "ab", content: "cd")
+        #expect(SignedFields.verify(signature: signature, of: message, by: key))
+        #expect(!SignedFields.verify(signature: signature, of: message + Data([0]), by: key))
+        let privateKey = try P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 7, count: 32))
+        #expect(privateKey.publicKey.x963Representation == key)
+    }
+
+    /// CryptoKit makes a high-s signature about half the time: the phone always sends the low form, and refuses high-s.
+    @Test func signaturesAreAlwaysLowS() throws {
+        let key = SoftwareDeviceKey()
+        let message = Data("ona".utf8)
+        for _ in 0..<32 {
+            let der = try key.sign(message)
+            let signature = try P256.Signing.ECDSASignature(derRepresentation: der)
+            #expect(SignedFields.isLowS(signature))
+            #expect(SignedFields.verify(signature: der.base64EncodedString(), of: message, by: key.publicKey))
+        }
+        // The high form of a valid signature is refused.
+        var high: P256.Signing.ECDSASignature?
+        while high == nil {
+            let signature = try key.key.signature(for: message)
+            if !SignedFields.isLowS(signature) { high = signature }
+        }
+        let highSignature = try #require(high)
+        #expect(key.key.publicKey.isValidSignature(highSignature, for: message))
+        #expect(!SignedFields.verify(signature: highSignature.derRepresentation.base64EncodedString(), of: message,
+                                     by: key.publicKey))
+        #expect(SignedFields.verify(signature: try SignedFields.lowS(highSignature).derRepresentation.base64EncodedString(),
+                                    of: message, by: key.publicKey))
     }
 }
 
-@Suite("Pairing payload")
+@Suite("Pairing payload v1")
 struct PairingPayloadTests {
     let computerKey = SoftwareDeviceKey().publicKey
 
@@ -72,13 +120,17 @@ struct PairingPayloadTests {
         #expect(payload.code == "Y29kZS0xMjM0NTY3OA")
     }
 
-    @Test func refusesOtherText() {
+    @Test func refusesOtherTextAndVersions() {
         #expect(PairingPayload.parse("https://example.com") == .failure(.notAPairingCode))
         #expect(PairingPayload.parse("ona-pair:%%%") == .failure(.unreadable))
+        #expect(PairingPayload.parse(payloadText(computerKey: computerKey, version: 0)) == .failure(.unsupportedVersion(0)))
+        #expect(PairingPayload.parse(payloadText(computerKey: computerKey, version: 2)) == .failure(.unsupportedVersion(2)))
     }
 
-    @Test func refusesAnotherVersion() {
-        #expect(PairingPayload.parse(payloadText(computerKey: computerKey, version: 1)) == .failure(.unsupportedVersion(1)))
+    @Test func refusesAnExpiredCodeOrOneWithoutExpiry() {
+        let past = Int(Date.now.timeIntervalSince1970) - 1
+        #expect(PairingPayload.parse(payloadText(computerKey: computerKey, expiresAt: past)) == .failure(.expired))
+        #expect(PairingPayload.parse(payloadText(computerKey: computerKey, expiresAt: nil)) == .failure(.unreadable))
     }
 
     @Test func refusesAKeyOffTheCurve() {
@@ -86,229 +138,12 @@ struct PairingPayloadTests {
         #expect(PairingPayload.parse(payloadText(computerKey: bad)) == .failure(.badComputerKey))
     }
 
-    @Test func refusesACodeWithoutAddress() {
+    @Test func refusesACodeWithoutUsableAddress() {
         #expect(PairingPayload.parse(payloadText(computerKey: computerKey, address: nil)) == .failure(.noAddress))
         #expect(PairingPayload.parse(payloadText(computerKey: computerKey, address: "ftp://x")) == .failure(.noAddress))
-    }
-}
-
-/// Plays the computer: checks the pairing signature, records signed confirmations.
-final class FakeLink: ComputerLink, @unchecked Sendable {
-    let lock = NSLock()
-    var pairRequests: [PairRequest] = []
-    var sent: [ConfirmationAnswer] = []
-    let stateData: Data
-    let computerKey: Data
-    var acceptPairing = true
-
-    init(stateData: Data, computerKey: Data) {
-        self.stateData = stateData
-        self.computerKey = computerKey
+        #expect(PairingPayload.parse(payloadText(computerKey: computerKey, address: "https://x")) == .failure(.noAddress))
     }
 
-    func state() async throws -> ComputerState {
-        try ProtocolCoding.decoder.decode(ComputerState.self, from: stateData)
-    }
-
-    func pair(_ request: PairRequest) async throws -> Ack {
-        lock.withLock { pairRequests.append(request) }
-        return acceptPairing ? Ack(ok: true, error: nil, mode: .mock, pairingId: "p-7")
-            : Ack(ok: false, error: "unknown or used pairing code", mode: .mock)
-    }
-
-    func confirm(_ confirmation: ConfirmationAnswer) async throws -> Ack {
-        lock.withLock { sent.append(confirmation) }
-        return Ack(ok: true, error: nil, mode: .mock)
-    }
-
-    func mock(_ action: MockAction) async throws -> Ack {
-        Ack(ok: true, error: nil, mode: .mock)
-    }
-
-    // Conversations: one chat ("chat-1") waiting for the demo payment.
-    var newChats: [ChatMessageRequest] = []
-    var messages: [(String, ChatMessageRequest)] = []
-    var deletions: [(String, ChatDeleteRequest)] = []
-    var deleted = false
-
-    func chats() async throws -> ChatList {
-        let json = lock.withLock { deleted } ? ChatFixtures.emptyList : ChatFixtures.list
-        return try ProtocolCoding.decoder.decode(ChatList.self, from: json)
-    }
-
-    func chat(_ id: String) async throws -> ChatReply {
-        guard id == "chat-1", !lock.withLock({ deleted }) else { throw LinkError.badStatus(404, "unknown chat") }
-        return try ProtocolCoding.decoder.decode(ChatReply.self, from: ChatFixtures.waitingForPayment)
-    }
-
-    func newChat(_ request: ChatMessageRequest) async throws -> NewChatAck {
-        lock.withLock { newChats.append(request) }
-        return NewChatAck(ok: true, error: nil, mode: .mock, chatId: "chat-1")
-    }
-
-    func send(_ request: ChatMessageRequest, to chatID: String) async throws -> Ack {
-        lock.withLock { messages.append((chatID, request)) }
-        return Ack(ok: true, error: nil, mode: .mock)
-    }
-
-    func deleteChat(_ chatID: String, _ request: ChatDeleteRequest) async throws -> Ack {
-        lock.withLock {
-            deletions.append((chatID, request))
-            deleted = true
-        }
-        return Ack(ok: true, error: nil, mode: .mock)
-    }
-}
-
-/// Signs, but remembers that it was asked to.
-private struct RecordingKey: DeviceKey {
-    let inner = SoftwareDeviceKey()
-    var kind: DeviceKeyKind { inner.kind }
-    var publicKey: Data { inner.publicKey }
-    var storedRepresentation: Data { inner.storedRepresentation }
-    func sign(_ message: Data) throws -> Data { try inner.sign(message) }
-}
-
-private struct RefusingKey: DeviceKey {
-    let inner = SoftwareDeviceKey()
-    var kind: DeviceKeyKind { inner.kind }
-    var publicKey: Data { inner.publicKey }
-    var storedRepresentation: Data { inner.storedRepresentation }
-    struct Cancelled: Error {}
-    func sign(_ message: Data) throws -> Data { throw Cancelled() }
-}
-
-@MainActor
-@Suite("Remote model with pairing")
-struct RemoteModelTests {
-    let computer = SoftwareDeviceKey()
-
-    private func pairedModel(key: any DeviceKey = RecordingKey()) async throws -> (RemoteModel, FakeLink, any DeviceKey, MemoryPairingStore) {
-        let link = FakeLink(stateData: MessageTests.waitingForPayment, computerKey: computer.publicKey)
-        let store = MemoryPairingStore()
-        let model = RemoteModel(store: store, makeLink: { _ in link }, makeKey: { key })
-        await model.pair(with: payloadText(computerKey: computer.publicKey))
-        #expect(model.actionError == nil)
-        return (model, link, key, store)
-    }
-
-    private func verify(_ answer: ConfirmationAnswer, with key: any DeviceKey) throws -> Bool {
-        let publicKey = try P256.Signing.PublicKey(x963Representation: key.publicKey)
-        let text = try #require(answer.signature)
-        let der = try #require(Data(base64Encoded: text))
-        let signature = try P256.Signing.ECDSASignature(derRepresentation: der)
-        let pairingID = try #require(answer.pairingId)
-        let message = SignedFields.confirmMessage(answer.unsigned, pairingID: pairingID)
-        return publicKey.isValidSignature(signature, for: message)
-    }
-
-    @Test func pairingSendsAProofAndStoresThePairing() async throws {
-        let (model, link, key, store) = try await pairedModel()
-        let request = try #require(link.pairRequests.first)
-        #expect(request.code == "Y29kZS0xMjM0NTY3OA")
-        #expect(Data(base64Encoded: request.phoneKey) == key.publicKey)
-        let proofDER = try #require(Data(base64Encoded: request.signature))
-        let proof = try P256.Signing.ECDSASignature(derRepresentation: proofDER)
-        let message = SignedFields.pairMessage(code: request.code, phoneKey: key.publicKey, computerKey: computer.publicKey)
-        #expect(try P256.Signing.PublicKey(x963Representation: key.publicKey).isValidSignature(proof, for: message))
-
-        let stored = try #require(try store.load())
-        #expect(stored.pairingID == "p-7")
-        #expect(stored.computerKey == computer.publicKey)
-        #expect(model.isPaired)
-        let verification = try #require(model.verification)
-        #expect(verification.code == SignedFields.verificationCode(computerKey: computer.publicKey, phoneKey: key.publicKey, code: request.code))
-    }
-
-    @Test func refusedPairingStoresNothing() async throws {
-        let link = FakeLink(stateData: MessageTests.waitingForPayment, computerKey: computer.publicKey)
-        link.acceptPairing = false
-        let store = MemoryPairingStore()
-        let model = RemoteModel(store: store, makeLink: { _ in link }, makeKey: { SoftwareDeviceKey() })
-        await model.pair(with: payloadText(computerKey: computer.publicKey))
-        #expect(model.actionError == ComputerMessages.french("unknown or used pairing code"))
-        #expect(!model.isPaired)
-        #expect(try store.load() == nil)
-    }
-
-    @Test func confirmsAPaymentWithASignatureOverThePhonesDigest() async throws {
-        let (model, link, key, _) = try await pairedModel()
-        #expect(model.isSimulation)
-        await model.open(chat: "chat-1")
-        let pending = try #require(model.openChat?.pending)
-        guard case .payment(let request) = pending.request else {
-            Issue.record("expected a payment")
-            return
-        }
-        await model.confirmPayment(pending, verified: try PaymentCheck.verify(request).get())
-        let sent = try #require(link.sent.first)
-        #expect(sent.unsigned == ConfirmationAnswer(id: "c-3", decision: .accept, digest: "a43ba249fbdd55a64a0647282b6dff66d660a1d8a8d75a8fbf3533bfa450fa31"))
-        #expect(sent.pairingId == "p-7")
-        #expect(try verify(sent, with: key))
-    }
-
-    @Test func rejectIsSignedToo() async throws {
-        let (model, link, key, _) = try await pairedModel()
-        await model.open(chat: "chat-1")
-        await model.reject(try #require(model.openChat?.pending))
-        let sent = try #require(link.sent.first)
-        #expect(sent.decision == .reject)
-        #expect(try verify(sent, with: key))
-    }
-
-    @Test func cancelledSignatureSendsNothing() async throws {
-        // Pairing itself needs a signature (Face ID cancelled, for instance): nothing is sent, nothing is stored.
-        let link = FakeLink(stateData: MessageTests.waitingForPayment, computerKey: computer.publicKey)
-        let store = MemoryPairingStore()
-        let model = RemoteModel(store: store, makeLink: { _ in link }, makeKey: { RefusingKey() })
-        await model.pair(with: payloadText(computerKey: computer.publicKey))
-        #expect(model.actionError != nil)
-        #expect(!model.isPaired)
-        #expect(try store.load() == nil)
-        #expect(link.pairRequests.isEmpty)
-        #expect(link.sent.isEmpty)
-    }
-
-    @Test func notPairedCannotConfirm() async throws {
-        let link = FakeLink(stateData: MessageTests.waitingForPayment, computerKey: computer.publicKey)
-        let model = RemoteModel(store: MemoryPairingStore(), makeLink: { _ in link }, makeKey: { SoftwareDeviceKey() })
-        #expect(model.connection == .notPaired)
-        await model.acceptPlan(try PairingTestsHelpers.planPending())
-        #expect(model.actionError == "Ce téléphone n'est appairé à aucun ordinateur.")
-        #expect(link.sent.isEmpty)
-    }
-
-    @Test func reloadsAStoredPairing() async throws {
-        let (_, _, key, store) = try await pairedModel()
-        let link = FakeLink(stateData: MessageTests.waitingForPayment, computerKey: computer.publicKey)
-        let reopened = RemoteModel(store: store, makeLink: { _ in link }, makeKey: { SoftwareDeviceKey() })
-        #expect(reopened.isPaired)
-        #expect(reopened.connection == .idle)
-        await reopened.open(chat: "chat-1")
-        await reopened.reject(try #require(reopened.openChat?.pending))
-        // Signed with the key loaded back from the store, not a new one.
-        #expect(try verify(try #require(link.sent.first), with: key))
-    }
-
-    @Test func unpairForgetsEverything() async throws {
-        let (model, _, _, store) = try await pairedModel()
-        model.unpair()
-        #expect(!model.isPaired)
-        #expect(model.connection == .notPaired)
-        #expect(model.chats.isEmpty)
-        #expect(model.openChat == nil)
-        #expect(try store.load() == nil)
-    }
-}
-
-enum PairingTestsHelpers {
-    static func planPending() throws -> Pending {
-        try ProtocolCoding.decoder.decode(Pending.self, from: Data(#"{"id":"c-1","kind":"plan","plan":["search"]}"#.utf8))
-    }
-}
-
-@Suite("Endpoints and replies")
-struct EndpointTests {
     @Test func onionWinsOverLocalAddress() {
         let local = URL(string: "http://10.0.0.2:8790")!
         #expect(Endpoint(onion: "abc.onion", address: local) == .onion("abc.onion"))
@@ -316,47 +151,63 @@ struct EndpointTests {
         #expect(Endpoint(onion: "not-an-onion", address: local) == .local(local))
         #expect(Endpoint(onion: nil, address: nil) == nil)
     }
+}
 
-    @Test func decodesErrorBodiesOnlyWhenAsked() throws {
-        let body = Data(#"{"ok":false,"error":"stale confirmation","mode":"mock"}"#.utf8)
-        let ack = try ProtocolCoding.decodeReply(Ack.self, status: 409, body: body, acceptErrorBody: true)
-        #expect(ack.error == "stale confirmation")
-        #expect(throws: LinkError.self) {
-            try ProtocolCoding.decodeReply(ComputerState.self, status: 409, body: body, acceptErrorBody: false)
+@Suite("Signed replies")
+struct SignedReplyTests {
+    let computer = P256.Signing.PrivateKey()
+
+    private func envelope(_ reply: String, nonce: String, path: String, status: Int, key: P256.Signing.PrivateKey? = nil)
+        throws -> RawReply {
+        let message = SignedFields.replyMessage(nonce: nonce, method: "POST", path: path, status: status,
+                                                reply: Data(reply.utf8))
+        let signature = try SignedFields.lowS((key ?? computer).signature(for: message)).derRepresentation
+        let body = try JSONSerialization.data(withJSONObject: ["reply": reply, "signature": signature.base64EncodedString()])
+        return RawReply(status: status, body: body)
+    }
+
+    private var publicKey: Data { computer.publicKey.x963Representation }
+
+    @Test func acceptsTheExactSignedText() throws {
+        // The Mac app writes "/" as "\/": the phone checks the decoded text, never a re-encoding.
+        let reply = #"{"ok":true,"path":"a\/b"}"#
+        let raw = try envelope(reply, nonce: "n1", path: "/v1/chats/list", status: 200)
+        let verified = try ComputerClient.verify(raw, nonce: "n1", path: "/v1/chats/list", computerKey: publicKey)
+        #expect(verified.text == Data(reply.utf8))
+    }
+
+    @Test func refusesAnotherNoncePathStatusOrKey() throws {
+        let raw = try envelope(#"{"ok":true}"#, nonce: "n1", path: "/v1/chats/list", status: 200)
+        #expect(throws: LinkError.notAuthenticated) {
+            try ComputerClient.verify(raw, nonce: "n2", path: "/v1/chats/list", computerKey: publicKey)
+        }
+        #expect(throws: LinkError.notAuthenticated) {
+            try ComputerClient.verify(raw, nonce: "n1", path: "/v1/chats/x/view", computerKey: publicKey)
+        }
+        #expect(throws: LinkError.notAuthenticated) {
+            try ComputerClient.verify(RawReply(status: 409, body: raw.body), nonce: "n1", path: "/v1/chats/list",
+                                      computerKey: publicKey)
+        }
+        let other = try envelope(#"{"ok":true}"#, nonce: "n1", path: "/v1/chats/list", status: 200,
+                                 key: P256.Signing.PrivateKey())
+        #expect(throws: LinkError.notAuthenticated) {
+            try ComputerClient.verify(other, nonce: "n1", path: "/v1/chats/list", computerKey: publicKey)
         }
     }
 
-    @MainActor @Test func pairsWithAnOnionCode() async throws {
-        let computer = SoftwareDeviceKey()
-        let link = FakeLink(stateData: MessageTests.waitingForPayment, computerKey: computer.publicKey)
-        let endpoints = EndpointRecorder()
-        let store = MemoryPairingStore()
-        let model = RemoteModel(store: store, makeLink: { endpoint in endpoints.add(endpoint); return link },
-                                makeKey: { SoftwareDeviceKey() })
-        let onion = String(repeating: "a", count: 56) + ".onion"
-        let object: [String: Any] = ["v": 0, "name": "Mac", "address": NSNull(), "onion": onion,
-                                     "computer_key": computer.publicKey.base64EncodedString(), "code": "abc"]
-        let json = try JSONSerialization.data(withJSONObject: object).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        await model.pair(with: PairingPayload.prefix + json)
-        #expect(model.actionError == nil)
-        #expect(model.usesTor)
-        #expect(endpoints.all == [.onion(onion)])
-        #expect(try store.load()?.onion == onion)
+    @Test func unsignedRepliesAreFailuresWhoseBodyIsNotRead() {
+        let body = Data(#"{"ok":true,"chats":[]}"#.utf8)
+        #expect(throws: LinkError.notAuthenticated) {
+            try ComputerClient.verify(RawReply(status: 200, body: body), nonce: "n", path: "/v1/chats/list", computerKey: publicKey)
+        }
+        #expect(throws: LinkError.failed(503)) {
+            try ComputerClient.verify(RawReply(status: 503, body: body), nonce: "n", path: "/v1/chats/list", computerKey: publicKey)
+        }
     }
 
-    @MainActor @Test func theMacPackageCannotReachAnOnion() async {
-        let model = RemoteModel(store: MemoryPairingStore(), makeKey: { SoftwareDeviceKey() })
-        let link = RemoteModel.localOnlyLink(.onion("x.onion"))
-        await #expect(throws: LinkError.self) { try await link.state() }
-        #expect(!model.isPaired)
+    @Test func chatIdsCannotEscapeThePath() {
+        #expect(Paths.view("chat-1") == "/v1/chats/chat-1/view")
+        #expect(Paths.view("../confirm") == "/v1/chats/invalid/view")
+        #expect(Paths.delete("a b") == "/v1/chats/invalid/delete")
     }
-}
-
-final class EndpointRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var endpoints: [Endpoint] = []
-    func add(_ endpoint: Endpoint) { lock.withLock { endpoints.append(endpoint) } }
-    var all: [Endpoint] { lock.withLock { endpoints } }
 }
