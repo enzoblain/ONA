@@ -107,7 +107,7 @@ To measure gas on a local node, build the contract as in `verify.sh`, set `NEAR_
 - The relay serves a fixed pool of connections with per-request deadlines, but a few dozen slow clients can still keep it busy. Do not expose it
   to the internet yet.
 - A stolen signer key can drain the reserve at the speed of the hourly redemption limit. There is no key rotation.
-- An attacker holding tokens can use up a tier's hourly limit and delay exits for that tier.
+- An attacker holding tokens can keep a tier's redemption limit used up and slow exits for that tier (the relay has its own limit).
 
 More in [SPEC.md](SPEC.md).
 

@@ -25,7 +25,13 @@ non-subgroup points on NEAR.
 | `relay_claim` x1 / x8 / x32 | 10.6 / 68.0 / 264.6 |
 | `halt` | 1.7 |
 
-`issue` costs about 6.9 Tgas per token, and `relay_claim` about 8.3. These runs attached 1000 Tgas; the limit on testnet is not verified.
+`issue` costs about 6.9 Tgas per token, and `relay_claim` about 8.3. These runs attached 1000 Tgas. The contract now accepts at most
+32 tokens per deposit and 28 items per `relay_claim`, so the signer's budget formula (10 + 8 per token, 266 Tgas for 32) and the
+relay's (10 + 10 per item, 290 Tgas for 28) stay under 300 Tgas; whether the new code fits these budgets is not measured. `lock` now
+updates one counter per token, so its cost grows with the token count (not measured; the signer attaches a fixed 10 Tgas). The 300 Tgas is the `max_total_prepaid_gas` of protocol versions before 83 in
+`near-parameters` 0.38.0 (version 83 raises it to 1 PGas). Which protocol version runs on testnet is not verified; it can be read
+from the network's protocol config (RPC `EXPERIMENTAL_protocol_config`, not verified here). The table was measured before the
+2026-11-11 changes (lock accounting, expiry, duplicate checks, signatures in the `issue` event) and has not been measured again.
 
 The same run confirmed: the deployed account has no access key, a transfer to a missing account comes back to the token's own implicit
 account, an outsider cannot call the payout callback, and the reserve stayed solvent after every step. On the same node, the real signer
@@ -44,49 +50,108 @@ loop locked and issued a deposit, and the real relay claimed a credit, returned 
 - Nullifier: `sha256("ONA-NF-V1" || denom_id || pk || nonce)`.
 - Blinding: `H = hash_to_g1(m, DST)`, `B = r*H`, signer returns `S' = sk*B`, wallet unblinds `S = r^-1 * S'`, then checks
   `e(S, G2) == e(H, pk_G2)`. `r` uniform and never derived from a seed.
+- Secrets held by `ona-token` (mint keys, blinding factors, key generation and blinding buffers, the pending token's nonce and
+  seed) are wiped with volatile writes when dropped. `SecretKey::to_secret` and `PendingToken::to_secret_vec` return buffers wiped
+  on drop; the older `to_bytes` and `to_secret_bytes` return copies the caller must wipe. Copies made elsewhere in memory (moves,
+  registers, swap) are not reached.
 - **Each deployment must have its own keys.** The signer is blind and cannot see the DST of a blinded point, so the DST does
   not protect against a key shared between two deployments.
 
 ## Owner signatures (ed25519 over a SHA-256 digest)
-Each message starts with its own domain string, so a signature for one action cannot serve for another.
-- `redeem_digest = H("ONA-REDEEM-V1" || H(contract) || H(submitter) || nf)`
-- `spend_digest = H("ONA-SPEND-V2" || H(contract) || H(submitter) || denom || nf || H(to) || amount_le || fee_le || count_le || (denom || B)*)`
-- `claim_digest = H("ONA-CLAIM-V1" || H(mint) || H(relay) || nf)`
+Each message starts with its own domain string, so a signature for one action cannot serve for another. Each carries `expires_at`,
+the last block timestamp in nanoseconds (u64, little-endian) at which the contract accepts it, passed in clear next to the signature.
+The contract refuses an `expires_at` already passed, or more than `MAX_SIGNATURE_VALIDITY_NS` (7 days) after the block that executes
+it, so no signature can be made valid for ever.
+- `redeem_digest_until = H("ONA-REDEEM-V2" || H(contract) || H(submitter) || nf || expires_at_le)`
+- `spend_digest_until = H("ONA-SPEND-V3" || H(contract) || H(submitter) || denom || nf || H(to) || amount_le || fee_le || count_le || (denom || B)* || expires_at_le)`
+- `claim_digest_until = H("ONA-CLAIM-V2" || H(mint) || H(relay) || nf || expires_at_le)`
+
+The earlier formats (`ONA-REDEEM-V1`, `ONA-SPEND-V2`, `ONA-CLAIM-V1`, functions without `_until`) remain in `ona-token` for
+existing callers but are no longer accepted by `ona-mint`. Owner keys of small order are refused by the contract (the host's
+`ed25519_verify` is not strict in `near-vm-runner` 0.38.0; the deployed host version is not verified) and by `verify_digest`, which
+uses `verify_strict`. `is_weak_owner_key` lets a wallet or relay check a key before use.
 
 ## `ona-mint` contract
 Tested on the mocked NEAR VM, which runs the real BLS12-381 and ed25519 host functions, with tokens produced by `ona-token`.
 
-State: denoms (value, pk, caps), counters per denom (deposited, issued, redeemed, refunded, hourly window), pending deposits,
-nullifier set, signer, relay, guardian, halted.
+State: denoms (value, pk, caps), counters per denom (deposited, issued, redeemed, refunded, a redemption bucket for `redeem` and
+`spend`, a separate one for `relay_claim`), pending deposits, nullifier set, signer, relay, guardian, halted.
 
 | Method | Access | Effect | Must refuse |
 |---|---|---|---|
-| `new` | once | validates keys | invalid or duplicate keys |
-| `deposit(denom, blinded[])` | anyone, payable | records pending, prepaid storage and fee outside the reserve | halted; n not in {1,2,4..64}; over circulation cap; bad length |
-| `lock(id)` | signer | blocks `refund` for 24 h, before any signature is published | halted; not signer; deadline passed; already locked |
-| `issue(id, sigs[])` | signer | per-token verification, issued += n. Allowed after `halt` for locked records | not locked; lock expired; not signer; one bad signature fails all |
-| `refund(id)` | anyone after deadline, or after lock expiry if locked | returns the deposit | too early; issued |
-| `redeem(token, owner_sig)` | anyone named by the owner | verifies, marks spent, pays `hex(pk)` | forged; spent; bad owner sig; redeemed+1 > issued; bucket empty |
-| `spend(token, owner_sig, to, amount, fee, change[])` | anyone named by the owner | verifies, marks spent, pays `to`, records `change` as pending with refund to `hex(pk)`. A failed transfer goes to `hex(pk)` by callback | forged; spent; bad owner sig; `amount + fee + sum(change) != value`; fee below the change cost; change while halted; bucket empty |
-| `relay_claim(items[])` | relay | as redeem + owner sig; bad item returns false and continues; dedupes within the call | not relay; too many |
-| `halt()` | guardian | stops deposit, lock and new change | not guardian |
+| `new` | once | validates keys, roles and tiers | invalid or duplicate keys; a key equal to another's negation; tier values not strictly increasing; signer, relay and guardian not pairwise distinct or equal to the mint; network not 1 to 32 characters of `a-z 0-9 - _` |
+| `deposit(denom, blinded[])` | anyone, payable | records pending, prepaid storage and fee outside the reserve | halted; n not in {1,2,4..32}; the same point twice; over circulation cap; bad length |
+| `lock(id)` | signer | counts the tokens as issued (issued += n) and blocks `refund` for good, before any signature is published | halted; not signer; deadline passed; already locked |
+| `unlock(id)` | signer | reverses `lock` (issued -= n); the record refunds at its deadline. For records whose signatures were never broadcast | not signer; not locked; fewer live tokens in a tier than the record removes |
+| `issue(id, sigs[])` | signer | per-token verification; the event carries the blinded signatures. Allowed at any time after `lock`, also after `halt` | not locked; not signer; one bad signature fails all |
+| `refund(id)` | anyone after the deadline, unlocked records only | returns the deposit | too early; locked; issued |
+| `redeem(token, owner_sig, expires_at)` | anyone named by the owner | verifies, marks spent, pays `hex(pk)` | forged; spent; bad, expired or small-order owner sig; redeemed+1 > issued; bucket empty |
+| `spend(token, owner_sig, to, amount, fee, change[], expires_at)` | anyone named by the owner | verifies, marks spent, pays `to`, records `change` as pending with refund to `hex(pk)`. A failed transfer goes to `hex(pk)` by callback | forged; spent; bad, expired or small-order owner sig; `amount + fee + sum(change) != value`; the same change point twice; fee below the change cost; change while halted; bucket empty |
+| `relay_claim(items[])` | relay | as redeem, each item with its own `expires_at`; bad item returns false and continues; dedupes within the call; uses the relay's own bucket | not relay; more than 28 items |
+| `halt()` | guardian | stops `deposit`, `lock` and change in `spend` | not guardian |
+| `pending_scan(from, limit)` | view | live records among at most 256 ids from `from` (`limit` from 1 to 64, 0 counts as 1), and the id to continue from. `pending_deposits` returns the same records without the cursor | |
+
+**Storage layout.** The 2026-11-11 version changed the stored counters (two sliding buckets replace the hourly window) and the
+meaning of `locked_until` (`u64::MAX` once locked, no expiry). There is no migration and no upgrade method: a contract deployed with
+the earlier code must be redeployed, not upgraded.
+
+**Duplicate blinded points** are refused only within one record (one deposit, or the change of one spend). The same point in two
+different records is not detected: its second copy would get the same signature, and only one token could be spent; the loss falls
+on the depositor who sent it twice.
+
+**What `halt` does not stop:** `redeem`, `spend` without change, `relay_claim`, `refund`, `unlock`, and `issue` of a record already
+locked. It does not lower the redemption limits: a thief holding the signer key keeps redeeming at the buckets' pace after a halt.
+
+**Redemption limit.** Each tier has `hourly_redeem_cap`. A bucket gains one unit per redemption and drains at `cap` units per hour,
+continuously; a redemption that would take it above `cap` is refused. So at most `cap` redemptions at once and at most
+`cap + cap × t / 1 h` over any period `t` (below 2 × cap over any hour), with no reset on the hour. `redeem` and `spend` share one
+bucket; `relay_claim` has its own, so holders emptying the public bucket do not stop the relay. Together the two paths can therefore
+pay out up to twice the cap of a tier.
 
 **Invariant I1, checked after every method in tests:** `balance - storage_cost - liabilities` is positive and never decreases, with
 `liabilities = sum((issued - redeemed) * (value + storage_per_token)) + pending_held + signer_fees`.
 
 ### Issuance rule
 Blinded signatures are public as soon as an `issue` transaction is sent, even if it fails. The signer therefore locks first, reads
-the lock back, and only then publishes. It starts no first broadcast within an hour of the lock's expiry. It records each broadcast
-on disk before sending, and keeps retrying a broadcast record until the lock ends, across restarts.
+the lock back, and only then publishes. `lock` is the accounting commitment: it counts the tokens as issued, and a locked record can
+never be refunded, so public signatures can never be combined with a refund. A lock does not expire (`locked_until` reads
+`18446744073709551615` once locked) and `issue` can land at any time after it. The signer records each broadcast on disk before
+sending. It may `unlock` only a record it never broadcast (for example one it cannot sign); `unlock` is refused if a tier has fewer
+live tokens than the record removes. Remaining trust: a signer that broadcasts and then calls `unlock` anyway brings back the old
+risk (refund plus public signatures); a signer that locks and never issues nor unlocks leaves the deposit in the contract for good,
+counted as issued tokens. Both cost the depositor or rest on the signer, never on other holders as long as the signer is honest.
 
-**Remaining risk:** a signer that publishes, fails, and stays down or keeps failing until the lock ends leaves a window where the
-depositor can combine a refund with the public signature. `issue` of 64 tokens must be sent with enough gas; the amount is not measured yet.
+### What links a deposit to a spend
+Blinding hides which deposit a token came from, and BLS signatures are unique, so the signer cannot tag a token. Everything else is
+public on chain:
+- **Anonymity set.** `get_denom` publishes `issued` and `redeemed` per tier. A spend hides among at most `issued - redeemed` live
+  tokens of its tier, which `circulation_cap` also bounds. One live token in a tier means a certain link.
+- **Timing and count.** A deposit of `n` tokens of tier `d` by an account, followed by `n` spends of tier `d` soon after, links
+  without any cryptography. Amounts split over several tiers give simultaneous deposits from the same account.
+- **Amount and recipient.** `spend` publishes `to`, `amount`, `fee` and the tiers of the change; `redeem` pays `hex(pk)`. A
+  withdrawal of an amount close to a deposit can be guessed.
+- **Change chains.** A change record is public (`is_change`, depositor `hex(pk)` of the spent token). In a sparsely used tier the
+  next spend of that tier is likely the same user.
+- **Submitting account.** `spend` and `redeem` bind the signature to the calling account. Submitting with the account that
+  deposited links the two directly. No production client calls `spend` yet, so the submission path is not settled.
+- **Fee.** `fee` is free; an unusual value identifies the software or the relay.
+- **Fetching signatures.** The blinded signatures are in the `issue` event; whoever serves that read learns which deposit a client
+  is interested in, unless the read goes through Tor.
+Nothing in the contract enforces a minimum set size, a delay or a fixed fee; that is left to the client and is not built.
 
 ### Known limits, not fixed
-- Key theft lets the thief drain the reserve at the speed of the hourly bucket. No key rotation by design.
-- An attacker holding tokens can use up the hourly bucket of a tier at the start of each hour, freezing exits for that tier.
-- Refundable deposits of unsignable points can occupy the circulation cap for free.
+- Key theft lets the thief drain the reserve at the speed of the buckets (redeem/spend plus relay, if the relay accepts the stolen
+  tokens). No key rotation and no guardian brake on the limits by design.
+- An attacker holding tokens can keep the public bucket of a tier empty, slowing `redeem` and `spend` of that tier; the relay's
+  bucket is separate.
+- Refundable deposits of unsignable points can occupy the circulation cap for free; valid deposits sent faster than the signer can
+  process them push honest deposits past their deadline (not measured).
 - `redeem` and refunds of change pay the owner's implicit account in the clear.
+- Plain transfers (`redeem`, `refund`, signer fees, relay claims, fee to the submitter) have no callback: if the paid account was
+  deleted meanwhile, the amount comes back to the contract and stays there, unreachable. Solvency is unaffected. Only `spend`'s
+  payment has a callback.
+- Tier safety rests on independent keys. `new` refuses identical keys and a key with its negation, but cannot detect `k × pk` for a
+  known `k`: keys must be generated separately for each tier, never derived from one another.
 
 ## `ona-registry`
 `anchor(root, count)` by the aggregator. `propose(action)` then `confirm(id)` by the other owner, for `Publish`, `Revoke`,

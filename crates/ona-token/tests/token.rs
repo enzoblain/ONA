@@ -364,6 +364,90 @@ fn owner_signature_round_trip() {
     assert!(!verify_digest(&other.verifying_key().to_bytes(), &d, &sig));
 }
 
+/// The expiry is part of each digest, and the new formats differ from the legacy ones.
+#[test]
+fn digests_until_bind_the_expiry() {
+    let nf = [4u8; 32];
+    let change = [ChangeOut { denom_id: 1, blinded: [5u8; G1_LEN] }];
+    let s = spend_digest_until("m", "r", 2, &nf, "bob", 10, 1, &change, 100);
+    assert_eq!(s, spend_digest_until("m", "r", 2, &nf, "bob", 10, 1, &change, 100));
+    assert_ne!(s, spend_digest_until("m", "r", 2, &nf, "bob", 10, 1, &change, 101));
+    assert_ne!(s, spend_digest_until("m", "r", 2, &nf, "bob", 10, 1, &[], 100));
+    assert_ne!(s, spend_digest_until("m", "x", 2, &nf, "bob", 10, 1, &change, 100));
+    assert_ne!(s, spend_digest("m", "r", 2, &nf, "bob", 10, 1, &change));
+
+    let r = redeem_digest_until("m", "r", &nf, 100);
+    assert_ne!(r, redeem_digest_until("m", "r", &nf, 101));
+    assert_ne!(r, redeem_digest_until("m", "other", &nf, 100));
+    assert_ne!(r, redeem_digest("m", "r", &nf));
+
+    let c = claim_digest_until("m", "r", &nf, 100);
+    assert_ne!(c, claim_digest_until("m", "r", &nf, 101));
+    assert_ne!(c, claim_digest_until("m", "evil", &nf, 100));
+    assert_ne!(c, claim_digest("m", "r", &nf));
+}
+
+/// A small-order owner key accepts a trivial signature under a non-strict check.
+#[test]
+fn verify_digest_is_strict_about_small_order_keys() {
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut trivial = [0u8; 64];
+    trivial[0] = 1; // R = identity, S = 0
+    let d = claim_digest_until("mint", "relay", &[1u8; 32], 5);
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&identity).unwrap();
+    use ed25519_dalek::Verifier;
+    assert!(
+        key.verify(&d, &ed25519_dalek::Signature::from_bytes(&trivial)).is_ok(),
+        "the non-strict check accepts it, which is what the strict one must prevent"
+    );
+    assert!(!verify_digest(&identity, &d, &trivial));
+    assert!(is_weak_owner_key(&identity));
+    let invalid = (2u8..)
+        .map(|i| {
+            let mut k = [0u8; 32];
+            k[0] = i;
+            k
+        })
+        .find(|k| ed25519_dalek::VerifyingKey::from_bytes(k).is_err())
+        .unwrap();
+    assert!(is_weak_owner_key(&invalid), "not a valid key at all");
+    let owner = ed25519_dalek::SigningKey::generate(&mut OsRng);
+    assert!(!is_weak_owner_key(&owner.verifying_key().to_bytes()));
+    assert!(verify_digest(&owner.verifying_key().to_bytes(), &d, &sign_digest(&owner, &d)));
+}
+
+/// Secret buffers are wiped, by hand and on drop.
+#[test]
+fn secret_buffers_are_wiped() {
+    let mut s = Secret::new([7u8; 32]);
+    s.wipe();
+    assert_eq!(*s, [0u8; 32]);
+
+    let mut kept = core::mem::ManuallyDrop::new(Secret::new([9u8; 48]));
+    // SAFETY: dropped once; the inline bytes stay readable inside the ManuallyDrop.
+    unsafe { core::mem::ManuallyDrop::drop(&mut kept) };
+    let bytes: &[u8; 48] = &kept;
+    assert_eq!(*bytes, [0u8; 48], "drop wipes the buffer");
+
+    let mut buf = [5u8; 16];
+    wipe(&mut buf);
+    assert_eq!(buf, [0u8; 16]);
+}
+
+#[test]
+fn wiped_exports_match_the_plain_ones() {
+    let sk = keygen(&mut OsRng);
+    assert_eq!(*sk.to_secret(), sk.to_bytes());
+    let p = PendingToken::new(&mut OsRng, 3, DST).unwrap();
+    let mut v = p.to_secret_vec();
+    assert_eq!(&v[..], &p.to_secret_bytes()[..]);
+    let restored = PendingToken::from_secret_bytes(&v).unwrap();
+    assert_eq!(restored.blinded, p.blinded);
+    v.wipe();
+    assert!(v.iter().all(|b| *b == 0));
+}
+
 #[test]
 fn raw_encodings_are_uncompressed_and_validated() {
     let mut buf = [0u8; 32];
