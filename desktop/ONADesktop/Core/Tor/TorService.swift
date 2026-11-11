@@ -43,7 +43,7 @@ public final class TorService {
             "\"" + path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
         }
         return """
-        SocksPort 127.0.0.1:\(socksPort)
+        SocksPort 127.0.0.1:\(socksPort) OnionTrafficOnly
         DataDirectory \(quoted(data))
         HiddenServiceDir \(quoted(hs))
         HiddenServicePort 80 127.0.0.1:\(port)

@@ -106,8 +106,9 @@ impl TorService {
         // Paths quoted: they may contain spaces (Windows user folders). __OwningControllerProcess makes tor exit when
         // this app exits, even after a crash, so no orphan keeps the data folder locked. The SOCKS port listens on
         // 127.0.0.1 only: the app uses it to check that its onion address answers before showing the QR code.
+        // OnionTrafficOnly keeps other local programs from using it as a general anonymous proxy.
         std::fs::write(&torrc, format!(
-            "SocksPort 127.0.0.1:{}\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
+            "SocksPort 127.0.0.1:{} OnionTrafficOnly\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
              __OwningControllerProcess {}\nLog notice stdout\n",
             self.socks_port, escape(&data), escape(&hs), std::process::id()
         ))?;

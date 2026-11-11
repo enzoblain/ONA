@@ -37,6 +37,9 @@ enum SocksProbe {
         var limit = timeval(tv_sec: Int(timeout), tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &limit, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &limit, socklen_t(MemoryLayout<timeval>.size))
+        // A write after tor closed the connection must fail, not kill the app with SIGPIPE.
+        var noSigpipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
         var address = loopback(port: socksPort)
         guard withSockaddr(&address, { connect(fd, $0, $1) }) == 0 else { throw .socket("connect") }
         try send(fd, [5, 1, 0])
