@@ -58,6 +58,7 @@ struct ChatListView: View {
             List {
                 if case .failed = model.connection {
                     ConnectionStatusRow(connection: model.connection, computer: model.pairing?.name, viaTor: model.usesTor)
+                    if model.pairingLost { RescanButton(model: model) }
                 }
                 ForEach(model.chats) { chat in
                     NavigationLink(value: Route.chat(chat.id)) {
@@ -90,6 +91,10 @@ struct ChatListView: View {
                 Spacer()
                 ConnectionStatusRow(connection: model.connection, computer: model.pairing?.name, viaTor: model.usesTor)
                     .padding(.horizontal)
+                if model.pairingLost {
+                    RescanButton(model: model)
+                        .buttonStyle(.borderedProminent)
+                }
                 Spacer()
             }
         } else {
@@ -137,5 +142,19 @@ private struct ChatRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Shown when the computer no longer knows this phone: back to the pairing screen.
+struct RescanButton: View {
+    let model: RemoteModel
+
+    var body: some View {
+        Button {
+            model.rescan()
+        } label: {
+            Label("Rescanner le code de l'ordinateur", systemImage: "qrcode.viewfinder")
+        }
+        .accessibilityIdentifier("rescan")
     }
 }

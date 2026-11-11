@@ -166,6 +166,9 @@ final class ArtiTor: Sendable {
 struct TorError: LocalizedError, Sendable {
     let detail: String
 
+    /// The stream to the computer never opened: nothing was sent, so the request can be sent again safely.
+    var nothingSent: Bool { detail.contains("stream not open") }
+
     var errorDescription: String? {
         if detail.contains("bootstrap timed out") || detail.hasPrefix("bootstrap") {
             "Tor n'a pas pu démarrer. Ce réseau bloque peut-être Tor : essayez un autre réseau."

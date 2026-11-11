@@ -351,6 +351,25 @@ struct ChatModelTests {
         #expect(model.actionError == "Ce téléphone n'est appairé à aucun ordinateur.")
     }
 
+    @Test func aLostPairingOffersToRescan() async throws {
+        let model = await paired()
+        #expect(!model.pairingLost)
+        computer.lock.withLock { computer.refuseAll = (403, "missing or wrong token") }
+        await model.refresh()
+        #expect(model.pairingLost)
+        model.rescan()
+        #expect(!model.isPaired)
+        #expect(!model.pairingLost)
+        #expect(try store.load() == nil)
+    }
+
+    @Test func anOrdinaryFailureDoesNotAskToRescan() async {
+        let model = await paired()
+        computer.lock.withLock { computer.refuseAll = (409, "empty or too long message") }
+        await model.refresh()
+        #expect(!model.pairingLost)
+    }
+
     @Test func unpairForgetsEverything() async throws {
         let model = await paired()
         model.unpair()
