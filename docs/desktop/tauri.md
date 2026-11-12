@@ -111,7 +111,14 @@ use the real one, write `model.json` in the app's data folder (next to `pairing.
 ```
 
 The names are those of `ona real` (docs/INSTALL.md, "Use the real model"); `token_budget` is for each conversation.
-`tokens_file` holds one request token per line, readable by its owner only.
+`tokens_file` holds one request token per line, readable by its owner only. It may be left out for a test relay that
+asks for none (`ona-relay` refuses a chat without one).
+
+**A relay published for named clients only** (docs/TOR.md, "onion client authorization"): when `relay_url` is an
+`http://…onion` address, the app makes an x25519 key once (`tor/relay-client/key`, 0600), gives tor its secret half for
+that address only (`ClientOnionAuthDir`), and shows the public half in the phone dialog, under "Relais": the relay's
+operator adds that line to the service's `authorized_clients/`. Checked with two `tor` (0.4.9) on this Mac: a client set
+up this way got HTTP 200 from a service restricted to its key. Not checked against the team's relay yet.
 
 - Every connection ona-core opens goes through the app's own tor, on a second SOCKS port that is not onion-only
   (`ONA_REQUIRE_TOR`). The real model is used only in Tor mode, once the QR code is shown; before that, or in the

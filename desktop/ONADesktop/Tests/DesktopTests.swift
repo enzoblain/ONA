@@ -964,3 +964,27 @@ struct OnionPublishedTests {
         #expect(pairing.onionClientAuth != line)
     }
 }
+
+
+@MainActor
+@Suite struct RelayClientTests {
+    @Test func oneClientKeyForARestrictedRelay() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "ona-relay-\(UUID().uuidString)")
+        let line = try TorService.relayClientAuth(dir: dir)
+        #expect(line.hasPrefix("descriptor:x25519:") && line.count == 18 + 52)
+        #expect(try TorService.relayClientAuth(dir: dir) == line, "the same key next time")
+        let onion = String(repeating: "c", count: 56)
+        let auth = try TorService.relayAuthDir(onion: onion, dir: dir)
+        let text = try String(contentsOf: auth.appending(path: "relay.auth_private"), encoding: .utf8)
+        #expect(text.hasPrefix(onion + ":descriptor:x25519:") && text.hasSuffix("\n"))
+    }
+
+    @Test func theRelayOnionComesFromModelJSON() throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "ona-model-\(UUID().uuidString).json")
+        let onion = String(repeating: "d", count: 56)
+        try Data(#"{"relay_url":"http://\#(onion).onion/","model":"m","max_tokens":1,"token_budget":1}"#.utf8).write(to: file)
+        #expect(RealModel.relayOnion(file: file) == onion)
+        try Data(#"{"relay_url":"https://relay.example.org"}"#.utf8).write(to: file)
+        #expect(RealModel.relayOnion(file: file) == nil)
+    }
+}

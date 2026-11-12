@@ -81,8 +81,10 @@ pub struct ModelSettings {
     pub max_tokens: u32,
     /// `ONA_REAL_TOKEN_BUDGET`, for each conversation.
     pub token_budget: u64,
-    /// `ONA_REAL_TOKENS_FILE`: one request token per line, readable by its owner only.
-    pub tokens_file: PathBuf,
+    /// `ONA_REAL_TOKENS_FILE`: one request token per line, readable by its owner only. Optional: a test relay may ask
+    /// for none (`ona-relay` refuses a chat without one).
+    #[serde(default)]
+    pub tokens_file: Option<PathBuf>,
 }
 
 impl ModelSettings {
@@ -91,13 +93,21 @@ impl ModelSettings {
         load_settings(data_dir, FILE)
     }
 
+    /// The relay's onion address without `.onion`, when it is one: the app's tor presents its client key to it, in
+    /// case the relay is published for named clients only (docs/TOR.md, "onion client authorization").
+    pub fn relay_onion(&self) -> Option<String> {
+        let rest = self.relay_url.strip_prefix("http://")?;
+        let host = rest.split(['/', ':']).next()?;
+        ona_core::tor::is_onion_v3(host).then(|| host.trim_end_matches(".onion").to_owned())
+    }
+
     fn lookup(&self, name: &str) -> Option<String> {
         Some(match name {
             "ONA_REAL_RELAY_URL" => self.relay_url.clone(),
             "ONA_REAL_MODEL" => self.model.clone(),
             "ONA_REAL_MAX_TOKENS" => self.max_tokens.to_string(),
             "ONA_REAL_TOKEN_BUDGET" => self.token_budget.to_string(),
-            "ONA_REAL_TOKENS_FILE" => self.tokens_file.to_string_lossy().into_owned(),
+            "ONA_REAL_TOKENS_FILE" => self.tokens_file.as_ref()?.to_string_lossy().into_owned(),
             _ => return None,
         })
     }
@@ -195,7 +205,7 @@ mod tests {
             model: "test-model".into(),
             max_tokens: 200,
             token_budget: 2000,
-            tokens_file,
+            tokens_file: Some(tokens_file),
         }
     }
 
@@ -271,5 +281,18 @@ mod tests {
         assert_eq!((reply["ok"].clone(), reply["mode"].clone()), (json!(false), json!("real")));
         assert!(reply["error"].as_str().unwrap().contains("wallet key"), "{reply}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_relay_without_request_tokens_and_its_onion() {
+        let onion = format!("{}.onion", "a".repeat(56));
+        let settings: ModelSettings = serde_json::from_value(json!({
+            "relay_url": format!("http://{onion}/"), "model": "m", "max_tokens": 200, "token_budget": 2000,
+        })).unwrap();
+        assert_eq!(settings.tokens_file, None);
+        assert_eq!(settings.relay_onion(), Some("a".repeat(56)));
+        assert!(real_core(&settings, Some(9)).is_ok(), "no tokens file is allowed");
+        let https = ModelSettings { relay_url: "https://relay.example.org".into(), ..settings };
+        assert_eq!(https.relay_onion(), None);
     }
 }

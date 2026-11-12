@@ -42,6 +42,9 @@ pub struct TorService {
     socks_port: u16,
     /// A second SOCKS port on 127.0.0.1, for everything ona-core sends (the relay, the pool agent, NEAR RPC nodes).
     core_socks_port: u16,
+    /// The relay's onion address (56 characters, without `.onion`) when it is restricted to named clients: tor then
+    /// presents this app's client key to it (`ClientOnionAuthDir`).
+    relay_onion: Option<String>,
     /// An attempt to reach the onion address, running on its own thread.
     probe: Option<Receiver<Result<(), String>>>,
     last_probe: Option<Instant>,
@@ -70,7 +73,52 @@ fn find_binary(candidates: impl Iterator<Item = PathBuf>, path: &[PathBuf], name
 
 impl TorService {
     pub fn new(root: PathBuf) -> Self {
-        Self { state: TorState::Off, root, child: None, started: None, socks_port: 0, core_socks_port: 0, probe: None, last_probe: None }
+        Self { state: TorState::Off, root, child: None, started: None, socks_port: 0, core_socks_port: 0, relay_onion: None, probe: None, last_probe: None }
+    }
+
+    /// The relay to present this app's client key to, from the next start of tor.
+    pub fn set_relay_onion(&mut self, onion: Option<String>) {
+        self.relay_onion = onion;
+    }
+
+    /// The line to give the relay's operator, for `authorized_clients/` of the relay's onion service: made once and
+    /// kept in `tor/relay-client/` (the secret half stays there, tor reads it from that folder).
+    pub fn relay_client_auth(&self) -> std::io::Result<String> {
+        let secret = self.relay_client_secret()?;
+        let public = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret));
+        Ok(format!("descriptor:x25519:{}", crate::protocol::base32(public.as_bytes())))
+    }
+
+    fn relay_client_dir(&self) -> PathBuf {
+        self.root.join("relay-client")
+    }
+
+    /// This app's x25519 secret for restricted relays, made on first use.
+    fn relay_client_secret(&self) -> std::io::Result<[u8; 32]> {
+        let dir = self.relay_client_dir();
+        private_dir(&dir)?;
+        let file = dir.join("key");
+        if let Ok(bytes) = std::fs::read(&file) {
+            if let Ok(secret) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                return Ok(secret);
+            }
+        }
+        let mut secret = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
+        crate::pairing::write_private(&file, &secret)?;
+        Ok(secret)
+    }
+
+    /// The `ClientOnionAuthDir` tor reads, holding the key for `relay_onion` only. None without a restricted relay.
+    fn relay_auth_dir(&self) -> std::io::Result<Option<PathBuf>> {
+        let Some(onion) = &self.relay_onion else { return Ok(None) };
+        let secret = self.relay_client_secret()?;
+        let dir = self.relay_client_dir().join("auth");
+        let _ = std::fs::remove_dir_all(&dir);
+        private_dir(&dir)?;
+        let line = format!("{onion}:descriptor:x25519:{}\n", crate::protocol::base32(&secret));
+        crate::pairing::write_private(&dir.join("relay.auth_private"), line.as_bytes())?;
+        Ok(Some(dir))
     }
 
     pub fn onion(&self) -> Option<&str> {
@@ -123,6 +171,10 @@ impl TorService {
             private_dir(&clients)?;
             crate::pairing::write_private(&clients.join("phone.auth"), format!("{line}\n").as_bytes())?;
         }
+        let relay_auth = match self.relay_auth_dir()? {
+            Some(dir) => format!("ClientOnionAuthDir \"{}\"\n", escape(&dir)),
+            None => String::new(),
+        };
         let torrc = self.root.join("torrc");
         // Paths quoted: they may contain spaces (Windows user folders). __OwningControllerProcess makes tor exit when
         // this app exits, even after a crash, so no orphan keeps the data folder locked. The SOCKS port listens on
@@ -132,7 +184,7 @@ impl TorService {
         // ona-core's: the relay and the NEAR RPC nodes are ordinary host names, so it cannot be onion-only.
         std::fs::write(&torrc, format!(
             "SocksPort 127.0.0.1:{} OnionTrafficOnly ExtendedErrors\nSocksPort 127.0.0.1:{}\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
-             __OwningControllerProcess {}\nLog notice stdout\n",
+             __OwningControllerProcess {}\nLog notice stdout\n{relay_auth}",
             self.socks_port, self.core_socks_port, escape(&data), escape(&hs), std::process::id()
         ))?;
         let mut command = Command::new(binary);
@@ -354,5 +406,24 @@ mod tests {
     #[test]
     fn escapes_windows_paths_for_torrc() {
         assert_eq!(escape(Path::new("C:\\Users\\A B\\hs")), "C:\\\\Users\\\\A B\\\\hs");
+    }
+
+    /// The relay's client key is made once and kept; tor gets the secret half for that relay only, the operator the
+    /// public half.
+    #[test]
+    fn keeps_one_client_key_for_a_restricted_relay() {
+        let root = std::env::temp_dir().join(format!("ona-tor-relay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut service = TorService::new(root.clone());
+        assert_eq!(service.relay_auth_dir().unwrap(), None);
+        let onion = "b".repeat(56);
+        service.set_relay_onion(Some(onion.clone()));
+        let dir = service.relay_auth_dir().unwrap().unwrap();
+        let line = std::fs::read_to_string(dir.join("relay.auth_private")).unwrap();
+        assert!(line.starts_with(&format!("{onion}:descriptor:x25519:")) && line.ends_with('\n'), "{line}");
+        let public = service.relay_client_auth().unwrap();
+        assert!(public.starts_with("descriptor:x25519:") && public.len() == 18 + 52, "{public}");
+        assert_eq!(TorService::new(root.clone()).relay_client_auth().unwrap(), public, "the same key after a restart");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

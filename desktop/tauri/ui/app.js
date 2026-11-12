@@ -142,6 +142,8 @@ function drawPhone(state) {
     ? "Le serveur écoute seulement sur cet ordinateur (127.0.0.1) et est publié en service .onion par Tor."
     : "Version de développement : le serveur écoute sur le réseau local, en clair. Tout appareil de ce réseau voit les échanges.";
   $("reachable").textContent = state.reachable ? `Adresse : ${state.reachable}` : "";
+  $("relay-client").hidden = !state.relay_client;
+  $("relay-client-line").textContent = state.relay_client || "";
   $("server-error").hidden = !state.server_error;
   $("server-error").textContent = state.server_error || "";
   $("last-request").textContent = state.last_request ? `Dernière requête du téléphone : ${state.last_request}` : "";

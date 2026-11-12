@@ -102,6 +102,7 @@ final class DesktopModel {
                 self.serverError = message
                 self.port = port
                 if let port, self.mode == .tor {
+                    self.tor.relayOnion = RealModel.relayOnion()
                     self.torAuth = self.pairing.onionClientAuth
                     self.tor.start(port: port, clientAuth: self.torAuth)
                 } else if port == nil { self.tor.stop() }

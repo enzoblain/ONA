@@ -20,6 +20,18 @@ public enum RealModel {
         URL.applicationSupportDirectory.appending(path: "ONA/pool.json")
     }
 
+    /// The relay's onion address without `.onion`, when `model.json` names one: tor presents the app's client key to it.
+    public static func relayOnion(file: URL = file) -> String? {
+        guard let data = try? Data(contentsOf: file),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let url = object["relay_url"] as? String, url.hasPrefix("http://") else { return nil }
+        let host = url.dropFirst("http://".count).split(whereSeparator: { $0 == "/" || $0 == ":" }).first.map(String.init) ?? ""
+        guard host.hasSuffix(".onion") else { return nil }
+        let name = String(host.dropLast(".onion".count))
+        let valid = name.count == 56 && name.allSatisfy { ("a"..."z").contains($0) || ("2"..."7").contains($0) }
+        return valid ? name : nil
+    }
+
     /// The settings handed to `ona_core_new_with`, as JSON text.
     public static func setup(file: URL = file, coreSocks: UInt16?) -> String {
         settings(file: file, key: "model", base: ["model": NSNull()], coreSocks: coreSocks)
