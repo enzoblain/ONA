@@ -327,6 +327,14 @@ pub fn parse_outcome(result: &Value) -> Result<Outcome> {
     Ok(Outcome { tgas, failure: None, value, failed_receipts, tx_hash: None })
 }
 
+/// A transaction signed and not sent yet ([`Client::sign_tx`]).
+pub struct SignedTx {
+    /// The hash the chain will know it by.
+    pub hash: [u8; 32],
+    signer: String,
+    bytes: Vec<u8>,
+}
+
 /// `send_tx` gave no clear answer and the node could not say what became of the transaction. It may
 /// still be included until its block hash expires. Ask [`Client::tx_status`] before sending anything that
 /// would repeat it.
@@ -569,10 +577,23 @@ impl Client {
     /// still cannot say, the error is a [`TxUnknown`] carrying the hash. The transaction is never sent
     /// twice.
     pub fn send(&self, signer: &str, receiver: &str, actions: Vec<Action>) -> Result<Outcome> {
+        let tx = self.sign_tx(signer, receiver, actions)?;
+        self.send_signed(&tx)
+    }
+
+    /// Signs a transaction without sending it. Its hash, known from here, is the name the chain will know it by:
+    /// a caller can record it before [`Client::send_signed`] broadcasts it, so a crash in between loses nothing.
+    pub fn sign_tx(&self, signer: &str, receiver: &str, actions: Vec<Action>) -> Result<SignedTx> {
         check_account_id(signer)?;
         check_account_id(receiver)?;
         self.check_url()?;
-        let (signed, hash) = self.sign(signer, receiver, &actions)?;
+        let (bytes, hash) = self.sign(signer, receiver, &actions)?;
+        Ok(SignedTx { hash, signer: signer.to_string(), bytes })
+    }
+
+    /// Sends a transaction signed by [`Client::sign_tx`] and waits for its final result, as [`Client::send`].
+    pub fn send_signed(&self, tx: &SignedTx) -> Result<Outcome> {
+        let (signed, hash, signer) = (&tx.bytes, tx.hash, tx.signer.as_str());
         let unknown = |cause: String| anyhow::Error::new(TxUnknown { hash, signer: signer.to_string(), cause });
 
         // `broadcast_tx_commit` only waits for optimistic execution. A signature or a payment must
@@ -951,6 +972,17 @@ mod tests {
         let client = Client::new(&rpc.url, key());
         let outcome = client.send("a.testnet", "b.testnet", vec![Action::Transfer(1)]).unwrap();
         assert_eq!(outcome.tx_hash, Some(expected_hash()));
+        assert_eq!(rpc.methods(), ["query", "send_tx"]);
+    }
+
+    #[test]
+    fn the_hash_is_known_before_anything_is_sent() {
+        let rpc = FakeRpc::start(|method, _| if method == "query" { access_key() } else { final_success() });
+        let client = Client::new(&rpc.url, key());
+        let tx = client.sign_tx("a.testnet", "b.testnet", vec![Action::Transfer(1)]).unwrap();
+        assert_eq!(tx.hash, expected_hash());
+        assert_eq!(rpc.methods(), ["query"], "signed, not sent");
+        assert_eq!(client.send_signed(&tx).unwrap().tx_hash, Some(expected_hash()));
         assert_eq!(rpc.methods(), ["query", "send_tx"]);
     }
 

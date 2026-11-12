@@ -42,7 +42,7 @@ use rand::{Rng, RngCore};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::chain::{CallError, Note, PoolChain, VaultInfo};
+use crate::chain::{Call, CallError, Note, PoolChain, VaultInfo};
 use crate::keys::AgentKeys;
 use crate::nep413;
 use crate::planner::{self, Action, Memory, Params};
@@ -357,10 +357,14 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
         if let Err(e) = self.chain.begin() {
             return Self::chain_err(e);
         }
-        match self.chain.full_access_key(&request.account, &request.proof.public_key) {
-            Ok(true) => {}
-            Ok(false) => return refused(401, "the signing key is not a full-access key of this account"),
-            Err(e) => return Self::chain_err(e),
+        // Checked when the issue opens. A replay of an open issue is not checked again: the account may have removed
+        // the key since, and the client would forget notes the agent can still sign.
+        if self.store.get(&id).is_none() {
+            match self.chain.full_access_key(&request.account, &request.proof.public_key) {
+                Ok(true) => {}
+                Ok(false) => return refused(401, "the signing key is not a full-access key of this account"),
+                Err(e) => return Self::chain_err(e),
+            }
         }
         let lock_key = format!("a:{}", request.account);
         match self.store.get(&lock_key).and_then(|v| v.as_str().map(String::from)) {
@@ -467,15 +471,20 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
                 }
                 _ => {}
             }
+            // Signed first: its hash is recorded with the step before the transaction leaves, so a crash in between
+            // still lets the agent find it.
+            let hash = match self.chain.prepare(&Call::IssueCash { account: account.clone(), tier, count }) {
+                Ok(hash) => hash,
+                Err(e) => return Reply::Pending(format!("cannot sign the cash issue yet: {}", e.message())),
+            };
             record["steps"][i]["s"] = json!("sent");
             record["steps"][i]["issued_before"] = json!(issued_now.to_string());
             record["steps"][i]["sent_at"] = json!(now);
+            record["steps"][i]["tx"] = json!(hex(&hash));
             if let Err(r) = self.put(id, record.clone()) {
                 return r;
             }
-            let result = self.chain.issue_cash(&account, tier, count);
-            let hash = self.chain.take_last_tx();
-            match result {
+            match self.chain.send_prepared() {
                 // Confirmed below, by a cross-checked read, before anything is signed.
                 Ok(()) => {
                     if let Err(e) = self.chain.begin() {
@@ -496,12 +505,10 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
                     record["steps"][i]["s"] = json!("new");
                     return self.close_refused(id, &mut record, &account, &format!("refused by the chain: {e}"), now);
                 }
-                Err(CallError::Unknown(e)) => {
-                    if let Some(hash) = hash {
-                        record["steps"][i]["tx"] = json!(hex(&hash));
-                        let _ = self.put(id, record.clone());
-                    }
-                    return Reply::Pending(format!("outcome unknown: {e}"));
+                // One node's "failed" is confirmed by both read endpoints (above, on the next pass) before the issue
+                // is closed: until then it waits as an unknown outcome.
+                Err(CallError::Failed(e) | CallError::Unknown(e)) => {
+                    return Reply::Pending(format!("outcome not confirmed: {e}"));
                 }
             }
         }
@@ -778,6 +785,9 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
             Ok(false) => {}
             Err(e) => return Self::chain_err(e),
         }
+        if record["s"] == "sent" && self.all_failed(&record) {
+            return self.release_note(id, &nf, "its transaction failed on chain", now);
+        }
         if now.saturating_add(SEND_MARGIN_NS) > expires_at {
             if now > expires_at || record["s"] == "queued" {
                 return self.release_note(id, &nf, "the owner's signature expired before the request could be sent", now);
@@ -816,43 +826,51 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
                 return r;
             }
         }
+        let call = match kind.as_str() {
+            "enter" => Call::Enter { vault, note, owner_sig, outputs, expires_at },
+            "leave" => Call::Leave { vault, note, owner_sig, outputs, expires_at },
+            _ => Call::PayExit { note, owner_sig, to: p["to"].as_str().unwrap_or_default().to_string(), expires_at },
+        };
+        // Signed first, and its hash recorded with the request before it leaves: after a crash in between, the
+        // agent still finds its own transaction and can confirm it.
+        let hash = match self.chain.prepare(&call) {
+            Ok(hash) => hash,
+            Err(e) => return Reply::Pending(format!("cannot sign the transaction yet: {}", e.message())),
+        };
         let mut sent = record.clone();
         sent["s"] = json!("sent");
         sent["w"] = json!(window);
+        let mut txs = sent["txs"].as_array().cloned().unwrap_or_default();
+        txs.push(json!(hex(&hash)));
+        sent["txs"] = json!(txs);
         if let Err(r) = self.put(id, sent.clone()) {
             return r;
         }
         if kind != "enter" {
             self.add_hour(scope, now, value);
         }
-        let result = match kind.as_str() {
-            "enter" => self.chain.enter(vault, &note, &owner_sig, &outputs, expires_at),
-            "leave" => self.chain.leave(vault, &note, &owner_sig, &outputs, expires_at),
-            _ => self.chain.pay_exit(&note, &owner_sig, p["to"].as_str().unwrap_or_default(), expires_at),
-        };
-        // Every transaction sent for this request, so its own success can be confirmed.
-        if let Some(hash) = self.chain.take_last_tx() {
-            let mut txs = sent["txs"].as_array().cloned().unwrap_or_default();
-            txs.push(json!(hex(&hash)));
-            sent["txs"] = json!(txs);
-            if let Err(r) = self.put(id, sent.clone()) {
-                return r;
-            }
-        }
-        match result {
-            Ok(()) | Err(CallError::Unknown(_)) => {
-                // Confirmed by cross-checked reads, never by the sending endpoint's word.
+        match self.chain.send_prepared() {
+            Ok(()) | Err(CallError::Unknown(_) | CallError::Failed(_)) => {
+                // Confirmed by cross-checked reads, never by the sending endpoint's word, whether it says success or
+                // failure.
                 if let Err(e) = self.chain.begin() {
                     return Self::chain_err(e);
                 }
                 match self.chain.is_spent(&nf) {
                     Ok(true) => self.confirm_sent(id, &sent, &nf, expires_at, now),
+                    Ok(false) if self.all_failed(&sent) => self.release_note(id, &nf, "its transaction failed on chain", now),
                     Ok(false) => Reply::Pending("sent, not seen on chain yet".into()),
                     Err(e) => Self::chain_err(e),
                 }
             }
-            Err(CallError::Refused(e)) => self.release_note(id, &nf, &format!("refused by the chain: {e}"), now),
+            Err(CallError::Refused(e)) => self.release_note(id, &nf, &format!("not sent: {e}"), now),
         }
+    }
+
+    /// Every transaction sent for this request has a final failure on both read endpoints.
+    fn all_failed(&mut self, record: &Value) -> bool {
+        let txs: Vec<[u8; 32]> = record["txs"].as_array().map(|a| a.iter().filter_map(|h| h.as_str().and_then(unhex32)).collect()).unwrap_or_default();
+        !txs.is_empty() && txs.iter().all(|h| matches!(self.chain.tx_outcome(h), Ok(Some(false))))
     }
 
     /// The note is spent. Signed only if one of this request's own transactions succeeded, as both read endpoints
@@ -877,7 +895,7 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
     fn fresh_price(&mut self, vault: u32, now: u64) -> Result<(), Reply> {
         let info = self.chain.vault(vault).map_err(Self::chain_err)?;
         if now >= info.synced_at.saturating_add(SYNC_BEFORE_USE_NS) {
-            self.chain.sync(vault).map_err(|e| Reply::Pending(format!("vault sync first: {}", e.message())))?;
+            self.chain.run(&Call::Sync(vault)).map_err(|e| Reply::Pending(format!("vault sync first: {}", e.message())))?;
         }
         Ok(())
     }
@@ -1133,7 +1151,7 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
         if now < info.synced_at.saturating_add(SYNC_BEFORE_USE_NS) {
             return Some(info);
         }
-        self.chain.sync(v).ok()?;
+        self.chain.run(&Call::Sync(v)).ok()?;
         self.chain.begin().ok()?;
         self.chain.vault(v).ok().filter(|info| now < info.synced_at.saturating_add(SYNC_BEFORE_USE_NS))
     }
@@ -1173,10 +1191,10 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
         let plan = planner::plan(&self.params, now, &config, &vaults, &memory, &demand);
         for action in &plan.actions {
             let result = match *action {
-                Action::Sync(v) => self.chain.sync(v),
-                Action::Place(v, amount) => self.chain.place(v, amount),
-                Action::Unstake(v, amount) => self.chain.unstake(v, amount),
-                Action::Withdraw(v, amount) => self.chain.withdraw(v, amount),
+                Action::Sync(v) => self.chain.run(&Call::Sync(v)),
+                Action::Place(v, amount) => self.chain.run(&Call::Place(v, amount)),
+                Action::Unstake(v, amount) => self.chain.run(&Call::Unstake(v, amount)),
+                Action::Withdraw(v, amount) => self.chain.run(&Call::Withdraw(v, amount)),
             };
             if result.is_ok() {
                 memory.apply(action, now);

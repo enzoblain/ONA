@@ -10,7 +10,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use ona_agent::api::{self, Limits};
-use ona_agent::chain::{CallError, CashInfo, ConfigInfo, HolderInfo, Note, PoolChain, VaultInfo};
+use ona_agent::chain::{Call, CallError, CashInfo, ConfigInfo, HolderInfo, Note, PoolChain, VaultInfo};
 use ona_agent::keys::AgentKeys;
 use ona_agent::nep413;
 use ona_agent::planner::{Action, Params};
@@ -43,7 +43,13 @@ enum Next {
     LostUnknown,
     /// The sending endpoint says success, nothing happened.
     Lie,
+    /// Rejected by the node before it could be included: certainly not done.
+    Rejected,
+    /// Lands and succeeds, but the sending node reports a failure.
+    FalseFailure,
 }
+
+type Effect = Box<dyn FnOnce(&mut State) -> Result<(), String> + Send>;
 
 #[derive(Clone, Debug)]
 struct FakeVault {
@@ -70,7 +76,10 @@ struct State {
     /// Final outcome of each transaction both read endpoints know, by hash.
     outcomes: BTreeMap<[u8; 32], bool>,
     tx_count: u64,
-    last_tx: Option<[u8; 32]>,
+    /// Signed and not sent yet: name, effect, hash.
+    prepared: Option<(String, Effect, [u8; 32])>,
+    /// The agent crashes right after the next transaction leaves.
+    crash_after_send: bool,
     /// The second read endpoint does not know any transaction.
     second_unsure: bool,
     cash_open: bool,
@@ -95,7 +104,8 @@ fn world(keys: &AgentKeys) -> Shared {
         calls: vec![],
         outcomes: BTreeMap::new(),
         tx_count: 0,
-        last_tx: None,
+        prepared: None,
+        crash_after_send: false,
         second_unsure: false,
         cash_open: false,
         sent_at: vec![],
@@ -115,33 +125,70 @@ fn price(v: &FakeVault) -> u128 {
 struct FakeChain(Shared);
 
 impl FakeChain {
-    /// Applies `effect` according to the injected outcome.
-    fn tx(&self, name: &str, effect: impl FnOnce(&mut State) -> Result<(), String>) -> Result<(), CallError> {
-        let mut s = self.0.lock().unwrap();
-        s.calls.push(name.to_string());
-        if matches!(name, "enter" | "leave" | "pay_exit") {
-            let now = s.now;
-            s.sent_at.push((name.to_string(), now));
-        }
-        let next = std::mem::replace(&mut s.next, Next::Normal);
-        s.tx_count += 1;
-        let mut hash = [0u8; 32];
-        hash[..8].copy_from_slice(&s.tx_count.to_le_bytes());
-        s.last_tx = Some(hash);
-        let landed = match next {
-            Next::Refuse => Some(Err("refused".to_string())),
-            Next::Lie | Next::LostUnknown => None,
-            Next::LandsUnknown | Next::Normal => Some(effect(&mut s)),
-        };
-        if let Some(result) = &landed {
-            s.outcomes.insert(hash, result.is_ok());
-        }
-        match (next, landed) {
-            (Next::Lie, _) => Ok(()),
-            (Next::LostUnknown, _) => Err(CallError::Unknown("timeout".into())),
-            (Next::LandsUnknown, Some(Ok(()))) => Err(CallError::Unknown("timeout".into())),
-            (_, Some(Err(e))) => Err(CallError::Refused(e)),
-            _ => Ok(()),
+    fn effect(call: &Call) -> (&'static str, Effect) {
+        match call.clone() {
+            Call::IssueCash { account, tier, count } => ("issue_cash", Box::new(move |s: &mut State| {
+                let value = CASH[usize::from(tier)] * u128::from(count);
+                let h = s.holders.get_mut(&account).ok_or("not a depositor")?;
+                if h.0 - h.1 < value {
+                    return Err("more than this account's deposits".into());
+                }
+                h.1 += value;
+                s.cash_liquid += value;
+                Ok(())
+            })),
+            Call::Enter { vault, note, outputs, .. } => {
+                let nf = digests::cash_nullifier(note.tier, &note.pk, &note.nonce);
+                ("enter", Box::new(move |s: &mut State| {
+                    spend(s, nf)?;
+                    let shares: u128 = outputs.iter().map(|(t, c)| SHARES[usize::from(*t)] * u128::from(*c)).sum();
+                    let v = &mut s.vaults[vault as usize];
+                    let cost = shares * price(v);
+                    v.liquid += cost;
+                    v.total_shares += shares;
+                    s.cash_liquid -= cost.min(CASH[usize::from(note.tier)]);
+                    Ok(())
+                }))
+            }
+            Call::Leave { vault, note, .. } => {
+                let nf = digests::note_nullifier(vault, note.tier, &note.pk, &note.nonce);
+                ("leave", Box::new(move |s: &mut State| {
+                    let v = &mut s.vaults[vault as usize];
+                    let value = SHARES[usize::from(note.tier)] * price(v);
+                    if value > v.liquid {
+                        return Err("not enough liquid funds in this vault".into());
+                    }
+                    spend(s, nf)?;
+                    let v = &mut s.vaults[vault as usize];
+                    v.liquid -= value;
+                    v.total_shares -= SHARES[usize::from(note.tier)];
+                    s.cash_liquid += value - FEE;
+                    Ok(())
+                }))
+            }
+            Call::PayExit { note, to, .. } => {
+                let nf = digests::cash_nullifier(note.tier, &note.pk, &note.nonce);
+                ("pay_exit", Box::new(move |s: &mut State| {
+                    spend(s, nf)?;
+                    let h = s.holders.get_mut(&to).ok_or("exits go only to an account that deposited")?;
+                    h.2 += CASH[usize::from(note.tier)];
+                    s.cash_liquid -= CASH[usize::from(note.tier)];
+                    Ok(())
+                }))
+            }
+            Call::Place(vault, amount) => ("place", Box::new(move |s: &mut State| {
+                let v = &mut s.vaults[vault as usize];
+                v.liquid -= amount;
+                v.placed += amount;
+                Ok(())
+            })),
+            Call::Sync(vault) => ("sync", Box::new(move |s: &mut State| {
+                let now = s.now;
+                s.vaults[vault as usize].synced_at = now;
+                Ok(())
+            })),
+            Call::Unstake(..) => ("unstake", Box::new(|_: &mut State| Ok(()))),
+            Call::Withdraw(..) => ("withdraw", Box::new(|_: &mut State| Ok(()))),
         }
     }
 }
@@ -209,84 +256,50 @@ impl PoolChain for FakeChain {
     fn full_access_key(&mut self, account: &str, pk: &[u8; 32]) -> Result<bool, String> {
         Ok(self.0.lock().unwrap().full_keys.get(account).is_some_and(|k| k.contains(pk)))
     }
-    fn issue_cash(&mut self, account: &str, tier: u8, count: u64) -> Result<(), CallError> {
-        let account = account.to_string();
-        self.tx("issue_cash", move |s| {
-            let value = CASH[usize::from(tier)] * u128::from(count);
-            let h = s.holders.get_mut(&account).ok_or("not a depositor")?;
-            if h.0 - h.1 < value {
-                return Err("more than this account's deposits".into());
+    fn prepare(&mut self, call: &Call) -> Result<[u8; 32], CallError> {
+        let (name, effect) = Self::effect(call);
+        let mut s = self.0.lock().unwrap();
+        s.tx_count += 1;
+        let mut hash = [0u8; 32];
+        hash[..8].copy_from_slice(&s.tx_count.to_le_bytes());
+        s.prepared = Some((name.to_string(), effect, hash));
+        Ok(hash)
+    }
+    /// Applies the prepared transaction according to the injected outcome.
+    fn send_prepared(&mut self) -> Result<(), CallError> {
+        let (reply, crash) = {
+            let mut s = self.0.lock().unwrap();
+            let (name, effect, hash) = s.prepared.take().ok_or_else(|| CallError::Refused("nothing prepared".into()))?;
+            s.calls.push(name.clone());
+            if matches!(name.as_str(), "enter" | "leave" | "pay_exit") {
+                let now = s.now;
+                s.sent_at.push((name, now));
             }
-            h.1 += value;
-            s.cash_liquid += value;
-            Ok(())
-        })
-    }
-    fn enter(&mut self, vault: u32, note: &Note, _: &[u8; 64], outputs: &[(u8, u64)], _: u64) -> Result<(), CallError> {
-        let nf = digests::cash_nullifier(note.tier, &note.pk, &note.nonce);
-        let (tier, outputs) = (note.tier, outputs.to_vec());
-        self.tx("enter", move |s| {
-            spend(s, nf)?;
-            let shares: u128 = outputs.iter().map(|(t, c)| SHARES[usize::from(*t)] * u128::from(*c)).sum();
-            let v = &mut s.vaults[vault as usize];
-            let cost = shares * price(v);
-            v.liquid += cost;
-            v.total_shares += shares;
-            s.cash_liquid -= cost.min(CASH[usize::from(tier)]);
-            Ok(())
-        })
-    }
-    fn leave(&mut self, vault: u32, note: &Note, _: &[u8; 64], _: &[(u8, u64)], _: u64) -> Result<(), CallError> {
-        let nf = digests::note_nullifier(vault, note.tier, &note.pk, &note.nonce);
-        let tier = note.tier;
-        self.tx("leave", move |s| {
-            let v = &mut s.vaults[vault as usize];
-            let value = SHARES[usize::from(tier)] * price(v);
-            if value > v.liquid {
-                return Err("not enough liquid funds in this vault".into());
+            let next = std::mem::replace(&mut s.next, Next::Normal);
+            let landed = match next {
+                Next::Refuse => Some(Err("refused".to_string())),
+                Next::Rejected | Next::Lie | Next::LostUnknown => None,
+                Next::Normal | Next::LandsUnknown | Next::FalseFailure => Some(effect(&mut s)),
+            };
+            if let Some(result) = &landed {
+                s.outcomes.insert(hash, result.is_ok());
             }
-            spend(s, nf)?;
-            let v = &mut s.vaults[vault as usize];
-            v.liquid -= value;
-            v.total_shares -= SHARES[usize::from(tier)];
-            s.cash_liquid += value - FEE;
-            Ok(())
-        })
-    }
-    fn pay_exit(&mut self, note: &Note, _: &[u8; 64], to: &str, _: u64) -> Result<(), CallError> {
-        let nf = digests::cash_nullifier(note.tier, &note.pk, &note.nonce);
-        let (tier, to) = (note.tier, to.to_string());
-        self.tx("pay_exit", move |s| {
-            spend(s, nf)?;
-            let h = s.holders.get_mut(&to).ok_or("exits go only to an account that deposited")?;
-            h.2 += CASH[usize::from(tier)];
-            s.cash_liquid -= CASH[usize::from(tier)];
-            Ok(())
-        })
-    }
-    fn place(&mut self, vault: u32, amount: u128) -> Result<(), CallError> {
-        self.tx("place", move |s| {
-            let v = &mut s.vaults[vault as usize];
-            v.liquid -= amount;
-            v.placed += amount;
-            Ok(())
-        })
-    }
-    fn sync(&mut self, vault: u32) -> Result<(), CallError> {
-        self.tx("sync", move |s| {
-            let now = s.now;
-            s.vaults[vault as usize].synced_at = now;
-            Ok(())
-        })
-    }
-    fn unstake(&mut self, _: u32, _: u128) -> Result<(), CallError> {
-        self.tx("unstake", |_| Ok(()))
-    }
-    fn withdraw(&mut self, _: u32, _: u128) -> Result<(), CallError> {
-        self.tx("withdraw", |_| Ok(()))
-    }
-    fn take_last_tx(&mut self) -> Option<[u8; 32]> {
-        self.0.lock().unwrap().last_tx.take()
+            let reply = match (next, landed) {
+                (Next::Rejected, _) => Err(CallError::Refused("rejected by the node".into())),
+                (Next::Lie, _) => Ok(()),
+                (Next::LostUnknown, _) => Err(CallError::Unknown("timeout".into())),
+                (_, Some(Err(e))) => Err(CallError::Failed(e)),
+                (Next::LandsUnknown, _) => Err(CallError::Unknown("timeout".into())),
+                (Next::FalseFailure, _) => Err(CallError::Failed("the sending node says it failed".into())),
+                _ => Ok(()),
+            };
+            (reply, std::mem::take(&mut s.crash_after_send))
+        };
+        // Outside the lock, so the shared state survives the crash.
+        if crash {
+            panic!("the agent stops right after sending");
+        }
+        reply
     }
     fn tx_outcome(&mut self, hash: &[u8; 32]) -> Result<Option<bool>, String> {
         let s = self.0.lock().unwrap();
@@ -949,6 +962,92 @@ fn a_request_is_sent_again_only_in_a_window_of_its_kind() {
     run_window(&mut agent, &shared, false);
     assert_eq!(calls_of(&shared, "enter"), 2);
     assert!(matches!(agent.note_request(&request), Reply::Signed(_)));
+}
+
+#[test]
+fn a_failure_reported_by_the_sending_node_alone_frees_nothing() {
+    let k = keys();
+    let shared = world(&k);
+    let mut agent = agent_on(k, &shared);
+    let alice = depositor(&shared, "alice.test", 10 * NEAR);
+    // A cash issue: the node says it failed, it landed.
+    let notes: Vec<(u8, [u8; G1_LEN])> = vec![(1, cash_pending(1).blinded)];
+    let request = IssueRequest { account: "alice.test".into(), notes: notes.clone(), proof: proof(&alice, "alice.test", &notes) };
+    shared.lock().unwrap().next = Next::FalseFailure;
+    assert!(matches!(agent.issue(&request), Reply::Pending(_)), "not closed on one node's word");
+    assert!(matches!(agent.issue(&request), Reply::Signed(_)), "the account's issued cash shows it");
+    // An entry: the same.
+    let (token, owner) = issue_notes(&mut agent, &alice, "alice.test", 1, 1).pop().unwrap();
+    let (entry, _) = enter_request(&token, &owner, 0, vec![(1, 9)]);
+    assert!(matches!(agent.note_request(&entry), Reply::Pending(_)));
+    shared.lock().unwrap().next = Next::FalseFailure;
+    run_window(&mut agent, &shared, false);
+    assert!(matches!(agent.note_request(&entry), Reply::Signed(_)), "its own transaction succeeded on both endpoints");
+}
+
+#[test]
+fn a_transaction_the_node_rejected_before_inclusion_frees_the_note() {
+    let k = keys();
+    let shared = world(&k);
+    let mut agent = agent_on(k, &shared);
+    let alice = depositor(&shared, "alice.test", 10 * NEAR);
+    let (token, owner) = issue_notes(&mut agent, &alice, "alice.test", 1, 1).pop().unwrap();
+    let (entry, _) = enter_request(&token, &owner, 0, vec![(1, 9)]);
+    assert!(matches!(agent.note_request(&entry), Reply::Pending(_)));
+    shared.lock().unwrap().next = Next::Rejected;
+    run_window(&mut agent, &shared, false);
+    assert!(matches!(agent.note_request(&entry), Reply::Refused(409, _)));
+}
+
+#[test]
+fn a_crash_right_after_sending_still_finds_the_transaction() {
+    let (key_path, store_path) = (temp("crash-keys"), temp("crash-store"));
+    let k = keys();
+    k.save(&key_path).unwrap();
+    let shared = world(&k);
+    let binding = ona_agent::store_binding(&k, POOL);
+    let start = |store| {
+        Agent::start(FakeChain(shared.clone()), store, AgentKeys::load(&key_path).unwrap(), POOL, AGENT, Params::default(), quick())
+            .unwrap()
+            .with_clock(Box::new(|| NOW))
+    };
+    let alice = depositor(&shared, "alice.test", 10 * NEAR);
+    let mut agent = start(FileStore::create(&store_path, &binding).unwrap());
+    let (token, owner) = issue_notes(&mut agent, &alice, "alice.test", 1, 1).pop().unwrap();
+    let (entry, _) = enter_request(&token, &owner, 0, vec![(1, 9)]);
+    assert!(matches!(agent.note_request(&entry), Reply::Pending(_)));
+    next_window(&shared, false);
+    shared.lock().unwrap().crash_after_send = true;
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| agent.tick()));
+    assert!(crashed.is_err(), "the agent stopped after the entry left");
+    drop(agent);
+    assert_eq!(calls_of(&shared, "enter"), 1);
+    // Restarted on the same store: the transaction's hash was recorded before it left.
+    let mut agent = start(FileStore::open(&store_path, &binding).unwrap());
+    agent.tick().unwrap();
+    assert!(matches!(agent.note_request(&entry), Reply::Signed(_)));
+    assert_eq!(calls_of(&shared, "enter"), 1, "not sent again");
+    drop(agent);
+    let _ = std::fs::remove_file(&store_path);
+    let _ = std::fs::remove_file(&key_path);
+}
+
+#[test]
+fn an_open_issue_is_served_after_the_wallet_key_was_removed() {
+    let k = keys();
+    let shared = world(&k);
+    let mut agent = agent_on(k, &shared);
+    let alice = depositor(&shared, "alice.test", 10 * NEAR);
+    let notes: Vec<(u8, [u8; G1_LEN])> = vec![(1, cash_pending(1).blinded)];
+    let request = IssueRequest { account: "alice.test".into(), notes: notes.clone(), proof: proof(&alice, "alice.test", &notes) };
+    shared.lock().unwrap().next = Next::LandsUnknown;
+    assert!(matches!(agent.issue(&request), Reply::Pending(_)));
+    // The account removes the key it signed with; the client asks again.
+    shared.lock().unwrap().full_keys.remove("alice.test");
+    assert!(matches!(agent.issue(&request), Reply::Signed(_)), "checked when the issue opened, not on each replay");
+    let other: Vec<(u8, [u8; G1_LEN])> = vec![(0, cash_pending(0).blinded)];
+    let fresh = agent.issue(&IssueRequest { account: "alice.test".into(), notes: other.clone(), proof: proof(&alice, "alice.test", &other) });
+    assert!(matches!(fresh, Reply::Refused(401, _)), "a new issue still needs a key of the account: {fresh:?}");
 }
 
 #[test]

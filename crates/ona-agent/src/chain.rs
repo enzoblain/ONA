@@ -3,7 +3,7 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use ona_near::{Client, TxUnknown};
+use ona_near::{Action, Client, SignedTx, TxUnknown, TGAS};
 use ona_server::crossrpc::{Block, CrossRpc, HttpRpc, Rpc};
 use ona_token::{g2_from_raw, G1_LEN, G2_LEN, G2_RAW_LEN};
 use serde_json::{json, Value};
@@ -75,8 +75,11 @@ pub struct HolderInfo {
 /// Why a transaction gave no result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallError {
-    /// Certainly not done: not sent, refused by the node, or failed on chain.
+    /// Certainly not done: not signed, not sent, or rejected by the node before it could be included.
     Refused(String),
+    /// The sending node reports a final failure. One node's word: both read endpoints confirm it (`tx_outcome`)
+    /// before anything is released.
+    Failed(String),
     /// Sent, outcome unknown: it may still land.
     Unknown(String),
 }
@@ -84,9 +87,22 @@ pub enum CallError {
 impl CallError {
     pub fn message(&self) -> &str {
         match self {
-            Self::Refused(m) | Self::Unknown(m) => m,
+            Self::Refused(m) | Self::Failed(m) | Self::Unknown(m) => m,
         }
     }
+}
+
+/// A transaction the agent sends to the pool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Call {
+    IssueCash { account: String, tier: u8, count: u64 },
+    Enter { vault: u32, note: Note, owner_sig: [u8; 64], outputs: Vec<(u8, u64)>, expires_at: u64 },
+    Leave { vault: u32, note: Note, owner_sig: [u8; 64], outputs: Vec<(u8, u64)>, expires_at: u64 },
+    PayExit { note: Note, owner_sig: [u8; 64], to: String, expires_at: u64 },
+    Place(u32, u128),
+    Sync(u32),
+    Unstake(u32, u128),
+    Withdraw(u32, u128),
 }
 
 pub trait PoolChain {
@@ -100,19 +116,17 @@ pub trait PoolChain {
     /// Whether `pk` is a full-access key of `account`.
     fn full_access_key(&mut self, account: &str, pk: &[u8; 32]) -> Result<bool, String>;
 
-    fn issue_cash(&mut self, account: &str, tier: u8, count: u64) -> Result<(), CallError>;
-    fn enter(&mut self, vault: u32, note: &Note, owner_sig: &[u8; 64], outputs: &[(u8, u64)], expires_at: u64) -> Result<(), CallError>;
-    fn leave(&mut self, vault: u32, note: &Note, owner_sig: &[u8; 64], outputs: &[(u8, u64)], expires_at: u64) -> Result<(), CallError>;
-    fn pay_exit(&mut self, note: &Note, owner_sig: &[u8; 64], to: &str, expires_at: u64) -> Result<(), CallError>;
-    fn place(&mut self, vault: u32, amount: u128) -> Result<(), CallError>;
-    fn sync(&mut self, vault: u32) -> Result<(), CallError>;
-    fn unstake(&mut self, vault: u32, amount: u128) -> Result<(), CallError>;
-    fn withdraw(&mut self, vault: u32, amount: u128) -> Result<(), CallError>;
-
-    /// The hash of the last transaction sent (succeeded, failed or with an unknown outcome), taken once.
-    fn take_last_tx(&mut self) -> Option<[u8; 32]> {
-        None
+    /// Signs `call` without sending it and returns the hash the chain will know it by, so the caller records it
+    /// before anything leaves. Replaces any transaction prepared earlier and not sent.
+    fn prepare(&mut self, call: &Call) -> Result<[u8; 32], CallError>;
+    /// Sends the transaction `prepare` signed last, once.
+    fn send_prepared(&mut self) -> Result<(), CallError>;
+    /// Prepares and sends at once, for calls no signature depends on (the planner's moves, a sync).
+    fn run(&mut self, call: &Call) -> Result<(), CallError> {
+        self.prepare(call)?;
+        self.send_prepared()
     }
+
     /// A transaction's final outcome as both read endpoints report it: `Some(true)` it succeeded, `Some(false)` it
     /// failed, `None` when either does not know, is not final, or they disagree.
     fn tx_outcome(&mut self, _hash: &[u8; 32]) -> Result<Option<bool>, String> {
@@ -223,6 +237,28 @@ fn outputs_json(outputs: &[(u8, u64)]) -> Value {
 const NOTE_TGAS: u64 = 100;
 const VAULT_TGAS: u64 = 200;
 
+/// The contract method, its arguments and the gas, in Tgas, of a call.
+pub fn call_args(call: &Call) -> (&'static str, Value, u64) {
+    let note_args = |vault: &u32, note: &Note, owner_sig: &[u8; 64], outputs: &[(u8, u64)], expires_at: &u64| {
+        json!({
+            "vault_id": vault, "note": note.to_json(), "owner_sig": B64.encode(owner_sig),
+            "outputs": outputs_json(outputs), "expires_at": expires_at,
+        })
+    };
+    match call {
+        Call::IssueCash { account, tier, count } => ("issue_cash", json!({"account": account, "tier": tier, "count": count}), NOTE_TGAS),
+        Call::Enter { vault, note, owner_sig, outputs, expires_at } => ("enter", note_args(vault, note, owner_sig, outputs, expires_at), NOTE_TGAS),
+        Call::Leave { vault, note, owner_sig, outputs, expires_at } => ("leave", note_args(vault, note, owner_sig, outputs, expires_at), NOTE_TGAS),
+        Call::PayExit { note, owner_sig, to, expires_at } => {
+            ("pay_exit", json!({"note": note.to_json(), "owner_sig": B64.encode(owner_sig), "to": to, "expires_at": expires_at}), NOTE_TGAS)
+        }
+        Call::Place(v, amount) => ("place", json!({"vault_id": v, "amount": amount.to_string()}), VAULT_TGAS),
+        Call::Sync(v) => ("sync", json!({"vault_id": v}), VAULT_TGAS),
+        Call::Unstake(v, amount) => ("unstake", json!({"vault_id": v, "amount": amount.to_string()}), VAULT_TGAS),
+        Call::Withdraw(v, amount) => ("withdraw", json!({"vault_id": v, "amount": amount.to_string()}), VAULT_TGAS),
+    }
+}
+
 /// `client` sends transactions only; every read goes through `reads` at the block pinned by `begin`.
 pub struct NearPoolChain<A = HttpRpc, B = HttpRpc> {
     client: Client,
@@ -230,12 +266,12 @@ pub struct NearPoolChain<A = HttpRpc, B = HttpRpc> {
     account: String,
     pool: String,
     pinned: Option<Block>,
-    last: Option<[u8; 32]>,
+    prepared: Option<SignedTx>,
 }
 
 impl<A: Rpc, B: Rpc> NearPoolChain<A, B> {
     pub fn new(client: Client, reads: CrossRpc<A, B>, account: String, pool: String) -> Self {
-        Self { client, reads, account, pool, pinned: None, last: None }
+        Self { client, reads, account, pool, pinned: None, prepared: None }
     }
 
     fn block(&mut self) -> Result<Block, String> {
@@ -252,23 +288,6 @@ impl<A: Rpc, B: Rpc> NearPoolChain<A, B> {
     fn view(&mut self, method: &str, args: Value) -> Result<Value, String> {
         let block = self.block()?;
         self.reads.view_at(&block, &self.pool, method, args)
-    }
-
-    fn call(&mut self, method: &str, args: Value, tgas: u64) -> Result<(), CallError> {
-        match self.client.call_with_gas(&self.account, &self.pool, method, args, tgas, 0) {
-            Ok(outcome) => {
-                self.last = outcome.tx_hash;
-                match outcome.failure {
-                    Some(failure) => Err(CallError::Refused(failure)),
-                    None => Ok(()),
-                }
-            }
-            Err(e) if e.downcast_ref::<TxUnknown>().is_some() => {
-                self.last = e.downcast_ref::<TxUnknown>().map(|u| u.hash);
-                Err(CallError::Unknown(e.to_string()))
-            }
-            Err(e) => Err(CallError::Refused(e.to_string())),
-        }
     }
 }
 
@@ -313,49 +332,26 @@ impl<A: Rpc, B: Rpc> PoolChain for NearPoolChain<A, B> {
         }
     }
 
-    fn issue_cash(&mut self, account: &str, tier: u8, count: u64) -> Result<(), CallError> {
-        self.call("issue_cash", json!({"account": account, "tier": tier, "count": count}), NOTE_TGAS)
+    fn prepare(&mut self, call: &Call) -> Result<[u8; 32], CallError> {
+        let (method, args, tgas) = call_args(call);
+        let action = Action::Call { method: method.into(), args: args.to_string().into_bytes(), gas: tgas * TGAS, deposit: 0 };
+        let tx = self.client.sign_tx(&self.account, &self.pool, vec![action]).map_err(|e| CallError::Refused(e.to_string()))?;
+        let hash = tx.hash;
+        self.prepared = Some(tx);
+        Ok(hash)
     }
 
-    fn enter(&mut self, vault: u32, note: &Note, owner_sig: &[u8; 64], outputs: &[(u8, u64)], expires_at: u64) -> Result<(), CallError> {
-        let args = json!({
-            "vault_id": vault, "note": note.to_json(), "owner_sig": B64.encode(owner_sig),
-            "outputs": outputs_json(outputs), "expires_at": expires_at,
-        });
-        self.call("enter", args, NOTE_TGAS)
-    }
-
-    fn leave(&mut self, vault: u32, note: &Note, owner_sig: &[u8; 64], outputs: &[(u8, u64)], expires_at: u64) -> Result<(), CallError> {
-        let args = json!({
-            "vault_id": vault, "note": note.to_json(), "owner_sig": B64.encode(owner_sig),
-            "outputs": outputs_json(outputs), "expires_at": expires_at,
-        });
-        self.call("leave", args, NOTE_TGAS)
-    }
-
-    fn pay_exit(&mut self, note: &Note, owner_sig: &[u8; 64], to: &str, expires_at: u64) -> Result<(), CallError> {
-        let args = json!({"note": note.to_json(), "owner_sig": B64.encode(owner_sig), "to": to, "expires_at": expires_at});
-        self.call("pay_exit", args, NOTE_TGAS)
-    }
-
-    fn place(&mut self, vault: u32, amount: u128) -> Result<(), CallError> {
-        self.call("place", json!({"vault_id": vault, "amount": amount.to_string()}), VAULT_TGAS)
-    }
-
-    fn sync(&mut self, vault: u32) -> Result<(), CallError> {
-        self.call("sync", json!({"vault_id": vault}), VAULT_TGAS)
-    }
-
-    fn unstake(&mut self, vault: u32, amount: u128) -> Result<(), CallError> {
-        self.call("unstake", json!({"vault_id": vault, "amount": amount.to_string()}), VAULT_TGAS)
-    }
-
-    fn withdraw(&mut self, vault: u32, amount: u128) -> Result<(), CallError> {
-        self.call("withdraw", json!({"vault_id": vault, "amount": amount.to_string()}), VAULT_TGAS)
-    }
-
-    fn take_last_tx(&mut self) -> Option<[u8; 32]> {
-        self.last.take()
+    fn send_prepared(&mut self) -> Result<(), CallError> {
+        let tx = self.prepared.take().ok_or_else(|| CallError::Refused("nothing prepared".into()))?;
+        match self.client.send_signed(&tx) {
+            Ok(outcome) => match outcome.failure {
+                // One node's report, read before or after a lost answer: confirmed by both read endpoints later.
+                Some(failure) => Err(CallError::Failed(failure)),
+                None => Ok(()),
+            },
+            Err(e) if e.downcast_ref::<TxUnknown>().is_some() => Err(CallError::Unknown(e.to_string())),
+            Err(e) => Err(CallError::Refused(e.to_string())),
+        }
     }
 
     /// `tx` with `wait_until: FINAL` on both read endpoints (method and fields from the NEAR RPC documentation, not
@@ -419,6 +415,19 @@ mod tests {
         let mut pending = ok().unwrap();
         pending["final_execution_status"] = json!("EXECUTED_OPTIMISTIC");
         assert_eq!(agreed_outcome(ok(), Ok(pending), &h), None, "not final");
+    }
+
+    #[test]
+    fn calls_name_the_contract_methods_and_their_gas() {
+        assert_eq!(call_args(&Call::Sync(3)), ("sync", json!({"vault_id": 3}), VAULT_TGAS));
+        let (method, args, tgas) = call_args(&Call::IssueCash { account: "a.test".into(), tier: 1, count: 2 });
+        assert_eq!((method, tgas), ("issue_cash", NOTE_TGAS));
+        assert_eq!(args, json!({"account": "a.test", "tier": 1, "count": 2}));
+        let note = Note { tier: 0, pk: [1; 32], nonce: [2; 32], sig: [3; G1_LEN] };
+        let (method, args, _) = call_args(&Call::Leave { vault: 1, note, owner_sig: [4; 64], outputs: vec![(0, 5)], expires_at: 9 });
+        assert_eq!(method, "leave");
+        assert_eq!(args["outputs"], json!([{"tier": 0, "count": 5}]));
+        assert_eq!(args["vault_id"], 1);
     }
 
     #[test]

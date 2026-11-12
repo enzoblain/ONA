@@ -627,7 +627,8 @@ note kept by the wallet is paid by the contract.
   endpoint that sent a transaction is never believed alone. A vault
   read more than 50 minutes ago is synced before an entry or a leave, since the contract uses a price only within the hour.
 - **Cash issue.** Needs a NEP-413 signature of the request's message (see Pool commands) by a key the chain shows as a full-access key
-  of the account (`view_access_key`), and enough of the account's deposits not yet turned into cash, at most
+  of the account (`view_access_key`, checked when the issue opens: a replay of an open issue is served even if the account has
+  removed that key since), and enough of the account's deposits not yet turned into cash, at most
   `ONA_AGENT_ISSUES_PER_HOUR` issues per account per hour (6 by default, counted in memory). Cash issues are not queued: the client
   waits for them. One `issue_cash` per tier; amounts are computed with checked arithmetic. An issue whose outcome is unknown is never
   resent: it is confirmed later from the account's issued cash, and blocks further issues for that account until then, until both
@@ -638,6 +639,11 @@ note kept by the wallet is paid by the contract.
 - **Note operations.** An entry, leave or cash exit whose outcome is unknown is sent again, in later windows of its kind, until the
   note is seen spent (then confirmed as above) or its owner's deadline has passed at a final block (then refused, and the note
   freed): the contract spends a note once, so sending again cannot pay twice.
+- **Sending.** Every transaction is signed first and its hash, known from the signed bytes, is written with its request before
+  it is broadcast, so after a crash the agent still finds and confirms it; one signed but never broadcast simply never lands. A
+  failure reported by the sending node alone (in its answer, or when asked after a lost answer) frees nothing: the note or the
+  issue waits until both read endpoints report the same final failure, or the chain shows the work done. Only a transaction
+  the node rejected before it could be included (not sent, invalid) is refused at once.
 - **Crash between two writes.** The record is written first, then the owner signature's binding, then the note's (for a cash issue,
   the record, then the account's lock). Each tick restores a binding missing after its record, and removes a note binding or an
   account lock left behind by a request that finished; a binding or lock pointing to a finished request holds nothing meanwhile.
@@ -660,9 +666,7 @@ note kept by the wallet is paid by the contract.
   per vault every 3 days, as the contract allows: the reserve refills slowly, and a leave larger than the liquid funds waits days.
 - **Known limits, not fixed.** The agent sees every request in clear (note, outputs, account paid) and their arrival times; batches,
   delays and alternating windows only hide the link from people who watch the chain. The agent holds the blind-signing keys outside
-  any enclave. Batches are made of separate transactions sent one after another in one window, not one transaction. A crash after a
-  note request's transaction left and before its hash was written leaves the agent unable to confirm it: the request is refused
-  two days after its deadline even if the transaction succeeded, and its new notes are never signed.
+  any enclave. Batches are made of separate transactions sent one after another in one window, not one transaction.
 - **Not built.** Paying listed exit requests (`pay_request`: the contract has no view listing their nullifiers), noise moves, yield
   credited in whole notes, batching several users' entries into one transaction, limits per client on note requests (all clients
   arrive through one front, so limits are per route for all together; cash issues are limited per account), wiping the disk's free
@@ -759,7 +763,8 @@ lists no receipts, a result for another transaction hash) makes the client ask `
 apart, accepting only a final result naming that hash. If the node still cannot say, the error is `TxUnknown` with the hash. The
 transaction is never re-sent. It can still be included until its block hash expires, so a caller must check that hash before repeating the
 action. The error names, the `tx` method and its parameters come from the NEAR RPC documentation and were not checked against a node.
-Two programs using the same key read the same nonce: one of them is refused, with no retry.
+Two programs using the same key read the same nonce: one of them is refused, with no retry. `Client::sign_tx` signs without sending and
+gives the hash, `Client::send_signed` then sends as above, so a caller can record the hash before the transaction leaves.
 
 The account key file is opened once without following symbolic links, and must be a regular file of at most 4 KiB, owned by the current
 user, readable by them only. The decoded key material is wiped from memory after use; the key text in the caller's environment is not.
