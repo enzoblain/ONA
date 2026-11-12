@@ -14,6 +14,12 @@
 //!
 //! It stops at the first step that fails, says which, and prints what was verified before.
 //!
+//! With `--serve`, it stops after the deposit and the cash issue instead, into a wallet kept in `ONA_SANDBOX_DIR`
+//! (default: a folder in the system's temporary directory), writes there the `pool.json` a desktop app opens with
+//! (`"local_node": true`, development builds only), and keeps the node and the agent running: the agent is ticked every
+//! two seconds and the node's clock moved ten seconds each time, until the program is stopped (Ctrl-C). The app then
+//! shows 12 NEAR of cash and can enter vault 0, exit, pay and recover against a real contract and agent.
+//!
 //! `NEAR_SANDBOX_BIN_PATH` must name a `near-sandbox` binary: without it the library would download one and run it
 //! without checking a checksum, which this program refuses. Build the contracts first (`verify.sh`).
 #![forbid(unsafe_code)]
@@ -375,7 +381,8 @@ fn serve(agent: SharedAgent, stop: Arc<AtomicBool>) -> Result<String> {
 #[tokio::main]
 async fn main() {
     let mut report = Report::default();
-    let result = run_all(&mut report).await;
+    let serve_app = std::env::args().any(|a| a == "--serve");
+    let result = run_all(&mut report, serve_app).await;
     println!("\nverified ({}):", report.verified.len());
     for line in &report.verified {
         println!("  - {line}");
@@ -392,7 +399,7 @@ async fn main() {
     println!("\nevery step passed");
 }
 
-async fn run_all(report: &mut Report) -> Result<()> {
+async fn run_all(report: &mut Report, serve_app: bool) -> Result<()> {
     report.step("start the local node");
     node::sandbox_binary(std::env::var_os("NEAR_SANDBOX_BIN_PATH"))?;
     let pool_code = std::fs::read(POOL_WASM).context("build the contracts first (verify.sh)")?;
@@ -510,8 +517,19 @@ async fn run_all(report: &mut Report) -> Result<()> {
     report.check(after > before && config["escape_open"] == json!(false), "a sync by the agent counts as its activity", &config)?;
 
     report.step("deposit from the depositor's own account, then the cash issue");
-    let wallet_path = std::env::temp_dir().join(format!("ona-sandbox-pool-wallet-{}", std::process::id()));
+    let serve_dir = std::env::var_os("ONA_SANDBOX_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("ona-sandbox-pool-serve"));
+    let wallet_path = if serve_app {
+        std::fs::create_dir_all(&serve_dir)?;
+        serve_dir.join("wallet")
+    } else {
+        std::env::temp_dir().join(format!("ona-sandbox-pool-wallet-{}", std::process::id()))
+    };
     let _ = std::fs::remove_file(&wallet_path);
+    let mut seal = wallet_path.clone().into_os_string();
+    seal.push(".seal");
+    let _ = std::fs::remove_file(&seal);
     let mut wallet_key = [0u8; 32];
     OsRng.fill_bytes(&mut wallet_key);
     let wallet = Wallet::open(&wallet_path, &wallet_key).map_err(|e| anyhow!("wallet: {e}"))?;
@@ -521,6 +539,11 @@ async fn run_all(report: &mut Report) -> Result<()> {
         .with_clock(Box::new(move || system_ns().saturating_add(clock_offset.load(Ordering::SeqCst))))
         .with_recommended(vec![DEPOSIT])
         .with_signature_life(SIGNATURE_LIFE_NS);
+    if serve_app {
+        deposit_and_issue(report, &mut client, &chain, &agent, &mut time, &key(), &alice, &pool).await?;
+        drop(client); // the app's core opens the wallet next: it is locked by whoever holds it
+        return serve_for_app(report, &serve_dir, &wallet_path, &wallet_key, &rpc, &pool, &url, &agent, &mut time).await;
+    }
     let result = walk(report, &mut client, &chain, &agent, &mut time, &stop, &key(), &Accounts { alice, bob, staking, pool }).await;
     drop(client);
     let _ = std::fs::remove_file(&wallet_path);
@@ -528,6 +551,101 @@ async fn run_all(report: &mut Report) -> Result<()> {
     seal.push(".seal");
     let _ = std::fs::remove_file(seal);
     result
+}
+
+/// The 12 NEAR deposit from `alice`'s own account, then the cash issue against her wallet signature, as her NEAR
+/// wallet would sign it (NEP-413, with `ona-agent`'s own layout: not checked against a real wallet).
+#[allow(clippy::too_many_arguments)]
+async fn deposit_and_issue(
+    report: &mut Report,
+    client: &mut PoolClient,
+    chain: &Client,
+    agent: &SharedAgent,
+    time: &mut Time<'_>,
+    depositor_key: &SigningKey,
+    alice: &str,
+    pool: &str,
+) -> Result<()> {
+    let p = run(client, "pool_prepare", json!({"op": "deposit", "account": alice, "amount": DEPOSIT.to_string()}))?;
+    println!("  prepared: {}", p["summary"]);
+    let attached: u128 = p["summary"]["wallet_call"]["attached"].as_str().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow!("no wallet call"))?;
+    report.call(chain, "deposit", alice, pool, "deposit", json!({}), attached)?;
+    let first = run(client, "pool_execute", json!({"prepared_id": p["prepared_id"]}))?;
+    let m = &first["sign_message"];
+    let nonce: [u8; 32] = m["nonce"]
+        .as_str()
+        .and_then(|n| B64.decode(n).ok())
+        .and_then(|n| n.try_into().ok())
+        .ok_or_else(|| anyhow!("no nonce to sign: {first}"))?;
+    let text = m["message"].as_str().ok_or_else(|| anyhow!("no message to sign: {first}"))?;
+    let recipient = m["recipient"].as_str().ok_or_else(|| anyhow!("no recipient: {first}"))?;
+    // Signed as the depositor's wallet would, with the NEP-413 layout of `ona-agent` itself: this run does not check
+    // that layout against a real wallet.
+    let hash = nep413::payload_hash(text, &nonce, recipient);
+    let signature = json!({
+        "public_key": nep413::write_public_key(&depositor_key.verifying_key().to_bytes()),
+        "signature": B64.encode(depositor_key.sign(&hash).to_bytes()),
+    });
+    match client.run("pool_execute", &json!({"prepared_id": p["prepared_id"], "depositor_signature": signature})) {
+        Ok(v) if v["complete"] == json!(true) => println!("  issued at once: {v}"),
+        Ok(v) => bail!("pool_execute: {v}"),
+        Err(e) if e.contains("outcome unknown") => drive("cash issue", agent, time, 5 * SECOND_NS, 20, || recovered(client)).await?,
+        Err(e) => bail!("pool_execute: {e}"),
+    }
+    let portfolio = run(client, "pool_portfolio", json!({}))?;
+    report.check(portfolio["cash"]["value"] == json!(DEPOSIT.to_string()), "the wallet holds 12 NEAR of cash notes", &portfolio)?;
+    let holder = chain.view_final(pool, "get_holder", json!({"account": alice}))?;
+    report.check(u128_of(&holder, "issued")? == DEPOSIT, "the contract issued exactly that much cash to the depositor", &holder)?;
+    Ok(())
+}
+
+/// `--serve`: the wallet the app opens, its `pool.json`, then the node and the agent kept running until Ctrl-C.
+#[allow(clippy::too_many_arguments)]
+async fn serve_for_app(
+    report: &mut Report,
+    dir: &std::path::Path,
+    wallet: &std::path::Path,
+    wallet_key: &[u8; 32],
+    rpc: &str,
+    pool: &str,
+    agent_url: &str,
+    agent: &SharedAgent,
+    time: &mut Time<'_>,
+) -> Result<()> {
+    report.step("serve the pool to a desktop app");
+    let key_file = dir.join("wallet-key");
+    let hex: String = wallet_key.iter().map(|b| format!("{b:02x}")).collect();
+    write_owner_only(&key_file, hex.as_bytes())?;
+    let settings = json!({
+        "wallet_file": wallet, "wallet_key_file": key_file, "pool": pool, "rpc_url": rpc, "agent_url": agent_url,
+        "recommended_near": "10,12", "local_node": true,
+    });
+    let text = serde_json::to_string_pretty(&settings)?;
+    std::fs::write(dir.join("pool.json"), &text)?;
+    report.ok(format!("pool.json written to {}", dir.join("pool.json").display()));
+    println!("\npool.json for a desktop app (development build), also in {}:\n{text}", dir.display());
+    println!("\nThe node and the agent keep running; stop with Ctrl-C.");
+    loop {
+        if let Err(e) = tick(agent) {
+            println!("  {e:#}");
+        }
+        if let Err(e) = time.advance(10 * SECOND_NS).await {
+            println!("  {e:#}");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// A file only its owner can read (the wallet key: `load_wallet_key` refuses anything else).
+fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    let _ = std::fs::remove_file(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(bytes)?;
+    Ok(())
 }
 
 struct Accounts {
@@ -559,36 +677,7 @@ async fn walk(
         v.as_str().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow!("{method}: {v}"))
     };
 
-    let p = run(client, "pool_prepare", json!({"op": "deposit", "account": alice, "amount": DEPOSIT.to_string()}))?;
-    println!("  prepared: {}", p["summary"]);
-    let attached: u128 = p["summary"]["wallet_call"]["attached"].as_str().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow!("no wallet call"))?;
-    report.call(chain, "deposit", alice, pool, "deposit", json!({}), attached)?;
-    let first = run(client, "pool_execute", json!({"prepared_id": p["prepared_id"]}))?;
-    let m = &first["sign_message"];
-    let nonce: [u8; 32] = m["nonce"]
-        .as_str()
-        .and_then(|n| B64.decode(n).ok())
-        .and_then(|n| n.try_into().ok())
-        .ok_or_else(|| anyhow!("no nonce to sign: {first}"))?;
-    let text = m["message"].as_str().ok_or_else(|| anyhow!("no message to sign: {first}"))?;
-    let recipient = m["recipient"].as_str().ok_or_else(|| anyhow!("no recipient: {first}"))?;
-    // Signed as the depositor's wallet would, with the NEP-413 layout of `ona-agent` itself: this run does not check
-    // that layout against a real wallet.
-    let hash = nep413::payload_hash(text, &nonce, recipient);
-    let signature = json!({
-        "public_key": nep413::write_public_key(&depositor_key.verifying_key().to_bytes()),
-        "signature": B64.encode(depositor_key.sign(&hash).to_bytes()),
-    });
-    match client.run("pool_execute", &json!({"prepared_id": p["prepared_id"], "depositor_signature": signature})) {
-        Ok(v) if v["complete"] == json!(true) => println!("  issued at once: {v}"),
-        Ok(v) => bail!("pool_execute: {v}"),
-        Err(e) if e.contains("outcome unknown") => drive("cash issue", agent, time, 5 * SECOND_NS, 20, || recovered(client)).await?,
-        Err(e) => bail!("pool_execute: {e}"),
-    }
-    let portfolio = run(client, "pool_portfolio", json!({}))?;
-    report.check(portfolio["cash"]["value"] == json!(DEPOSIT.to_string()), "the wallet holds 12 NEAR of cash notes", &portfolio)?;
-    let holder = chain.view_final(pool, "get_holder", json!({"account": alice}))?;
-    report.check(u128_of(&holder, "issued")? == DEPOSIT, "the contract issued exactly that much cash to the depositor", &holder)?;
+    deposit_and_issue(report, client, chain, agent, time, depositor_key, alice, pool).await?;
     solvent(report, "the cash issue")?;
 
     report.step("enter vault 0 with a 10 NEAR cash note");

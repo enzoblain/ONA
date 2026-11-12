@@ -184,4 +184,6 @@ which shows the service is published.
 
 **A local test node** (development builds only): `"local_node": true` in `pool.json` makes the pool talk directly, without
 Tor, to a node and an agent on this computer (`http://127.0.0.1:…`), for example a run of `ona-sandbox-pool`. A release build
-refuses the setting. Tested with unit tests only: no node was run against the window yet.
+refuses the setting. Run on 12/11/2026 against `ona-sandbox-pool --serve` (docs/INSTALL.md): through the engine's pool
+thread, the portfolio (12 NEAR of cash), an entry of 10 NEAR into vault 0 queued by the agent, and `pool_recover`
+collecting the share notes. The window itself was not driven against it (no automated clicks in the Tauri window).

@@ -226,6 +226,19 @@ before that is in SPEC.
 The deposit's wallet signature is made with the agent's own NEP-413 layout, so the run does not check that layout against a real
 wallet. Run it from a normal terminal, as above.
 
+With `--serve`, the program stops after the deposit and the cash issue, writes a wallet, its key and a `pool.json` for a desktop
+app (development build, `"local_node": true`) into `ONA_SANDBOX_DIR` (default: a folder in the system's temporary directory), and
+keeps the node and the agent running until Ctrl-C, ticking the agent every two seconds and moving the node's clock ten seconds
+each time:
+
+```
+NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox ONA_SANDBOX_DIR=/some/folder cargo run -p ona-sandbox --bin ona-sandbox-pool -- --serve
+```
+
+Copy that `pool.json` into the app's data folder. Run on 12/11/2026 (near-sandbox 2.13.4, Apple Silicon Mac): the Tauri app's
+engine read 12 NEAR of cash, prepared and sent an entry of 10 NEAR into vault 0, and `pool_recover` collected the share notes
+(an ignored test, `local_pool_through_the_engine`, run by hand with `ONA_TEST_POOL_DIR`).
+
 ## The NEAR RPC endpoint
 
 Every program here talks to NEAR through `ona-near`, and **trusts the RPC node it is given**: the deposits the signer signs for, the

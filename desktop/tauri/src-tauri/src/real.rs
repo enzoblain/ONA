@@ -321,4 +321,45 @@ mod tests {
         let error = core.dispatch(json!({"cmd": "pool_portfolio"}))["error"].as_str().unwrap().to_owned();
         assert!(error.contains("wallet key"), "past the network checks, stopped at the key file: {error}");
     }
+
+    /// Against a running local pool (`ona-sandbox-pool --serve`, docs/INSTALL.md): the window's path, from `pool.json`
+    /// through the engine's pool thread to the contract and the agent. Run by hand:
+    /// `ONA_TEST_POOL_DIR=<its folder> cargo test -- --ignored local_pool`.
+    #[test]
+    #[ignore]
+    fn local_pool_through_the_engine() {
+        let dir = std::path::PathBuf::from(std::env::var("ONA_TEST_POOL_DIR").expect("ONA_TEST_POOL_DIR"));
+        let pool = PoolSettings::load(&dir).unwrap().expect("pool.json");
+        assert!(pool.local_node);
+        let setup = std::sync::Arc::new(std::sync::Mutex::new(CoreSetup { model: Ok(None), pool: Ok(Some(pool)), core_socks: None }));
+        let mut engine = crate::engine::ChatEngine::with_ona_core(setup);
+        let sender = engine.pool_sender();
+        let ask = |request: Value| -> Value {
+            let (reply, answer) = std::sync::mpsc::channel();
+            sender.send((request.clone(), reply)).unwrap();
+            let value = answer.recv().unwrap();
+            println!("{request} -> {value}");
+            value
+        };
+        let portfolio = ask(json!({"cmd": "pool_portfolio"}));
+        assert_eq!(portfolio["ok"], true);
+        assert_eq!(portfolio["cash"]["value"], "12000000000000000000000000", "the 12 NEAR deposited by --serve");
+        let prepared = ask(json!({"cmd": "pool_prepare", "op": "enter", "vault": 0, "amount": "10000000000000000000000000"}));
+        assert_eq!(prepared["ok"], true);
+        let executed = ask(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}));
+        let queued = executed["error"].as_str().is_some_and(|e| e.contains("outcome unknown"));
+        assert!(executed["complete"] == true || queued, "{executed}");
+        // The agent sends the entry in its next batch: --serve ticks it every two seconds.
+        let mut entered = false;
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let recover = ask(json!({"cmd": "pool_recover"}));
+            let portfolio = ask(json!({"cmd": "pool_portfolio"}));
+            if recover["still_spending"] == 0 && portfolio["vaults"].as_array().is_some_and(|v| !v.is_empty()) {
+                entered = true;
+                break;
+            }
+        }
+        assert!(entered, "the entry into vault 0 did not complete");
+    }
 }
