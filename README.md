@@ -140,6 +140,22 @@ program refuses to let the library download one), and run `cargo run -p ona-sand
 ona-sandbox-pool` is written to run the pool, its agent and the pool commands on a local node against a test staking pool, fallback
 included, and print the gas of each call; it has not been run yet.
 
+## Next steps (product direction, not built yet)
+
+**Privacy metrics in a side panel of the app.**
+- Show a privacy figure next to the chat, for example: "for similar amounts, your privacy is at X% with ONA and Y% without it".
+- When the agent recommends a vault or a placement, it states how much that choice raises the privacy figure (for example "+Z
+  points").
+- The figure must come from a measure that is defined and published (for instance how many deposits of a similar amount, and how
+  many notes in the same vault, an observer cannot tell apart), computed from what is on chain at that moment. No fixed or
+  invented percentage: while the anonymity set is one (see below), the panel says so.
+
+**Website on Vercel, three pages.**
+1. Home: presentation of the project, with polished animations and the interesting metrics (same rule: measured and dated, or
+   marked as an example).
+2. Demo.
+3. Downloads: links to install each app (Mac, other desktops, iPhone).
+
 ## Known limitations
 
 - At launch the anonymity set is one, so ONA claims no unlinkability until a measured number of users is published.
