@@ -95,3 +95,11 @@ Each conversation's ona-core runs on a serial queue of its own (`CoreQueue`). Th
 window and the phone, sends one command at a time and waits at most 50 ms per tick: a real model call goes on while
 the app stays responsive, and its reply is taken at a later tick. Confirmations and the end of a mission wait for their
 reply (they do not reach the model). Reading the pool for the phone still waits for its reply.
+
+## Erasure and backups
+
+Conversations are kept in memory only: they are gone when the app quits, and nothing about them is written to disk, so
+no system task is needed to erase them. ona-core's vault (chats kept up to 24 hours) is not used by the app; if it is,
+an erasure task running while the app is closed will be needed. The app's folder (`~/Library/Application Support/ONA`:
+onion key, tor's state, `model.json`) is marked excluded from Time Machine at every launch; a failure is shown in the
+window. A request tokens file elsewhere is not covered.

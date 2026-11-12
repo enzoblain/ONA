@@ -118,3 +118,9 @@ The names are those of `ona real` (docs/INSTALL.md, "Use the real model"); `toke
 - Only one conversation at a time can use the tokens file (ona-core locks it).
 
 Tested with unit tests only (settings, refusals, a core set up through a SOCKS port). Not run against a relay yet.
+
+## Erasure and backups
+
+Conversations are kept in memory only and are gone when the app quits; nothing about them is written to disk. Nothing
+marks the app's data folder (onion key, `pairing.json`, `model.json`) as excluded from backups on Windows or Linux:
+there is no single mechanism every backup tool follows there.

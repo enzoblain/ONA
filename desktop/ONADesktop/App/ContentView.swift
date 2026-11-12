@@ -142,6 +142,9 @@ private struct StatusFooter: View {
             if let error = model.serverError {
                 Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
             }
+            if let error = model.backupError {
+                Label(error, systemImage: "externaldrive.badge.exclamationmark").foregroundStyle(.orange)
+            }
         }
         .font(.caption)
         .frame(maxWidth: .infinity, alignment: .leading)

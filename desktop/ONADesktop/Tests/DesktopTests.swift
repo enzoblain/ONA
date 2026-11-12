@@ -704,3 +704,13 @@ struct OnionPublishedTests {
         #expect(engine.chats.first?.status == .waiting)
     }
 }
+
+@Suite struct BackupExclusionTests {
+    @Test func theAppFolderIsKeptOutOfBackups() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "ona-backup-\(UUID().uuidString)")
+        try BackupExclusion.exclude(folder)
+        let values = try folder.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        #expect(values.isExcludedFromBackup == true)
+        try? FileManager.default.removeItem(at: folder)
+    }
+}

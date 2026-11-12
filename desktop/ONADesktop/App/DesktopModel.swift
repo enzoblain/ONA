@@ -22,6 +22,8 @@ final class DesktopModel {
     let engine: ChatEngine
     let tor = TorService()
     private(set) var serverError: String?
+    /// Set when the app's folder could not be kept out of Time Machine.
+    private(set) var backupError: String?
     private(set) var lastPhoneRequest: String?
     private(set) var lastPhoneContact: Date?
     /// The port the server got (chosen by the system in Tor mode).
@@ -44,6 +46,8 @@ final class DesktopModel {
     private var ticker: Task<Void, Never>?
 
     init() {
+        // Kept out of Time Machine: the onion key and tor's state. Shown in the window if it fails.
+        do { try BackupExclusion.exclude() } catch { backupError = "Exclusion des sauvegardes impossible : \(error.localizedDescription)" }
         pairing = PairingAuthority(name: Host.current().localizedName ?? "Mon Mac", store: KeychainPairingStore())
         let tor = self.tor
         // Read when each core is made: a change to model.json, or tor becoming ready, applies to the next conversation.
