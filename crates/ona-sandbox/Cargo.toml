@@ -4,6 +4,11 @@ version = "0.0.1"
 edition = "2021"
 publish = false
 license = "MIT"
+default-run = "ona-sandbox"
+
+[[bin]]
+name = "ona-sandbox-pool"
+path = "src/bin/pool.rs"
 
 [dependencies]
 ona-token = { path = "../ona-token" }
@@ -11,6 +16,9 @@ ona-near = { path = "../ona-near" }
 ona-deploy = { path = "../ona-deploy" }
 ona-signer = { path = "../ona-signer" }
 ona-server = { path = "../ona-server" }
+ona-agent = { path = "../ona-agent" }
+ona-core = { path = "../ona-core" }
+ona-wallet = { path = "../ona-wallet" }
 near-sandbox = "=0.3.16"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros"] }
 serde_json = "=1.0.154"

@@ -6,10 +6,10 @@
 //! downloads one and runs it without checking a checksum, which this program refuses.
 #![forbid(unsafe_code)]
 
-use std::ffi::OsString;
-use std::path::PathBuf;
+mod node;
 
 use anyhow::{anyhow, bail, Context, Result};
+use node::{key_seed, sandbox_binary};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ed25519_dalek::SigningKey;
@@ -159,33 +159,12 @@ impl Env {
     }
 }
 
-/// The local node binary to run. Refuses to go on without one, so the library never downloads and runs an
-/// unchecked binary.
-fn sandbox_binary(value: Option<OsString>) -> Result<PathBuf> {
-    let path = PathBuf::from(value.filter(|v| !v.is_empty()).ok_or_else(|| {
-        anyhow!("set NEAR_SANDBOX_BIN_PATH to a near-sandbox binary you have checked (docs/INSTALL.md)")
-    })?);
-    if !path.is_file() {
-        bail!("NEAR_SANDBOX_BIN_PATH does not name a file: {}", path.display());
-    }
-    Ok(path)
-}
-
 /// Decodes lowercase or uppercase hexadecimal, refusing an odd length or another character.
 fn from_hex(text: &str) -> Result<Vec<u8>> {
     if text.len() % 2 != 0 || !text.is_ascii() {
         bail!("not hexadecimal: {text}");
     }
     (0..text.len()).step_by(2).map(|i| Ok(u8::from_str_radix(&text[i..i + 2], 16)?)).collect()
-}
-
-/// The 32-byte seed of an `ed25519:<base58>` key in the 64-byte form.
-fn key_seed(secret: &str) -> Result<[u8; 32]> {
-    let raw = bs58::decode(secret.trim_start_matches("ed25519:")).into_vec()?;
-    if raw.len() != 64 {
-        bail!("the genesis key is not a 64-byte ed25519 key");
-    }
-    Ok(raw[..32].try_into()?)
 }
 
 #[tokio::main]
@@ -466,26 +445,11 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    // Without a binary of its own, the program stops before the library can download one.
-    #[test]
-    fn a_local_binary_is_required() {
-        assert!(sandbox_binary(None).is_err());
-        assert!(sandbox_binary(Some(OsString::new())).is_err());
-        assert!(sandbox_binary(Some(OsString::from("/nonexistent/near-sandbox"))).is_err());
-        let file = std::env::temp_dir().join(format!("ona-sandbox-bin-{}", std::process::id()));
-        std::fs::write(&file, b"").unwrap();
-        assert_eq!(sandbox_binary(Some(file.clone().into_os_string())).unwrap(), file);
-        std::fs::remove_file(&file).unwrap();
-    }
-
     #[test]
     fn malformed_inputs_are_errors_not_panics() {
         assert_eq!(from_hex("0aFf").unwrap(), [0x0a, 0xff]);
         assert!(from_hex("abc").is_err());
         assert!(from_hex("zz").is_err());
         assert!(from_hex("é1").is_err());
-        assert!(key_seed("ed25519:abc").is_err());
-        let key = bs58::encode([7u8; 64]).into_string();
-        assert_eq!(key_seed(&format!("ed25519:{key}")).unwrap(), [7u8; 32]);
     }
 }

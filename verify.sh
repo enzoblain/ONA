@@ -1,6 +1,6 @@
 #!/bin/sh
-# Runs every test, then builds the three contracts the way SPEC.md describes ("Reproducing the contract hashes")
-# and prints their SHA-256. Needs Rust 1.99.1 and its wasm32-unknown-unknown target. No key, funded account,
+# Runs every test, then builds the three contracts the way SPEC.md describes ("Reproducing the contract hashes"),
+# and the test staking pool `ona-sandbox-pool` deploys on a local node, and prints their SHA-256. Needs Rust 1.99.1 and its wasm32-unknown-unknown target. No key, funded account,
 # Docker or browser.
 set -eu
 cd "$(dirname "$0")"
@@ -73,14 +73,14 @@ for dir in "$CARGO_DIR" "$SYSROOT" "$ROOT"; do
 done
 REMAP="build.rustflags=[\"--remap-path-prefix=$CARGO_DIR=/cargo\",\"--remap-path-prefix=$SYSROOT/lib/rustlib/src/rust=/rustc/$COMMIT\",\"--remap-path-prefix=$ROOT=/ona\"]"
 
-for crate in ona-mint ona-registry ona-pool; do
+for crate in ona-mint ona-registry ona-pool ona-test-staking; do
     cargo build --locked --profile contract --target wasm32-unknown-unknown -p "$crate" \
         --config "crates/$crate/wasm-build.toml" --config "$REMAP"
 done
 
 # Fails if a wasm still names a local directory or the user's home directory, found by its full path.
 HOME_DIR="$(cd ~ 2>/dev/null && pwd || true)"
-for name in ona_mint ona_registry ona_pool; do
+for name in ona_mint ona_registry ona_pool ona_test_staking; do
     wasm="target/wasm32-unknown-unknown/contract/$name.wasm"
     for pattern in "$ROOT" "$CARGO_DIR" "$SYSROOT" "${HOME:-}" "$HOME_DIR" "/Users/" "/home/"; do
         if [ -n "$pattern" ] && [ "$pattern" != "/" ] && LC_ALL=C grep -a -F -q -e "$pattern" "$wasm"; then
@@ -95,4 +95,4 @@ for name in ona_mint ona_registry ona_pool; do
     fi
     echo "$name.wasm sha256 $sum"
 done
-echo "All tests passed and the three contracts compile to wasm without local paths."
+echo "All tests passed and the three contracts and the test staking pool compile to wasm without local paths."

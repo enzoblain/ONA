@@ -155,6 +155,35 @@ owner signatures it sends expire one hour after the node's latest final block. I
 changed, so the gas table in SPEC still holds the earlier measurements. The node crashes when started inside a macOS Seatbelt sandbox,
 so run it from a normal terminal.
 
+### The pool and its agent on a local node
+
+```
+./verify.sh
+NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox cargo run -p ona-sandbox --bin ona-sandbox-pool
+```
+
+`verify.sh` builds `ona-pool` and `ona-test-staking`, a **test stand-in** for a staking pool (the standard staking pool of
+`near/core-contracts` is not available offline). It is deployed only by this program and applies the rules of the strict mock of the
+pool's tests: no `unstake` above what is staked, no `withdraw` above what is unstaked nor before a lock of 120 seconds of block time
+after the last `unstake`. The program then, on one local node:
+
+1. deploys `ona-pool` with the plan of `ona-deploy pool` (three cash tiers, escape delay one day) and the test staking pool, lists it
+   as vault 0, and moves the node's clock past the 7-day admin delay (`sandbox_fast_forward`);
+2. starts the agent in the same process, from the `ona-agent` library (its `Agent`, its HTTP API and the relay's HTTP front, as
+   `ona-agent run`), reading the one node as both of its endpoints, which `ona-agent run` refuses: only this test run does it. The
+   program ticks the agent and moves the clock forward instead of waiting, with batches of one request and no delay;
+3. runs the user's side through `ona-core`'s pool commands and `HttpAgent`: a 12 NEAR deposit from the depositor's own account and
+   the cash issue against its wallet signature, an entry into vault 0, the planner's placement, a reward on the test pool and the
+   planner's sync, a leave to cash that waits for the planner to unstake and withdraw, a payment to the depositing account;
+4. stops the agent, waits out the escape delay and checks the fallback: the client keeps an unsent note spending, then holds it again;
+   anyone pays cash notes by `escape_exit`, with and without a listed request; anyone brings the vault's funds back (`unstake` and
+   `withdraw` with amounts fixed by the contract) and pays a share note.
+
+It stops at the first step that fails, names it, and prints what was verified before, then the gas burnt by every transaction,
+the agent's included, as a table ready for SPEC. It has not been run yet: SPEC still says "not measured" for the pool and the agent.
+The deposit's wallet signature is made with the agent's own NEP-413 layout, so the run does not check that layout against a real
+wallet. Run it from a normal terminal, as above.
+
 ## The NEAR RPC endpoint
 
 Every program here talks to NEAR through `ona-near`, and **trusts the RPC node it is given**: the deposits the signer signs for, the

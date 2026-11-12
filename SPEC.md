@@ -6,7 +6,8 @@
 Under `crates/`: `ona-token` crypto and token format · `ona-mint` NEAR contract · `ona-registry` NEAR contract · `ona-signer` issuing
 loop · `ona-server` relay · `ona-wallet` encrypted wallet file · `ona-core` local mission core and CLI · `ona-sandbox` deployment and
 gas harness · `ona-anchor` journal anchoring aggregator · `ona-pool` NEAR contract holding the funds the agent places · `ona-near` NEAR
-RPC client · `ona-deploy` deployment tool · `ona-crowd` crowd simulator · `ona-agent` the pool's agent.
+RPC client · `ona-deploy` deployment tool · `ona-crowd` crowd simulator · `ona-agent` the pool's agent · `ona-test-staking` a test
+stand-in for a staking pool, deployed only by `ona-sandbox-pool` on a local node.
 
 ## Curve choice
 Message and signature in **G1**, public key in **G2**. 48-byte tokens. All points reach `pairing_check`, which rejects
@@ -205,7 +206,10 @@ Tested on the mocked NEAR VM only; the wasm build of this version is not verifie
 
 ## `ona-pool` (`crates/ona-pool`)
 The account that holds the funds the agent places. Never deployed, tested on the mocked NEAR VM only, with notes made by
-`ona-token`. No staking pool has been called for real. Gas is not measured.
+`ona-token`. No staking pool has been called for real. Gas is not measured. `ona-sandbox-pool` (docs/INSTALL.md, "The pool and its
+agent on a local node") is written to run the pool, the agent and `ona-core`'s pool commands on a local node against
+`ona-test-staking` and print the gas of each call; it has not been run yet, and a stand-in proves nothing about the standard staking
+pool.
 
 - **Roles.** Created by `ona-deploy pool` with no access key. The `guardian` lists vaults, freezes them, sets the agent account and the
   fee. The `agent` is an account set by the guardian. Checking that the agent's key lives in an attested enclave is done outside the
@@ -672,7 +676,7 @@ note kept by the wallet is paid by the contract.
   arrive through one front, so limits are per route for all together; cash issues are limited per account), wiping the disk's free
   blocks, an enclave. Requests are served one at a time, chain calls included. The NEP-413 layout is written from the standard as
   recalled, not verified against a wallet; the RPC formats, `tx_status` included, are from the NEAR documentation, not verified
-  against a node; gas budgets are not measured.
+  against a node; gas budgets are not measured (`ona-sandbox-pool` prints them once run on a local node; not run yet).
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit
