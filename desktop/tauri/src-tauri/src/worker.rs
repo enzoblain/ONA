@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::engine::ChatEngine;
-use crate::pairing::PairingAuthority;
+use crate::pairing::{PairingAuthority, SecretStore, SystemStore};
 use crate::server::{self, Exposure, PhoneServer};
 use crate::real::{ModelSettings, SharedSetup};
 use crate::tor::{TorService, TorState};
@@ -83,7 +83,11 @@ impl Worker {
             let setup = SharedSetup::default();
             setup.borrow_mut().model = ModelSettings::load(&data_dir);
             let mut app = App {
-                pairing: PairingAuthority::new(&name, Some(data_dir.join("pairing.json"))),
+                pairing: PairingAuthority::with_secret_store(
+                    &name,
+                    data_dir.join("pairing.json"),
+                    SystemStore::new().map(|s| Box::new(s) as Box<dyn SecretStore>),
+                ),
                 engine: ChatEngine::with_ona_core(setup.clone()),
                 tor: TorService::new(data_dir.join("tor")),
                 server: None,

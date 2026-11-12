@@ -231,6 +231,7 @@ Desktop app for Windows and Linux (`desktop/tauri/src-tauri`), pinned exactly (`
 | `base64` | 0.22.1 | protocol encoding |
 | `rand` | 0.8.8 | pairing codes and ids |
 | `qrcode` | 0.14.1 | pairing QR code (SVG) |
+| `keyring` | 4.2.0 | the pairing secrets in the system's credential store (Keychain, Windows Credential Manager, Secret Service) |
 | `serde`, `serde_json` | 1.0.229, 1.0.154 | JSON |
 
 Build tooling, not shipped: `.github/workflows/release.yml` builds the apps on GitHub's machines with Rust 1.99.1,

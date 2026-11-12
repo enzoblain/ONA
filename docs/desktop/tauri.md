@@ -75,11 +75,14 @@ le téléphone : à réserver aux tests. La fenêtre ne reçoit que l'image du Q
 - Les installeurs.
 - Les appels à `ona-core` se font sur le fil unique qui sert aussi la fenêtre et le téléphone : avec un vrai modèle,
   tout attendrait la fin de chaque appel.
-- `pairing.json` contient **en clair la clé privée de l'ordinateur** (qui signe les réponses au téléphone) et le
-  **jeton** du téléphone (qui ouvre les lectures), protégés seulement par les droits 0600 et la session de
-  l'utilisateur. Qui le copie (sauvegarde, autre programme du même utilisateur, administrateur) peut se faire passer
-  pour l'ordinateur auprès du téléphone et lire les conversations ; il ne peut pas signer à la place du téléphone
-  (clé dans son Secure Enclave). Pas de trousseau système utilisé sous Linux ni Windows.
+- La **clé privée de l'ordinateur** (qui signe les réponses au téléphone) et le **jeton** du téléphone (qui ouvre les
+  lectures) sont dans le coffre du système (bibliothèque `keyring` : Trousseau sur Mac, Gestionnaire d'identification
+  sous Windows, Secret Service sous Linux), pas dans `pairing.json`, qui ne garde que la clé publique du téléphone, le
+  compteur et les identifiants déjà utilisés. Un `pairing.json` d'une version précédente donne ses secrets au coffre
+  au démarrage, puis est réécrit sans eux. Sans coffre utilisable (Linux sans Secret Service lancé), les secrets
+  restent dans le fichier, lisible par l'utilisateur seul, et la fenêtre le dit. Testé avec un faux coffre ; le vrai
+  coffre de chaque système n'a pas été essayé. Un autre programme du même utilisateur peut en général lire le coffre
+  aussi : il protège surtout contre la copie d'un fichier (sauvegarde, autre machine).
 - Le fichier d'appairage et la clé du service onion (`tor/hs`) sous Windows n'ont pas de droits restreints au-delà du
   dossier de l'utilisateur (pas d'ACL posée). Sous Linux, la clé onion est un fichier simple dans un dossier 0700 : qui
   la copie peut publier la même adresse ; les réponses signées par la clé de l'ordinateur limitent alors l'usurpation.

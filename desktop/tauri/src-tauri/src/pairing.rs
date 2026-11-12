@@ -83,7 +83,7 @@ pub struct PairedPhone {
     #[serde(default)]
     pub verified: bool,
     /// Secret given to the phone at pairing (base64url, 32 bytes): every request carries it (reads included).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
     /// Highest request counter accepted from this phone. Saved before the request is carried out.
     #[serde(default)]
@@ -93,9 +93,12 @@ pub struct PairedPhone {
     pub used_confirmations: Vec<String>,
 }
 
-/// What the computer keeps: its own P-256 key, and the phone it trusts. Saved as a file readable by the user only.
+/// What the computer keeps: its own P-256 key, and the phone it trusts. Saved as a file readable by the user only;
+/// with a secret store (`with_secret_store`), the computer's key and the phone's token are kept there instead and
+/// are left out of the file.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Record {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub computer_key: Vec<u8>,
     pub phone: Option<PairedPhone>,
 }
@@ -125,6 +128,44 @@ pub struct Awaiting {
     pub(crate) at: u64,
 }
 
+/// The system's credential store for the pairing secrets.
+pub trait SecretStore {
+    /// None when nothing was stored yet.
+    fn get(&self) -> Result<Option<Vec<u8>>, String>;
+    fn set(&self, secret: &[u8]) -> Result<(), String>;
+}
+
+/// macOS Keychain, Windows Credential Manager, or the Secret Service on Linux (keyring crate).
+pub struct SystemStore(keyring::Entry);
+
+impl SystemStore {
+    pub fn new() -> Result<Self, String> {
+        keyring::Entry::new("org.ona.desktop", "pairing").map(Self).map_err(|e| e.to_string())
+    }
+}
+
+impl SecretStore for SystemStore {
+    fn get(&self) -> Result<Option<Vec<u8>>, String> {
+        match self.0.get_secret() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn set(&self, secret: &[u8]) -> Result<(), String> {
+        self.0.set_secret(secret).map_err(|e| e.to_string())
+    }
+}
+
+/// What the secret store holds: the computer's key and the paired phone's token.
+#[derive(Serialize, Deserialize, PartialEq)]
+struct Secrets {
+    computer_key: Vec<u8>,
+    #[serde(default)]
+    token: String,
+}
+
 pub struct PairingAuthority {
     pub name: String,
     pub record: Record,
@@ -138,13 +179,32 @@ pub struct PairingAuthority {
     pub storage_error: Option<String>,
     /// Set when the record exists but cannot be read: pairing is disabled and nothing is written.
     unreadable: Option<String>,
+    /// Where the computer's key and the phone's token go; None keeps them in the file.
+    secrets: Option<Box<dyn SecretStore>>,
+    /// What the secret store holds now, so that it is written only when it changes (not at every request).
+    stored: Option<Vec<u8>>,
+    /// Shown in the window when the secret store could not be used and the secrets stay in the file.
+    fallback: Option<String>,
 }
 
 impl PairingAuthority {
     /// Loads the record from `path` (or creates one). `None` keeps everything in memory (tests).
     /// A record that exists but cannot be read is left untouched: the error is shown, nothing is written and no QR
     /// code is offered (a new key would silently replace the computer's identity and forget the phone).
+    #[cfg(test)]
     pub fn new(name: &str, path: Option<PathBuf>) -> Self {
+        Self::load(name, path, None)
+    }
+
+    /// Like `new`, with the computer's key and the phone's token in `store` rather than in the file. A file written
+    /// before keeps its secrets until they are moved to the store, then they leave the file. If the store cannot be
+    /// read (no Secret Service running on Linux, for instance), the secrets stay in the file, readable by this user
+    /// only, and the window says so.
+    pub fn with_secret_store(name: &str, path: PathBuf, store: Result<Box<dyn SecretStore>, String>) -> Self {
+        Self::load(name, Some(path), Some(store))
+    }
+
+    fn load(name: &str, path: Option<PathBuf>, store: Option<Result<Box<dyn SecretStore>, String>>) -> Self {
         let mut unreadable = None;
         let saved = match path.as_ref().map(std::fs::read) {
             None => None,
@@ -166,11 +226,48 @@ impl PairingAuthority {
                 name: name.to_owned(),
                 record: Record { computer_key: SigningKey::random(&mut OsRng).to_bytes().to_vec(), phone: None },
                 pairing_code: None, awaiting: None, commit: None, failed_codes: 0, path: None,
-                storage_error: unreadable.clone(), unreadable,
+                storage_error: unreadable.clone(), unreadable, secrets: None, stored: None, fallback: None,
             };
         }
-        let created = saved.is_none();
-        let mut record = saved.unwrap_or_else(|| Record { computer_key: SigningKey::random(&mut OsRng).to_bytes().to_vec(), phone: None });
+        let mut created = saved.is_none();
+        let mut record = saved.unwrap_or(Record { computer_key: Vec::new(), phone: None });
+        let (mut secrets, mut stored, mut fallback) = (None, None, None);
+        match store.map(|s| s.and_then(|store| store.get().map(|got| (store, got)))) {
+            None => {}
+            Some(Ok((store, got))) => {
+                match got.as_deref().map(serde_json::from_slice::<Secrets>) {
+                    Some(Ok(found)) => {
+                        record.computer_key = found.computer_key;
+                        if let Some(phone) = record.phone.as_mut() {
+                            phone.token = found.token;
+                        }
+                        stored = got;
+                    }
+                    // Unreadable: like an unreadable file, nothing is replaced and no pairing is offered.
+                    Some(Err(e)) => unreadable = Some(format!("Secret d'appairage illisible dans le trousseau ({e}) : rien n'a été modifié.")),
+                    // Nothing stored yet: the secrets still in the file (an earlier version) move to the store below.
+                    None => created = true,
+                }
+                secrets = Some(store);
+            }
+            Some(Err(e)) => {
+                fallback = Some(format!("Trousseau du système indisponible ({e}) : la clé d'appairage reste dans un fichier lisible par vous seul."));
+            }
+        }
+        if let Some(error) = unreadable {
+            return Self {
+                name: name.to_owned(),
+                record: Record { computer_key: SigningKey::random(&mut OsRng).to_bytes().to_vec(), phone: None },
+                pairing_code: None, awaiting: None, commit: None, failed_codes: 0, path: None,
+                storage_error: Some(error.clone()), unreadable: Some(error), secrets: None, stored: None, fallback: None,
+            };
+        }
+        if SigningKey::from_slice(&record.computer_key).is_err() {
+            // No key anywhere: a new identity, and a phone paired with the old one must pair again.
+            record.computer_key = SigningKey::random(&mut OsRng).to_bytes().to_vec();
+            record.phone = None;
+            created = true;
+        }
         // A phone from an earlier version (not verified, or without token) must pair again.
         let legacy = record.phone.as_ref()
             .is_some_and(|p| !p.verified || p.token.is_empty() || protocol::public_key(&p.phone_key).is_none());
@@ -179,7 +276,7 @@ impl PairingAuthority {
         }
         let mut authority = Self {
             name: name.to_owned(), record, pairing_code: None, awaiting: None, commit: None, failed_codes: 0, path,
-            storage_error: None, unreadable: None,
+            storage_error: fallback.clone(), unreadable: None, secrets, stored, fallback,
         };
         if created || legacy {
             let _ = authority.save();
@@ -382,10 +479,36 @@ impl PairingAuthority {
             return Err(error.clone());
         }
         let Some(path) = self.path.clone() else { return Ok(()) };
-        let result = serde_json::to_vec(&self.record).map_err(|e| e.to_string())
-            .and_then(|bytes| write_private(&path, &bytes).map_err(|e| e.to_string()));
-        self.storage_error = result.as_ref().err().map(|e| format!("Enregistrement de l'appairage impossible : {e}"));
+        let result = self.save_secrets().and_then(|file| {
+            let bytes = serde_json::to_vec(&file).map_err(|e| e.to_string())?;
+            write_private(&path, &bytes).map_err(|e| e.to_string())
+        });
+        self.storage_error = match &result {
+            Err(e) => Some(format!("Enregistrement de l'appairage impossible : {e}")),
+            Ok(()) => self.fallback.clone(),
+        };
         result
+    }
+
+    /// Writes the secrets to the store when they changed, and returns the record to write in the file: without them
+    /// when they are in the store.
+    fn save_secrets(&mut self) -> Result<Record, String> {
+        let Some(store) = &self.secrets else { return Ok(self.record.clone()) };
+        let secrets = Secrets {
+            computer_key: self.record.computer_key.clone(),
+            token: self.record.phone.as_ref().map(|p| p.token.clone()).unwrap_or_default(),
+        };
+        let bytes = serde_json::to_vec(&secrets).map_err(|e| e.to_string())?;
+        if self.stored.as_ref() != Some(&bytes) {
+            store.set(&bytes).map_err(|e| format!("trousseau : {e}"))?;
+            self.stored = Some(bytes);
+        }
+        let mut file = self.record.clone();
+        file.computer_key.clear();
+        if let Some(phone) = file.phone.as_mut() {
+            phone.token.clear();
+        }
+        Ok(file)
     }
 }
 
@@ -674,6 +797,100 @@ pub mod tests {
             assert!(result.is_err());
             assert!(authority.storage_error.is_some());
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Keeps what it is given, and can be made to fail.
+    #[derive(Clone, Default)]
+    struct MemoryStore(std::rc::Rc<std::cell::RefCell<(Option<Vec<u8>>, bool, u32)>>);
+
+    impl SecretStore for MemoryStore {
+        fn get(&self) -> Result<Option<Vec<u8>>, String> {
+            let state = self.0.borrow();
+            if state.1 { Err("no secret service".into()) } else { Ok(state.0.clone()) }
+        }
+        fn set(&self, secret: &[u8]) -> Result<(), String> {
+            let mut state = self.0.borrow_mut();
+            state.0 = Some(secret.to_vec());
+            state.2 += 1;
+            Ok(())
+        }
+    }
+
+    fn with_store(path: &Path, store: &MemoryStore) -> PairingAuthority {
+        PairingAuthority::with_secret_store("PC", path.to_path_buf(), Ok(Box::new(store.clone())))
+    }
+
+    /// The computer's key and the phone's token are in the store, not in the file, and survive a restart.
+    #[test]
+    fn keeps_the_secrets_in_the_secret_store() {
+        let (dir, path) = temp_path("store");
+        let store = MemoryStore::default();
+        let mut first = with_store(&path, &store);
+        let key = first.computer_public_key();
+        Phone::new().pair(&mut first);
+        first.confirm_code().unwrap();
+        let token = first.record.phone.as_ref().unwrap().token.clone();
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(!file.contains("computer_key") && !file.contains(&token), "{file}");
+        let stored = String::from_utf8(store.0.borrow().0.clone().unwrap()).unwrap();
+        assert!(stored.contains(&token));
+
+        let writes = store.0.borrow().2;
+        first.record_confirmation("c-1");
+        assert_eq!(store.0.borrow().2, writes, "the store is written only when the secrets change");
+
+        let again = with_store(&path, &store);
+        assert_eq!(again.computer_public_key(), key);
+        assert!(again.is_paired());
+        assert_eq!(again.record.phone.as_ref().unwrap().token, token);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A file from an earlier version: its secrets move to the store and leave the file, the pairing stays.
+    #[test]
+    fn moves_the_secrets_of_an_earlier_file_to_the_store() {
+        let (dir, path) = temp_path("migrate");
+        let mut old = PairingAuthority::new("PC", Some(path.clone()));
+        Phone::new().pair(&mut old);
+        old.confirm_code().unwrap();
+        let key = old.computer_public_key();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("computer_key"));
+
+        let store = MemoryStore::default();
+        let moved = with_store(&path, &store);
+        assert_eq!(moved.computer_public_key(), key);
+        assert!(moved.is_paired());
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("computer_key"));
+        assert!(store.0.borrow().0.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// No store available: the secrets stay in the file and the window says so.
+    #[test]
+    fn without_a_secret_store_the_file_keeps_the_secrets_and_says_so() {
+        let (dir, path) = temp_path("fallback");
+        let store = MemoryStore::default();
+        store.0.borrow_mut().1 = true;
+        let authority = with_store(&path, &store);
+        assert!(authority.storage_error.as_deref().is_some_and(|e| e.contains("Trousseau")));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("computer_key"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The file says a phone is paired but the store lost the secrets: a new identity, and the phone pairs again.
+    #[test]
+    fn a_lost_secret_means_a_new_pairing() {
+        let (dir, path) = temp_path("lost");
+        let store = MemoryStore::default();
+        let mut first = with_store(&path, &store);
+        let key = first.computer_public_key();
+        Phone::new().pair(&mut first);
+        first.confirm_code().unwrap();
+        store.0.borrow_mut().0 = None;
+        let again = with_store(&path, &store);
+        assert_ne!(again.computer_public_key(), key);
+        assert!(!again.is_paired());
         let _ = std::fs::remove_dir_all(dir);
     }
 
