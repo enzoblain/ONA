@@ -7,7 +7,6 @@
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rand::rngs::OsRng;
@@ -15,6 +14,7 @@ use rand::RngCore;
 use serde_json::Value;
 
 use crate::e2ee::{E2eeClient, Transport};
+use crate::private_fs::{self, OwnerOnly};
 use crate::tor::{NetTransport, Network};
 use crate::{Model, ModelFailure, ModelReply, RealCall};
 
@@ -117,7 +117,7 @@ fn relay_url_is_acceptable(url: &str) -> bool {
 fn read_tokens_file(path: &Path) -> Result<Vec<String>, String> {
     let fail = |e: std::io::Error| format!("cannot read the request tokens file: {e}");
     let meta = std::fs::metadata(path).map_err(fail)?;
-    if meta.permissions().mode() & 0o077 != 0 {
+    if private_fs::open_to_others(&meta) {
         return Err("the request tokens file must be readable by its owner only (chmod 600)".into());
     }
     Ok(std::fs::read_to_string(path)
@@ -197,14 +197,14 @@ fn save_tokens(path: &Path, tokens: &VecDeque<String>) -> Result<(), String> {
     let tag: String = random.iter().map(|b| format!("{b:02x}")).collect();
     let temporary = with_suffix(path, &format!(".{tag}.tmp"));
     let fail = |e: std::io::Error| format!("cannot update the request tokens file: {e}");
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary).map_err(fail)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).owner_only().open(&temporary).map_err(fail)?;
     let written = file.write_all(text.as_bytes()).and_then(|_| file.sync_all()).and_then(|_| std::fs::rename(&temporary, path));
     if let Err(e) = written {
         let _ = std::fs::remove_file(&temporary);
         return Err(fail(e));
     }
     let folder = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    File::open(folder).and_then(|d| d.sync_all()).map_err(fail)
+    private_fs::sync_dir(folder).map_err(fail)
 }
 
 struct RequestTokens {
@@ -222,7 +222,7 @@ impl RequestTokens {
             .write(true)
             .create(true)
             .truncate(false)
-            .mode(0o600)
+            .owner_only()
             .open(&lock_path)
             .map_err(|e| format!("cannot open the request tokens lock: {e}"))?;
         lock.try_lock().map_err(|_| "the request tokens file is in use by another process".to_string())?;

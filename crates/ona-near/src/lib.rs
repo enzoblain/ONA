@@ -243,11 +243,28 @@ pub fn load_account_key(path: &Path) -> Result<SigningKey> {
     parse_account_key(text.trim())
 }
 
-/// Not on this system: the owner and permission checks above have no equivalent here yet, so no key file is
-/// read rather than one read without them.
-#[cfg(not(unix))]
-pub fn load_account_key(_path: &Path) -> Result<SigningKey> {
-    bail!("reading a NEAR account key file is only supported on macOS and Linux")
+/// Windows: the file is opened without following a link (`FILE_FLAG_OPEN_REPARSE_POINT`) and must be a regular file.
+/// Windows has no Unix mode or owner id to check: the file takes the access list of its folder, which in the user's
+/// profile other standard accounts cannot open.
+#[cfg(windows)]
+pub fn load_account_key(path: &Path) -> Result<SigningKey> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .context("cannot read account key")?;
+    let meta = file.metadata().context("cannot read account key")?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        bail!("account key must be a regular file (a symbolic link is refused)");
+    }
+    if meta.len() > MAX_KEY_FILE {
+        bail!("account key file is too large");
+    }
+    let mut text = Zeroizing::new(String::new());
+    file.by_ref().take(MAX_KEY_FILE).read_to_string(&mut text).context("cannot read account key")?;
+    parse_account_key(text.trim())
 }
 
 /// Accepts the 64-byte form NEAR tools write, and refuses one whose public half does not match.

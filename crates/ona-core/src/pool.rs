@@ -20,7 +20,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -529,7 +528,7 @@ pub struct PoolClient {
 /// Reads a 32-byte key written as 64 hex characters, in a file only its owner can read.
 pub fn load_wallet_key(path: &Path) -> Result<[u8; 32], String> {
     let meta = fs::metadata(path).map_err(|_| "cannot read the wallet key file".to_string())?;
-    if meta.permissions().mode() & 0o077 != 0 {
+    if crate::private_fs::open_to_others(&meta) {
         return Err("wallet key file is accessible to other users".into());
     }
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;

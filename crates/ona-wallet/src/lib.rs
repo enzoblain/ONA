@@ -22,11 +22,11 @@
 //! cash), its secrets saved before its blinded point leaves, and a status.
 
 pub mod pool;
+mod private_fs;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -36,6 +36,8 @@ use ona_token::{PendingToken, Token, G1_LEN, G2_LEN, TOKEN_LEN};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+
+use crate::private_fs::OwnerOnly;
 
 const PENDING: u8 = 0;
 const MINTED: u8 = 1;
@@ -176,7 +178,7 @@ fn seal_path(path: &Path) -> PathBuf {
 
 fn sync_folder(path: &Path) -> Result<(), String> {
     let folder = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    File::open(folder).and_then(|d| d.sync_all()).map_err(|e| e.to_string())
+    private_fs::sync_dir(folder).map_err(|e| e.to_string())
 }
 
 impl Wallet {
@@ -219,12 +221,11 @@ impl Wallet {
             .read(true)
             .append(true)
             .create(true)
-            .mode(0o600)
+            .owner_only()
             .open(path)
             .map_err(|e| e.to_string())?;
         file.try_lock().map_err(|_| "the wallet is already open in another process".to_string())?;
-        let mode = file.metadata().map_err(|e| e.to_string())?.permissions().mode();
-        if mode & 0o077 != 0 {
+        if private_fs::open_to_others(&file.metadata().map_err(|e| e.to_string())?) {
             return Err("the wallet file must be readable by its owner only (chmod 600)".into());
         }
         let mut bytes = Vec::new();
@@ -367,7 +368,7 @@ impl Wallet {
         // The wallet lock is held, so no other writer uses this name; a leftover is removed.
         let _ = fs::remove_file(&temporary);
         let result = (|| -> std::io::Result<()> {
-            let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+            let mut f = OpenOptions::new().write(true).create_new(true).owner_only().open(&temporary)?;
             f.write_all(format!("{}\n", to_hex(&blob)).as_bytes())?;
             f.sync_all()?;
             fs::rename(&temporary, &self.seal_path)
