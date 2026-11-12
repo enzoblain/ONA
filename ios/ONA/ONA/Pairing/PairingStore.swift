@@ -8,6 +8,9 @@ struct StoredPairing: Codable, Equatable, Sendable {
     let name: String
     let address: URL?
     let onion: String?
+    /// The Tor client authorization key for `onion` (32 bytes), from the QR code. Absent for a pairing made before it
+    /// existed, or on the local network.
+    var onionAuth: Data? = nil
     /// The computer's P-256 public key (X9.63).
     let computerKey: Data
     let keyKind: DeviceKeyKind

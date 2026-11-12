@@ -44,6 +44,8 @@ final class DesktopModel {
     private var server: PhoneServer?
     private var router: PhoneRouter?
     private var ticker: Task<Void, Never>?
+    /// The client key tor was started with.
+    private var torAuth: String?
 
     init() {
         // Kept out of Time Machine: the onion key and tor's state. Shown in the window if it fails.
@@ -70,6 +72,10 @@ final class DesktopModel {
                 guard let self else { return }
                 self.engine.tick()
                 self.pairing.tick()
+                // A phone forgotten: a new client key, and the onion service published again for it only.
+                if self.mode == .tor, self.port != nil, self.pairing.onionClientAuth != self.torAuth {
+                    self.startServing()
+                }
                 // The pool core goes through tor's port only: made again through the new one (or refusing without tor).
                 let socks = self.tor.coreSocks
                 if socks != poolSocks {
@@ -95,7 +101,10 @@ final class DesktopModel {
                 guard let self else { return }
                 self.serverError = message
                 self.port = port
-                if let port, self.mode == .tor { self.tor.start(port: port) } else if port == nil { self.tor.stop() }
+                if let port, self.mode == .tor {
+                    self.torAuth = self.pairing.onionClientAuth
+                    self.tor.start(port: port, clientAuth: self.torAuth)
+                } else if port == nil { self.tor.stop() }
             }
         }
         do {

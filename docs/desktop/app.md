@@ -135,3 +135,12 @@ file handling, the engine's pool commands (only the four pool commands accepted,
 old one is released, the main actor not held) with a fake core, the NEAR amount conversions, and the reading of the
 example replies of pool-commands.md. Not tested: the sheet itself (built, not run or looked at), and the pool against a
 pool contract, an RPC node or a pool agent.
+
+## Tor client authorization
+
+Same as the Tauri app (docs/desktop/tauri.md, "Tor client authorization"): the onion service is published for the
+paired phone's x25519 client key only, written to `tor/hs/authorized_clients/phone.auth` before `tor` starts; the QR
+code gives the secret to the phone (`onion_auth`); the key is kept in the pairing record in the Keychain; forgetting the
+phone makes a new key and starts `tor` again; a pairing made before this change is dropped once. The QR waits for the
+self-check through `tor`, which answers "missing client authorization" (0xF4, `ExtendedErrors`) for a restricted
+service it found.

@@ -598,7 +598,7 @@ struct SettingsTests {
         let torrc = TorService.torrc(data: "/a b/data", hs: "/a\"b/hs", port: 49152, owner: 4242, socksPort: 50123,
                                      coreSocksPort: 50124)
         #expect(torrc.contains("__OwningControllerProcess 4242"))
-        #expect(torrc.contains("SocksPort 127.0.0.1:50123 OnionTrafficOnly\n"))
+        #expect(torrc.contains("SocksPort 127.0.0.1:50123 OnionTrafficOnly ExtendedErrors\n"))
         #expect(torrc.contains("SocksPort 127.0.0.1:50124\n"))
         #expect(torrc.contains("HiddenServicePort 80 127.0.0.1:49152"))
         #expect(torrc.contains(#"HiddenServiceDir "/a\"b/hs""#))
@@ -930,5 +930,37 @@ struct OnionPublishedTests {
         #expect(PoolOutcome.execute(["ok": false, "error": "no vault 9"]) == "Opération refusée : no vault 9")
         #expect(PoolOutcome.recover(["ok": true, "spent": 2, "held_again": 1, "still_spending": 0, "agent_error": "down"])
             == "Récupération : 2 faites, 1 revenues, 0 en attente (agent : down).")
+    }
+}
+
+
+@MainActor
+@Suite struct OnionClientAuthTests {
+    @Test func base32MatchesRFC4648() {
+        for (text, encoded) in [("", ""), ("f", "MY"), ("fo", "MZXQ"), ("foo", "MZXW6"), ("foob", "MZXW6YQ"),
+                                ("fooba", "MZXW6YTB"), ("foobar", "MZXW6YTBOI")] {
+            #expect(ProtocolBytes.base32(Data(text.utf8)) == encoded)
+        }
+    }
+
+    /// The QR gives the phone the client key; tor gets its public half; forgetting the phone changes the key.
+    @Test func theQRGivesThePhoneATorClientKey() throws {
+        let pairing = PairingAuthority(name: "Mac", store: MemoryPairingStore())
+        let secret = try #require(pairing.record.onionAuth)
+        #expect(secret.count == 32)
+        let text = try #require(pairing.payload(address: nil, onion: "x.onion"))
+        var base64 = String(text.dropFirst(ProtocolBytes.payloadPrefix.count))
+            .replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        let json = try #require(Data(base64Encoded: base64))
+        let object = try #require(try JSONSerialization.jsonObject(with: json) as? [String: Any])
+        #expect(object["onion_auth"] as? String == ProtocolBytes.base32(secret))
+        let local = try #require(pairing.payload(address: "http://192.168.1.2:8790", onion: nil))
+        #expect(!local.isEmpty)
+        let line = try #require(pairing.onionClientAuth)
+        let publicKey = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: secret).publicKey.rawRepresentation
+        #expect(line == "descriptor:x25519:" + ProtocolBytes.base32(publicKey))
+        pairing.forgetPhone()
+        #expect(pairing.onionClientAuth != line)
     }
 }

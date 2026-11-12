@@ -156,3 +156,16 @@ for a pool reply there; the phone's portfolio read waits on the worker thread.
 
 Tested: the settings and refusals (unit tests), and the window against a fake bridge returning the example values of
 pool-commands.md (in a browser). Not run against a pool contract.
+
+## Tor client authorization
+
+In Tor mode the onion service is published for the paired phone's client key only (Tor "restricted discovery"): a Tor
+client without the key cannot find it, so it cannot try a pairing code or a request. The app makes an x25519 key,
+writes its public half to `tor/hs/authorized_clients/phone.auth` before starting `tor`, and gives the secret half to
+the phone in the QR code (`onion_auth`, docs/ios/protocol-draft.md). The secret is kept with the pairing secrets (in
+the system's credential store). Forgetting the phone makes a new key and starts `tor` again. A pairing made before
+this change is dropped once: the phone pairs again.
+
+Before showing the QR code, the app checks its own onion address through its own `tor` without the key: with
+`ExtendedErrors` on that SOCKS port, `tor` answers "missing client authorization" (0xF4) once it found the descriptor,
+which shows the service is published.

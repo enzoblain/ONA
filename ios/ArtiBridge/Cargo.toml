@@ -22,7 +22,12 @@ arti-client = { version = "=0.48.0", default-features = false, features = [
     "compression",
     "onion-service-client",
     "static-sqlite",
+    # Restricted onion services (Tor client authorization): the key manager and the API that inserts a client key.
+    "keymgr",
+    "experimental-api",
 ] }
+tor-hscrypto = { version = "=0.48.0", default-features = false }
+tor-llcrypto = { version = "=0.48.0", default-features = false }
 tor-rtcompat = { version = "=0.48.0", default-features = false, features = ["tokio", "native-tls"] }
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "io-util", "time"] }
 serde_json = "=1.0.154"

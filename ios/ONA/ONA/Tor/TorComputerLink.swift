@@ -4,6 +4,8 @@ import Foundation
 /// The onion address authenticates the computer: only the holder of its key can answer there.
 struct TorComputerLink: ComputerLink {
     let onion: String
+    /// The client key of the computer's restricted onion service, given to Arti before the first request.
+    var auth: Data?
     var tor: ArtiTor = .shared
 
     /// Arti's bridge sends `Host: <onion>`, which the computer requires, and no `Origin`.
@@ -16,6 +18,7 @@ struct TorComputerLink: ComputerLink {
         while true {
             attempts += 1
             do {
+                if let auth { try await tor.setOnionAuth(host: onion, key: auth) }
                 let response = try await tor.request(host: onion, method: "POST", path: path, body: body)
                 return RawReply(status: response.status, body: response.body)
             } catch let error as TorError where error.nothingSent && attempts < 2 {
@@ -32,7 +35,7 @@ enum AppLinks {
     static func make(_ endpoint: Endpoint) -> any ComputerLink {
         switch endpoint {
         case .local(let url): HTTPComputerLink(baseURL: url)
-        case .onion(let host): TorComputerLink(onion: host)
+        case .onion(let host, let auth): TorComputerLink(onion: host, auth: auth)
         }
     }
 }

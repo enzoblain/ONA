@@ -10,6 +10,9 @@ struct PairingPayload: Equatable, Sendable {
     /// Local network address (development builds only). Real use goes through `onion`.
     let address: URL?
     let onion: String?
+    /// With `onion`: the 32-byte x25519 key of the phone's Tor client authorization. The computer publishes its onion
+    /// service for this key only, so a Tor client without it cannot even find the service.
+    let onionAuth: Data?
     /// The computer's P-256 public key, X9.63 uncompressed (65 bytes). Every reply of the computer is checked with it.
     let computerKey: Data
     /// Single-use pairing code.
@@ -31,6 +34,7 @@ struct PairingPayload: Equatable, Sendable {
         let name: String
         let address: String?
         let onion: String?
+        let onionAuth: String?
         let computerKey: String
         let code: String
         let expiresAt: Int?
@@ -66,12 +70,36 @@ struct PairingPayload: Equatable, Sendable {
         } : nil
         let onion = wire.onion.flatMap { $0.hasSuffix(".onion") ? $0 : nil }
         guard address != nil || onion != nil else { return .failure(.noAddress) }
-        return .success(PairingPayload(name: wire.name, address: address, onion: onion, computerKey: key,
+        var onionAuth: Data?
+        if onion != nil, let text = wire.onionAuth {
+            guard let decoded = Data(base32: text), decoded.count == 32 else { return .failure(.unreadable) }
+            onionAuth = decoded
+        }
+        return .success(PairingPayload(name: wire.name, address: address, onion: onion, onionAuth: onionAuth, computerKey: key,
                                        code: wire.code, expiresAt: expiresAt))
     }
 }
 
 extension Data {
+    /// RFC 4648 base32 without padding (upper or lower case), as Tor writes client authorization keys.
+    init?(base32 text: String) {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        var bytes: [UInt8] = []
+        var buffer: UInt32 = 0, bits = 0
+        for character in text.uppercased() {
+            guard let value = alphabet.firstIndex(of: character) else { return nil }
+            buffer = (buffer << 5) | UInt32(value)
+            bits += 5
+            if bits >= 8 {
+                bits -= 8
+                bytes.append(UInt8((buffer >> UInt32(bits)) & 0xFF))
+            }
+        }
+        // Leftover bits must be zero padding, fewer than one byte.
+        guard bits < 5, buffer & ((1 << UInt32(bits)) - 1) == 0 else { return nil }
+        self.init(bytes)
+    }
+
     /// base64url without padding (RFC 4648 §5), as used in the pairing QR.
     init?(base64URL text: String) {
         var base64 = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")

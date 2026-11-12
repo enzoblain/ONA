@@ -213,7 +213,8 @@ iOS side, pinned exactly (`Cargo.lock` pins the transitive ones):
 
 | Library | Version | Used by | Notes |
 |---|---|---|---|
-| `arti-client` (Tor Project) | 0.48.0 | `ios/ArtiBridge` (the iOS app) | Features: tokio, native-tls, compression, onion-service-client, static-sqlite |
+| `arti-client` (Tor Project) | 0.48.0 | `ios/ArtiBridge` (the iOS app) | Features: tokio, native-tls, compression, onion-service-client, static-sqlite, keymgr, experimental-api (the client key of a restricted onion service) |
+| `tor-hscrypto`, `tor-llcrypto` (Tor Project) | 0.48.0 | `ios/ArtiBridge` | the onion address and the x25519 client key given to Arti |
 | `tor-rtcompat` (Tor Project) | 0.48.0 | `ios/ArtiBridge` | |
 | `tokio` | 1.54.1 | `ios/ArtiBridge` | |
 | `serde_json` | 1.0.154 | `ios/ArtiBridge` | |
@@ -232,6 +233,7 @@ Desktop app for Windows and Linux (`desktop/tauri/src-tauri`), pinned exactly (`
 | `rand` | 0.8.8 | pairing codes and ids |
 | `qrcode` | 0.14.1 | pairing QR code (SVG) |
 | `keyring` | 4.2.0 | the pairing secrets in the system's credential store (Keychain, Windows Credential Manager, Secret Service) |
+| `x25519-dalek` | 2.0.1 | the public half of the phone's Tor client key, written for `tor` |
 | `serde`, `serde_json` | 1.0.229, 1.0.154 | JSON |
 
 Build tooling, not shipped: `.github/workflows/release.yml` builds the apps on GitHub's machines with Rust 1.99.1,

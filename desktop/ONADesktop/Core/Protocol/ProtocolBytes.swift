@@ -126,14 +126,32 @@ public enum ProtocolBytes {
     }
 
     /// Text of the pairing QR code: `ona-pair:` + base64url(JSON).
-    public static func pairingPayload(name: String, address: String?, onion: String?, computerKey: Data,
-                                      code: String, expiresAt: Int) -> String {
+    /// `onionAuth`: with an onion address, the phone's Tor client key (base32), as `onion_auth`.
+    public static func pairingPayload(name: String, address: String?, onion: String?, onionAuth: String? = nil,
+                                      computerKey: Data, code: String, expiresAt: Int) -> String {
         var object: [String: Any] = ["v": version, "name": name, "computer_key": computerKey.base64EncodedString(),
                                      "code": code, "expires_at": expiresAt]
         object["address"] = address ?? NSNull()
         object["onion"] = onion ?? NSNull()
+        if let onionAuth, onion != nil { object["onion_auth"] = onionAuth }
         let json = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
         return payloadPrefix + base64URL(json)
+    }
+
+    /// RFC 4648 base32, upper case, without padding: the form Tor uses for client authorization keys.
+    public static func base32(_ data: Data) -> String {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        var out = "", buffer: UInt32 = 0, bits = 0
+        for byte in data {
+            buffer = (buffer << 8) | UInt32(byte)
+            bits += 8
+            while bits >= 5 {
+                bits -= 5
+                out.append(alphabet[Int((buffer >> UInt32(bits)) & 31)])
+            }
+        }
+        if bits > 0 { out.append(alphabet[Int((buffer << UInt32(5 - bits)) & 31)]) }
+        return out
     }
 
     public static func base64URL(_ data: Data) -> String {

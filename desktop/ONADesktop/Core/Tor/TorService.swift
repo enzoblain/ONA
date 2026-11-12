@@ -45,14 +45,16 @@ public final class TorService {
     /// The torrc. Paths quoted (escaped); `__OwningControllerProcess` makes tor exit when this app exits, even after a
     /// crash, so no orphan tor keeps publishing the onion address towards a port another program could take.
     /// The SOCKS port listens on 127.0.0.1 only: the app uses it to check that its onion address answers before
-    /// showing the QR code; OnionTrafficOnly keeps other local programs from using it as a general anonymous proxy. The
-    /// second port is ona-core's: the relay and the NEAR RPC nodes are ordinary host names, so it cannot be onion-only.
+    /// showing the QR code; OnionTrafficOnly keeps other local programs from using it as a general anonymous proxy, and
+    /// ExtendedErrors makes tor say "missing client authorization" for a restricted service it found (`SocksProbe`).
+    /// The second port is ona-core's: the relay and the NEAR RPC nodes are ordinary host names, so it cannot be
+    /// onion-only.
     static func torrc(data: String, hs: String, port: UInt16, owner: Int32, socksPort: UInt16, coreSocksPort: UInt16) -> String {
         func quoted(_ path: String) -> String {
             "\"" + path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
         }
         return """
-        SocksPort 127.0.0.1:\(socksPort) OnionTrafficOnly
+        SocksPort 127.0.0.1:\(socksPort) OnionTrafficOnly ExtendedErrors
         SocksPort 127.0.0.1:\(coreSocksPort)
         DataDirectory \(quoted(data))
         HiddenServiceDir \(quoted(hs))
@@ -64,7 +66,9 @@ public final class TorService {
     }
 
     /// Starts tor with an onion service whose port 80 goes to 127.0.0.1:`port` (the port the server got).
-    public func start(port: UInt16) {
+    /// With `clientAuth` (a line `descriptor:x25519:<key>`), the service is published for that client key only
+    /// (restricted discovery): a Tor client without the key cannot even find it.
+    public func start(port: UInt16, clientAuth: String? = nil) {
         stop()
         guard let binary = Self.binary else {
             state = .missing
@@ -76,6 +80,16 @@ public final class TorService {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                                         attributes: [.posixPermissions: 0o700])
                 try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+            }
+            // tor reads the authorized clients when it starts: the folder holds the current phone's key only.
+            let clients = hs.appending(path: "authorized_clients")
+            try? FileManager.default.removeItem(at: clients)
+            if let clientAuth {
+                try FileManager.default.createDirectory(at: clients, withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
+                let file = clients.appending(path: "phone.auth")
+                FileManager.default.createFile(atPath: file.path, contents: Data((clientAuth + "\n").utf8),
+                                               attributes: [.posixPermissions: 0o600])
             }
             let torrc = Self.root.appending(path: "torrc")
             guard let socksPort = SocksProbe.freeLocalPort(), let coreSocksPort = SocksProbe.freeLocalPort(),
@@ -103,9 +117,13 @@ public final class TorService {
             state = .starting
             let hostname = hs.appending(path: "hostname")
             // The `hostname` file stays from one launch to the next: it does not mean the service is published. The QR
-            // code waits until the onion address answers through Tor (at most 5 minutes).
+            // code waits until the onion address answers through Tor (at most 10 minutes). No attempt in the first 45 s,
+            // then one every 30 s: each attempt that finds no descriptor uses up one of the directories holding it, and
+            // tor does not ask it again for 15 minutes (attempts 5 s apart from the start left tor answering "not
+            // found" long after the descriptor was there, 2026-11-12).
             watch = Task { [weak self] in
-                let deadline = Date.now.addingTimeInterval(300)
+                let deadline = Date.now.addingTimeInterval(600)
+                try? await Task.sleep(for: .seconds(45))
                 while Date.now < deadline, !Task.isCancelled {
                     if let host = try? String(contentsOf: hostname, encoding: .utf8)
                         .trimmingCharacters(in: .whitespacesAndNewlines), host.hasSuffix(".onion") {
@@ -117,7 +135,7 @@ public final class TorService {
                             return
                         }
                     }
-                    try? await Task.sleep(for: .seconds(5))
+                    try? await Task.sleep(for: .seconds(30))
                 }
                 if !Task.isCancelled { self?.state = .failed("le service .onion ne répond pas par Tor") }
             }

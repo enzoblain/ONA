@@ -16,12 +16,13 @@ enum Vector {
 }
 
 func payloadText(computerKey: Data, code: String = "Y29kZS0xMjM0NTY3OA", address: String? = "http://computer.test:8790",
-                 onion: String? = nil, version: Int = 1, expiresAt: Int? = Int(Date.now.timeIntervalSince1970) + 600)
-    -> String {
+                 onion: String? = nil, onionAuth: String? = nil, version: Int = 1,
+                 expiresAt: Int? = Int(Date.now.timeIntervalSince1970) + 600) -> String {
     var object: [String: Any] = ["v": version, "name": "Mac de test", "computer_key": computerKey.base64EncodedString(),
                                  "code": code]
     object["address"] = address ?? NSNull()
     object["onion"] = onion ?? NSNull()
+    if let onionAuth { object["onion_auth"] = onionAuth }
     object["expires_at"] = expiresAt
     let json = try! JSONSerialization.data(withJSONObject: object)
     return PairingPayload.prefix + json.base64EncodedString()
@@ -146,7 +147,8 @@ struct PairingPayloadTests {
 
     @Test func onionWinsOverLocalAddress() {
         let local = URL(string: "http://10.0.0.2:8790")!
-        #expect(Endpoint(onion: "abc.onion", address: local) == .onion("abc.onion"))
+        #expect(Endpoint(onion: "abc.onion", address: local) == .onion("abc.onion", auth: nil))
+        #expect(Endpoint(onion: "abc.onion", address: nil, onionAuth: Data([1])) == .onion("abc.onion", auth: Data([1])))
         #expect(Endpoint(onion: nil, address: local) == .local(local))
         #expect(Endpoint(onion: "not-an-onion", address: local) == .local(local))
         #expect(Endpoint(onion: nil, address: nil) == nil)
@@ -209,5 +211,36 @@ struct SignedReplyTests {
         #expect(Paths.view("chat-1") == "/v1/chats/chat-1/view")
         #expect(Paths.view("../confirm") == "/v1/chats/invalid/view")
         #expect(Paths.delete("a b") == "/v1/chats/invalid/delete")
+    }
+}
+
+
+@Suite("Tor client authorization")
+struct OnionAuthTests {
+    static let onion = String(repeating: "a", count: 56) + ".onion"
+
+    @Test func base32MatchesRFC4648() {
+        for (text, encoded) in [("", ""), ("f", "MY"), ("fo", "MZXQ"), ("foo", "MZXW6"), ("foob", "MZXW6YQ"),
+                                ("fooba", "MZXW6YTB"), ("foobar", "MZXW6YTBOI")] {
+            #expect(Data(base32: encoded) == Data(text.utf8))
+            #expect(Data(base32: encoded.lowercased()) == Data(text.utf8))
+        }
+        #expect(Data(base32: "MZ1") == nil)
+        #expect(Data(base32: "MZ") == nil, "non-zero padding bits")
+    }
+
+    @Test func theQRGivesTheClientKeyForTheOnionOnly() throws {
+        let key = P256.Signing.PrivateKey().publicKey.x963Representation
+        // 32 bytes of 0x01, base32: what the computer writes.
+        let auth = "AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQ"
+        let parsed = try PairingPayload.parse(payloadText(computerKey: key, address: nil, onion: Self.onion,
+                                                          onionAuth: auth)).get()
+        #expect(parsed.onionAuth == Data(repeating: 1, count: 32))
+        #expect(Endpoint(onion: parsed.onion, address: nil, onionAuth: parsed.onionAuth)
+                == .onion(Self.onion, auth: Data(repeating: 1, count: 32)))
+        let bad = PairingPayload.parse(payloadText(computerKey: key, address: nil, onion: Self.onion, onionAuth: "AEAQ"))
+        #expect(bad == .failure(.unreadable))
+        let without = try PairingPayload.parse(payloadText(computerKey: key, address: nil, onion: Self.onion)).get()
+        #expect(without.onionAuth == nil)
     }
 }

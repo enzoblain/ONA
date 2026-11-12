@@ -101,6 +101,10 @@ pub struct Record {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub computer_key: Vec<u8>,
     pub phone: Option<PairedPhone>,
+    /// The x25519 secret of the phone's Tor client authorization (32 bytes): the onion service is published for this
+    /// key only, and the QR code gives it to the phone. A new one with every new pairing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub onion_auth: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -164,6 +168,8 @@ struct Secrets {
     computer_key: Vec<u8>,
     #[serde(default)]
     token: String,
+    #[serde(default)]
+    onion_auth: Vec<u8>,
 }
 
 pub struct PairingAuthority {
@@ -224,13 +230,13 @@ impl PairingAuthority {
         if unreadable.is_some() {
             return Self {
                 name: name.to_owned(),
-                record: Record { computer_key: SigningKey::random(&mut OsRng).to_bytes().to_vec(), phone: None },
+                record: Record { computer_key: SigningKey::random(&mut OsRng).to_bytes().to_vec(), phone: None, onion_auth: Vec::new() },
                 pairing_code: None, awaiting: None, commit: None, failed_codes: 0, path: None,
                 storage_error: unreadable.clone(), unreadable, secrets: None, stored: None, fallback: None,
             };
         }
         let mut created = saved.is_none();
-        let mut record = saved.unwrap_or(Record { computer_key: Vec::new(), phone: None });
+        let mut record = saved.unwrap_or(Record { computer_key: Vec::new(), phone: None, onion_auth: Vec::new() });
         let (mut secrets, mut stored, mut fallback) = (None, None, None);
         match store.map(|s| s.and_then(|store| store.get().map(|got| (store, got)))) {
             None => {}
@@ -238,6 +244,7 @@ impl PairingAuthority {
                 match got.as_deref().map(serde_json::from_slice::<Secrets>) {
                     Some(Ok(found)) => {
                         record.computer_key = found.computer_key;
+                        record.onion_auth = found.onion_auth;
                         if let Some(phone) = record.phone.as_mut() {
                             phone.token = found.token;
                         }
@@ -257,7 +264,7 @@ impl PairingAuthority {
         if let Some(error) = unreadable {
             return Self {
                 name: name.to_owned(),
-                record: Record { computer_key: SigningKey::random(&mut OsRng).to_bytes().to_vec(), phone: None },
+                record: Record { computer_key: SigningKey::random(&mut OsRng).to_bytes().to_vec(), phone: None, onion_auth: Vec::new() },
                 pairing_code: None, awaiting: None, commit: None, failed_codes: 0, path: None,
                 storage_error: Some(error.clone()), unreadable: Some(error), secrets: None, stored: None, fallback: None,
             };
@@ -265,6 +272,13 @@ impl PairingAuthority {
         if SigningKey::from_slice(&record.computer_key).is_err() {
             // No key anywhere: a new identity, and a phone paired with the old one must pair again.
             record.computer_key = SigningKey::random(&mut OsRng).to_bytes().to_vec();
+            record.phone = None;
+            created = true;
+        }
+        if record.onion_auth.len() != 32 {
+            // No client key yet (or from an earlier version): a new one. A phone paired without one pairs again, since
+            // the onion service is now published for this key only.
+            record.onion_auth = new_onion_auth();
             record.phone = None;
             created = true;
         }
@@ -307,8 +321,16 @@ impl PairingAuthority {
 
     pub fn payload(&self, address: Option<&str>, onion: Option<&str>) -> Option<String> {
         let code = self.pairing_code.as_ref().filter(|c| now() < c.issued_at + CODE_TTL)?;
-        Some(protocol::pairing_payload(&self.name, address, onion, &self.computer_public_key(), &code.value,
+        let auth = protocol::base32(&self.record.onion_auth);
+        Some(protocol::pairing_payload(&self.name, address, onion, Some(&auth), &self.computer_public_key(), &code.value,
                                        code.issued_at + CODE_TTL))
+    }
+
+    /// The line tor reads in `authorized_clients/` for the phone's key: `descriptor:x25519:<base32 public key>`.
+    pub fn onion_client_auth(&self) -> Option<String> {
+        let secret: [u8; 32] = self.record.onion_auth.as_slice().try_into().ok()?;
+        let public = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret));
+        Some(format!("descriptor:x25519:{}", protocol::base32(public.as_bytes())))
     }
 
     /// Replaces an expired code, and drops a commitment never revealed. Called on the worker's timer.
@@ -411,6 +433,8 @@ impl PairingAuthority {
     /// The codes differ, or the person forgets the phone: a new QR code is issued.
     pub fn forget_phone(&mut self) -> Result<(), String> {
         self.record.phone = None;
+        // The forgotten phone keeps its copy of the client key: a new one, and the onion service is published again.
+        self.record.onion_auth = new_onion_auth();
         self.awaiting = None;
         self.commit = None;
         self.new_code();
@@ -497,6 +521,7 @@ impl PairingAuthority {
         let secrets = Secrets {
             computer_key: self.record.computer_key.clone(),
             token: self.record.phone.as_ref().map(|p| p.token.clone()).unwrap_or_default(),
+            onion_auth: self.record.onion_auth.clone(),
         };
         let bytes = serde_json::to_vec(&secrets).map_err(|e| e.to_string())?;
         if self.stored.as_ref() != Some(&bytes) {
@@ -505,11 +530,18 @@ impl PairingAuthority {
         }
         let mut file = self.record.clone();
         file.computer_key.clear();
+        file.onion_auth.clear();
         if let Some(phone) = file.phone.as_mut() {
             phone.token.clear();
         }
         Ok(file)
     }
+}
+
+fn new_onion_auth() -> Vec<u8> {
+    let mut secret = [0u8; 32];
+    OsRng.fill_bytes(&mut secret);
+    secret.to_vec()
 }
 
 /// Writes a file readable by the current user only (0600 on Unix; per-user AppData on Windows), atomically: a
@@ -798,6 +830,26 @@ pub mod tests {
             assert!(authority.storage_error.is_some());
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The QR gives the phone the client key of the restricted onion service; tor is given its public half. A forgotten
+    /// phone's key stops working.
+    #[test]
+    fn gives_the_phone_a_tor_client_key() {
+        let mut authority = PairingAuthority::new("PC", None);
+        let decode = |payload: String| -> serde_json::Value {
+            let text = payload.strip_prefix(protocol::PAYLOAD_PREFIX).unwrap();
+            serde_json::from_slice(&base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, text).unwrap()).unwrap()
+        };
+        let onion = decode(authority.payload(None, Some("x.onion")).unwrap());
+        let secret = authority.record.onion_auth.clone();
+        assert_eq!(onion["onion_auth"], protocol::base32(&secret));
+        assert!(decode(authority.payload(Some("http://192.168.1.2:8790"), None).unwrap()).get("onion_auth").is_none());
+        let line = authority.onion_client_auth().unwrap();
+        let public = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(<[u8; 32]>::try_from(secret.as_slice()).unwrap()));
+        assert_eq!(line, format!("descriptor:x25519:{}", protocol::base32(public.as_bytes())));
+        authority.forget_phone().unwrap();
+        assert_ne!(authority.onion_client_auth().unwrap(), line);
     }
 
     /// Keeps what it is given, and can be made to fail.

@@ -28,6 +28,8 @@ enum SocksProbe {
 
     /// Opens a stream to `host:port` through the SOCKS5 proxy on 127.0.0.1:`socksPort`, then closes it. Blocking:
     /// call off the main actor.
+    static let missingClientAuth: UInt8 = 0xF4
+
     static func reach(socksPort: UInt16, host: String, port: UInt16 = 80, timeout: TimeInterval = 60) throws(Failure) {
         let name = Array(host.utf8)
         guard !name.isEmpty, name.count <= 255 else { throw .badHost }
@@ -47,7 +49,9 @@ enum SocksProbe {
         try send(fd, [5, 1, 0, 3, UInt8(name.count)] + name + [UInt8(port >> 8), UInt8(port & 0xff)])
         let reply = try receive(fd, 4)
         guard reply[0] == 5 else { throw .refused }
-        guard reply[1] == 0 else { throw .reply(reply[1]) }
+        // 0xF4 (ExtendedErrors): "onion service missing client authorization". tor found the descriptor, restricted
+        // to client keys this app does not hold: the service is published, and the phone's key opens it.
+        guard reply[1] == 0 || reply[1] == missingClientAuth else { throw .reply(reply[1]) }
     }
 
     static func loopback(port: UInt16) -> sockaddr_in {

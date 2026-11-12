@@ -62,6 +62,8 @@ pub struct App {
     jobs: Sender<Job>,
     /// What new cores are made with: `model.json`, and tor's port for the core once tor is ready.
     setup: SharedSetup,
+    /// The client key tor was started with: when pairing replaces it (a phone forgotten), tor starts again.
+    tor_auth: Option<String>,
 }
 
 type Job = Box<dyn FnOnce(&mut App) + Send>;
@@ -89,7 +91,7 @@ impl Worker {
                 pairing: PairingAuthority::with_secret_store(
                     &name,
                     data_dir.join("pairing.json"),
-                    SystemStore::new().map(|s| Box::new(s) as Box<dyn SecretStore>),
+                    secret_store(),
                 ),
                 engine: ChatEngine::with_ona_core(setup.clone()),
                 tor: TorService::new(data_dir.join("tor")),
@@ -102,6 +104,7 @@ impl Worker {
                 qr: None,
                 jobs: sender,
                 setup,
+                tor_auth: None,
             };
             app.serve();
             run(app, inbox);
@@ -119,6 +122,15 @@ impl Worker {
     }
 }
 
+/// The system's credential store. Development builds skip it with `ONA_NO_KEYCHAIN=1`: macOS asks again for the
+/// Keychain item after every rebuild, and the app waits for that answer.
+fn secret_store() -> Result<Box<dyn SecretStore>, String> {
+    if cfg!(debug_assertions) && std::env::var("ONA_NO_KEYCHAIN").as_deref() == Ok("1") {
+        return Err("désactivé pour le développement (ONA_NO_KEYCHAIN)".into());
+    }
+    SystemStore::new().map(|s| Box::new(s) as Box<dyn SecretStore>)
+}
+
 fn run(mut app: App, inbox: Receiver<Job>) {
     let tick = Duration::from_millis(1500);
     let mut next = Instant::now() + tick;
@@ -133,6 +145,9 @@ fn run(mut app: App, inbox: Receiver<Job>) {
                     app.engine.tick();
                     app.pairing.tick();
                     app.tor.poll();
+                    if app.mode == Mode::Tor && app.server.is_some() && app.pairing.onion_client_auth() != app.tor_auth {
+                        app.serve(); // published again for the new phone's key only
+                    }
                     let socks = app.tor.core_socks();
                     let changed = app.setup.lock().map(|mut setup| std::mem::replace(&mut setup.core_socks, socks) != socks);
                     if changed.unwrap_or(false) {
@@ -168,7 +183,8 @@ impl App {
             Ok(server) => {
                 self.server_error = None;
                 if self.mode == Mode::Tor {
-                    self.tor.start(server.port);
+                    self.tor_auth = self.pairing.onion_client_auth();
+                    self.tor.start(server.port, self.tor_auth.as_deref());
                 }
                 self.server = Some(server);
             }

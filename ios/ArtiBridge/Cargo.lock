@@ -97,6 +97,8 @@ dependencies = [
  "arti-client",
  "serde_json",
  "tokio",
+ "tor-hscrypto",
+ "tor-llcrypto",
  "tor-rtcompat",
  "tracing-subscriber",
 ]
