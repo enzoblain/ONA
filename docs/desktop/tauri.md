@@ -181,3 +181,7 @@ this change is dropped once: the phone pairs again.
 Before showing the QR code, the app checks its own onion address through its own `tor` without the key: with
 `ExtendedErrors` on that SOCKS port, `tor` answers "missing client authorization" (0xF4) once it found the descriptor,
 which shows the service is published.
+
+**A local test node** (development builds only): `"local_node": true` in `pool.json` makes the pool talk directly, without
+Tor, to a node and an agent on this computer (`http://127.0.0.1:…`), for example a run of `ona-sandbox-pool`. A release build
+refuses the setting. Tested with unit tests only: no node was run against the window yet.

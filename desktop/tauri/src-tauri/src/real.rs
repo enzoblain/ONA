@@ -48,6 +48,10 @@ pub struct PoolSettings {
     /// `ONA_POOL_AGENT_URL`.
     #[serde(default)]
     pub agent_url: Option<String>,
+    /// A local test node and agent on this computer (for example Hugo's `ona-sandbox-pool`): no Tor, `http` to
+    /// 127.0.0.1. Development builds only; a release build refuses it.
+    #[serde(default)]
+    pub local_node: bool,
 }
 
 impl PoolSettings {
@@ -158,7 +162,16 @@ pub fn make_pool_core(setup: &CoreSetup) -> Box<dyn MissionCore> {
         Ok(Some(settings)) => settings,
         Err(e) => return Box::new(Refusing(e.clone())),
     };
-    let made = network(setup.core_socks, "le pool").and_then(|network| {
+    let network = if settings.local_node {
+        if cfg!(debug_assertions) {
+            ona_core::tor::Network::from_values(None, Some("0"))
+        } else {
+            Err("pool.json : local_node est réservé aux versions de développement".to_owned())
+        }
+    } else {
+        network(setup.core_socks, "le pool")
+    };
+    let made = network.and_then(|network| {
         let client = ona_core::pool::PoolClient::from_lookup(|name| Ok(settings.lookup(name)), &network)?
             .ok_or("pool.json : no wallet file")?;
         let mut core = ona_core::Core::new();
@@ -294,5 +307,18 @@ mod tests {
         assert!(real_core(&settings, Some(9)).is_ok(), "no tokens file is allowed");
         let https = ModelSettings { relay_url: "https://relay.example.org".into(), ..settings };
         assert_eq!(https.relay_onion(), None);
+    }
+
+    /// A local test node: no Tor (development builds), `http` to 127.0.0.1 accepted by ona-core.
+    #[test]
+    fn a_local_node_pool_goes_direct_in_development_builds() {
+        let settings = PoolSettings {
+            wallet_file: "/w".into(), wallet_key_file: "/nonexistent/key".into(), pool: "pool.test.near".into(),
+            rpc_url: "http://127.0.0.1:3030".into(), rpc_url_2: None, recommended_near: None,
+            agent_url: Some("http://127.0.0.1:8790".into()), local_node: true,
+        };
+        let mut core = make_pool_core(&CoreSetup { model: Ok(None), pool: Ok(Some(settings)), core_socks: None });
+        let error = core.dispatch(json!({"cmd": "pool_portfolio"}))["error"].as_str().unwrap().to_owned();
+        assert!(error.contains("wallet key"), "past the network checks, stopped at the key file: {error}");
     }
 }

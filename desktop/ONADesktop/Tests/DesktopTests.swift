@@ -988,3 +988,17 @@ struct OnionPublishedTests {
         #expect(RealModel.relayOnion(file: file) == nil)
     }
 }
+
+@Suite struct LocalNodePoolTests {
+    /// `local_node` leaves pool.json for the bridge's `pool_direct`, in development builds (tests run in debug).
+    @Test func aLocalNodeGoesDirectInDevelopmentBuilds() throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "ona-pool-\(UUID().uuidString).json")
+        try Data(#"{"wallet_file":"/w","wallet_key_file":"/nonexistent/key","pool":"pool.test.near","rpc_url":"http://127.0.0.1:3030","local_node":true}"#.utf8).write(to: file)
+        let setup = RealModel.poolSetup(file: file, coreSocks: nil)
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(setup.utf8)) as? [String: Any])
+        #expect(object["pool_direct"] as? Bool == true)
+        #expect((object["pool"] as? [String: Any])?["local_node"] == nil)
+        let reply = OnaCoreMission(setup: setup).dispatch(["cmd": "pool_portfolio"])
+        #expect((reply["error"] as? String)?.contains("wallet key") == true, "past the network checks: \(reply)")
+    }
+}

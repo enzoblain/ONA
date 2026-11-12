@@ -39,8 +39,19 @@ public enum RealModel {
 
     /// The settings of the app's pool core, as JSON text: `{"model": null, "pool": <pool.json or null>, "core_socks"}`,
     /// or `{"error": …}` when `pool.json` cannot be read. Without the file the core answers `no pool wallet configured`.
+    /// `local_node: true` in `pool.json` (a local test node and agent, no Tor) is honoured in development builds only.
     public static func poolSetup(file: URL = poolFile, coreSocks: UInt16?) -> String {
-        settings(file: file, key: "pool", base: ["model": NSNull(), "pool": NSNull()], coreSocks: coreSocks)
+        let text = settings(file: file, key: "pool", base: ["model": NSNull(), "pool": NSNull()], coreSocks: coreSocks)
+        guard var setup = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any],
+              var pool = setup["pool"] as? [String: Any], let local = pool.removeValue(forKey: "local_node") else { return text }
+        setup["pool"] = pool
+        #if DEBUG
+        setup["pool_direct"] = (local as? Bool) == true
+        #else
+        if (local as? Bool) == true { setup = ["error": "pool.json : local_node est réservé aux versions de développement"] }
+        #endif
+        let data = (try? JSONSerialization.data(withJSONObject: setup)) ?? Data(#"{"error":"pool.json"}"#.utf8)
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// `base` with `key` set to the file's object; unchanged without the file; `{"error"}` when it cannot be read.
