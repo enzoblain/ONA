@@ -26,7 +26,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Seek, SeekFrom, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -34,6 +33,8 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use zeroize::{Zeroize, Zeroizing};
+
+use crate::private_fs::{self, OwnerOnly};
 
 pub const MAX_TTL_SECS: u64 = 24 * 3600;
 /// Small corrections of the clock are absorbed; a larger step back destroys every expiring chat.
@@ -180,7 +181,7 @@ fn replace_private(path: &Path, contents: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .owner_only()
         .open(&tmp)
         .map_err(|e| e.to_string())?;
     file.write_all(contents).map_err(|e| e.to_string())?;
@@ -193,7 +194,7 @@ fn replace_private(path: &Path, contents: &[u8]) -> Result<(), String> {
 }
 
 fn sync_dir(dir: &Path) -> Result<(), String> {
-    File::open(dir).and_then(|d| d.sync_all()).map_err(|e| e.to_string())
+    private_fs::sync_dir(dir).map_err(|e| e.to_string())
 }
 
 impl Vault {
@@ -208,8 +209,7 @@ impl Vault {
             return Err("lifetime must be between 1 second and 24 hours".into());
         }
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
+        private_fs::private_dir(dir).map_err(|e| e.to_string())?;
         if let Some(file) = keys.file() {
             let inside = match (file.parent().map(fs::canonicalize), fs::canonicalize(dir)) {
                 (Some(Ok(parent)), Ok(dir)) => parent.starts_with(&dir),
@@ -224,7 +224,7 @@ impl Vault {
             .write(true)
             .create(true)
             .truncate(false)
-            .mode(0o600)
+            .owner_only()
             .open(dir.join(LOCK_FILE))
             .map_err(|e| e.to_string())?;
         match lock.try_lock() {

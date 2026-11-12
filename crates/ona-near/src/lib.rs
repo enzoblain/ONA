@@ -9,6 +9,7 @@
 use std::fmt;
 use std::fs;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::Duration;
@@ -208,6 +209,7 @@ pub fn check_network(rpc: &Client, expected_chain_id: &str) -> Result<String> {
     Ok(reported.to_string())
 }
 
+#[cfg(unix)]
 #[allow(unsafe_code)]
 fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no argument, cannot fail and touches no memory of ours.
@@ -216,6 +218,7 @@ fn effective_uid() -> u32 {
 
 /// Reads a NEAR account key (`ed25519:<base58>`). The file is opened once, without following a symbolic
 /// link, and must be a regular file that belongs to the current user and that only they can read.
+#[cfg(unix)]
 pub fn load_account_key(path: &Path) -> Result<SigningKey> {
     let mut file = fs::OpenOptions::new()
         .read(true)
@@ -231,6 +234,30 @@ pub fn load_account_key(path: &Path) -> Result<SigningKey> {
     }
     if meta.uid() != effective_uid() {
         bail!("account key file belongs to another user");
+    }
+    if meta.len() > MAX_KEY_FILE {
+        bail!("account key file is too large");
+    }
+    let mut text = Zeroizing::new(String::new());
+    file.by_ref().take(MAX_KEY_FILE).read_to_string(&mut text).context("cannot read account key")?;
+    parse_account_key(text.trim())
+}
+
+/// Windows: the file is opened without following a link (`FILE_FLAG_OPEN_REPARSE_POINT`) and must be a regular file.
+/// Windows has no Unix mode or owner id to check: the file takes the access list of its folder, which in the user's
+/// profile other standard accounts cannot open.
+#[cfg(windows)]
+pub fn load_account_key(path: &Path) -> Result<SigningKey> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .context("cannot read account key")?;
+    let meta = file.metadata().context("cannot read account key")?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        bail!("account key must be a regular file (a symbolic link is refused)");
     }
     if meta.len() > MAX_KEY_FILE {
         bail!("account key file is too large");
@@ -830,6 +857,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_account_key_readable_by_others_is_refused() {
         let path = temp_path("account-key");
         let key = SigningKey::from_bytes(&[6u8; 32]);
@@ -842,6 +870,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_account_key_behind_a_link_or_not_a_file_is_refused() {
         let target = temp_path("link-target");
         let link = temp_path("link");

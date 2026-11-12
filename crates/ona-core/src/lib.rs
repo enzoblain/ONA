@@ -9,6 +9,7 @@ pub mod gate;
 pub mod journal;
 pub mod pool;
 pub mod pool_agent;
+mod private_fs;
 pub mod pseudonym;
 pub mod quote;
 pub mod reader;
