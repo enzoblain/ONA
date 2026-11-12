@@ -37,8 +37,18 @@ TestFlight.
 | `ASC_KEY_ID` | ID of an App Store Connect API key (App Store Connect → Users and Access → Integrations → Keys) |
 | `ASC_ISSUER_ID` | The issuer ID shown on that page |
 | `ASC_KEY_P8_BASE64` | The key file (`AuthKey_….p8`), in base64: `base64 -i AuthKey_XXXX.p8 \| pbcopy` |
+| `MACOS_CERT_P12_BASE64` | The **Developer ID Application** certificate and its private key, as a `.p12`, in base64 |
+| `MACOS_CERT_PASSWORD` | The `.p12`'s export password |
 
-The key needs the **Admin** role. With `-allowProvisioningUpdates`, Xcode uses it to create the certificates and profiles itself (cloud-managed signing) and to register the bundle IDs. That covers Developer ID for the Mac app and App Store distribution for the iPhone app. `notarytool` uses the same key.
+The key needs the **Admin** role. With `-allowProvisioningUpdates`, Xcode uses it to create the iPhone app's certificates
+and profiles (cloud-managed signing) and to register its bundle ID. `notarytool` uses the same key.
+
+The Mac app's **Developer ID Application** certificate cannot be made with that key: Apple lets only the team's Account
+Holder create one (the first release run failed with "Cloud signing permission error"). It is made once on
+developer.apple.com (Certificates, +, Developer ID Application) from a certificate request, then exported as a `.p12`
+with its private key and stored in the two `MACOS_CERT_…` secrets. The workflow imports it into a temporary keychain,
+signs with hardened runtime and a timestamp, notarizes and staples. Without these secrets the Mac app is ad-hoc
+signed. A Mac failure does not stop the Release: it is published with what was built.
 
 ## Before the first TestFlight build
 

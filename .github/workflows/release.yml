@@ -96,6 +96,8 @@ jobs:
       ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
       ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -113,42 +115,44 @@ jobs:
         working-directory: desktop/ONADesktop
         run: swift test
 
-      - name: App Store Connect key
-        if: env.ASC_KEY_ID != '' && startsWith(github.ref, 'refs/tags/v')
-        run: |
-          mkdir -p "$RUNNER_TEMP/asc"
-          printf '%s' "$ASC_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/asc/key.p8"
-          echo "ASC_KEY_PATH=$RUNNER_TEMP/asc/key.p8" >> "$GITHUB_ENV"
-
+      # Developer ID: the certificate is made once by the team's Account Holder and stored as a .p12 secret (Apple does not
+      # let an App Store Connect key create one). It goes into a temporary keychain deleted at the end of the job.
       - name: Build (Developer ID, notarized)
-        if: env.ASC_KEY_ID != '' && startsWith(github.ref, 'refs/tags/v')
+        if: env.MACOS_CERT_P12_BASE64 != '' && env.ASC_KEY_ID != '' && startsWith(github.ref, 'refs/tags/v')
         working-directory: desktop/ONADesktop
         run: |
-          auth=(-allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH"
-                -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          printf '%s' "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/devid.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/devid.p12"
+          identity="$(security find-identity -v -p codesigning "$keychain" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')"
+          test -n "$identity" || { echo "no Developer ID Application identity in the certificate"; exit 1; }
+          team="$(printf '%s' "$identity" | sed -E 's/.*\(([A-Z0-9]{10})\)$/\1/')"
+          # Hardened runtime is on for Release (project settings); --timestamp is required by notarization.
           xcodebuild archive -project ONADesktop.xcodeproj -scheme ONADesktop -configuration Release \
-            -archivePath "$RUNNER_TEMP/ONA.xcarchive" "${auth[@]}" \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY="Apple Development"
-          cat > "$RUNNER_TEMP/export.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>developer-id</string>
-            <key>signingStyle</key><string>automatic</string>
-            <key>teamID</key><string>$APPLE_TEAM_ID</string>
-          </dict></plist>
-          PLIST
-          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/ONA.xcarchive" -exportPath "$RUNNER_TEMP/export" \
-            -exportOptionsPlist "$RUNNER_TEMP/export.plist" "${auth[@]}"
-          ditto -c -k --keepParent "$RUNNER_TEMP/export/ONA.app" "$RUNNER_TEMP/ONA.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/ONA.zip" --key "$ASC_KEY_PATH" --key-id "$ASC_KEY_ID" \
+            -archivePath "$RUNNER_TEMP/ONA.xcarchive" \
+            DEVELOPMENT_TEAM="$team" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$identity" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp --keychain $keychain"
+          app="$RUNNER_TEMP/ONA.xcarchive/Products/Applications/ONA.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$ASC_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/asc/key.p8"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/ONA.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/ONA.zip" --key "$RUNNER_TEMP/asc/key.p8" --key-id "$ASC_KEY_ID" \
             --issuer "$ASC_ISSUER_ID" --wait
-          xcrun stapler staple "$RUNNER_TEMP/export/ONA.app"
+          xcrun stapler staple "$app"
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          ditto -c -k --keepParent "$RUNNER_TEMP/export/ONA.app" "$GITHUB_WORKSPACE/dist/ONA-macOS-arm64.zip"
+          ditto -c -k --keepParent "$app" "$GITHUB_WORKSPACE/dist/ONA-macOS-arm64.zip"
+          security delete-keychain "$keychain"
 
-      - name: Build (ad-hoc signed; pull requests, or no App Store Connect key)
-        if: env.ASC_KEY_ID == '' || !startsWith(github.ref, 'refs/tags/v')
+      - name: Build (ad-hoc signed; pull requests, or no Developer ID certificate)
+        if: env.MACOS_CERT_P12_BASE64 == '' || env.ASC_KEY_ID == '' || !startsWith(github.ref, 'refs/tags/v')
         working-directory: desktop/ONADesktop
         run: |
           xcodebuild archive -project ONADesktop.xcodeproj -scheme ONADesktop -configuration Release \
@@ -222,7 +226,8 @@ jobs:
 
   release:
     name: GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Published with what was built: a Mac failure (signing, notarization) does not hold back Windows and Linux.
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.tauri.result == 'success'
     needs: [tauri, macos]
     runs-on: ubuntu-24.04
     permissions:
