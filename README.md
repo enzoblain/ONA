@@ -233,6 +233,11 @@ Desktop app for Windows and Linux (`desktop/tauri/src-tauri`), pinned exactly (`
 | `qrcode` | 0.14.1 | pairing QR code (SVG) |
 | `serde`, `serde_json` | 1.0.229, 1.0.154 | JSON |
 
+Build tooling, not shipped: `.github/workflows/release.yml` builds the apps on GitHub's machines with Rust 1.99.1,
+`tauri-cli` 2.12.4 (installed with `--locked`) and the GitHub actions `actions/checkout` v7.0.1,
+`actions/upload-artifact` v7.0.2 and `actions/download-artifact` v8.0.2, each pinned to its commit
+([docs/RELEASE.md](docs/RELEASE.md)).
+
 Test tooling, not shipped: C Tor 0.4.9.16 (Homebrew) runs the test onion service on the developer's Mac.
 The iOS app (`ios/ONA`) uses only Apple frameworks (SwiftUI, Foundation, CryptoKit, Security, VisionKit). The mock
 computer (`ios/MockComputer`) uses only the Python standard library; its P-256 code (`p256.py`) is written for the mock

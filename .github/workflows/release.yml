@@ -1,0 +1,242 @@
+# Builds the apps on GitHub's machines and, for a version tag (v0.1.0…), publishes them in a GitHub Release.
+#
+# - Windows and Linux: the Tauri app (desktop/tauri), as .msi / .exe and .deb / .rpm / .AppImage.
+# - macOS (Apple silicon): the SwiftUI app (desktop/ONADesktop). For a version tag with the App Store Connect key set,
+#   signed with Developer ID and notarized; otherwise ad-hoc signed (the person must allow it in macOS settings).
+# - iPhone: built and tested; sent to TestFlight for a version tag when the App Store Connect key is set.
+#
+# Pull requests that touch the apps build them too (without publishing), so a broken build shows before release.
+# Secrets and how to release: docs/RELEASE.md. Actions are pinned to a commit, tools to an exact version.
+name: Build and release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "desktop/**"
+      - "ios/**"
+      - "crates/ona-core/**"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: "1.99.1"
+  TAURI_CLI_VERSION: "2.12.4"
+
+jobs:
+  tauri:
+    name: Tauri app (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+          - name: Windows
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Linux libraries for the web view
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+
+      - name: Tauri CLI ${{ env.TAURI_CLI_VERSION }}
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+
+      - name: Tests
+        working-directory: desktop/tauri/src-tauri
+        run: cargo test --locked
+
+      - name: Build and bundle
+        working-directory: desktop/tauri/src-tauri
+        run: cargo tauri build --ci -- --locked
+
+      - name: Collect the installers
+        run: |
+          mkdir -p dist
+          bundle=desktop/tauri/src-tauri/target/release/bundle
+          find "$bundle" -maxdepth 2 -type f \( -name '*.msi' -o -name '*-setup.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) \
+            -exec cp {} dist/ \;
+          ls -l dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tauri-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: Mac app
+    runs-on: macos-26
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: ona-core bridge
+        run: desktop/OnaCoreBridge/build.sh
+
+      - name: Tests
+        working-directory: desktop/ONADesktop
+        run: swift test
+
+      - name: App Store Connect key
+        if: env.ASC_KEY_ID != '' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$ASC_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/asc/key.p8"
+          echo "ASC_KEY_PATH=$RUNNER_TEMP/asc/key.p8" >> "$GITHUB_ENV"
+
+      - name: Build (Developer ID, notarized)
+        if: env.ASC_KEY_ID != '' && startsWith(github.ref, 'refs/tags/v')
+        working-directory: desktop/ONADesktop
+        run: |
+          auth=(-allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH"
+                -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+          xcodebuild archive -project ONADesktop.xcodeproj -scheme ONADesktop -configuration Release \
+            -archivePath "$RUNNER_TEMP/ONA.xcarchive" "${auth[@]}" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY="Apple Development"
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>developer-id</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/ONA.xcarchive" -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" "${auth[@]}"
+          ditto -c -k --keepParent "$RUNNER_TEMP/export/ONA.app" "$RUNNER_TEMP/ONA.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/ONA.zip" --key "$ASC_KEY_PATH" --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" --wait
+          xcrun stapler staple "$RUNNER_TEMP/export/ONA.app"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          ditto -c -k --keepParent "$RUNNER_TEMP/export/ONA.app" "$GITHUB_WORKSPACE/dist/ONA-macOS-arm64.zip"
+
+      - name: Build (ad-hoc signed; pull requests, or no App Store Connect key)
+        if: env.ASC_KEY_ID == '' || !startsWith(github.ref, 'refs/tags/v')
+        working-directory: desktop/ONADesktop
+        run: |
+          xcodebuild archive -project ONADesktop.xcodeproj -scheme ONADesktop -configuration Release \
+            -archivePath "$RUNNER_TEMP/ONA.xcarchive"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          ditto -c -k --keepParent "$RUNNER_TEMP/ONA.xcarchive/Products/Applications/ONA.app" \
+            "$GITHUB_WORKSPACE/dist/ONA-macOS-arm64-unsigned.zip"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mac
+          path: dist/*
+          if-no-files-found: error
+
+  ios:
+    name: iPhone app
+    runs-on: macos-26
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust ${{ env.RUST_VERSION }} with the iOS targets
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target aarch64-apple-ios aarch64-apple-ios-sim
+          rustup default "$RUST_VERSION"
+
+      - name: Arti (Tor) for the app
+        run: ios/ArtiBridge/build-xcframework.sh
+
+      - name: Tests
+        working-directory: ios/ONA
+        run: swift test
+
+      - name: Build for the simulator
+        working-directory: ios/ONA
+        run: |
+          xcodebuild build -project ONA.xcodeproj -scheme ONA -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Send to TestFlight
+        if: env.ASC_KEY_ID != '' && startsWith(github.ref, 'refs/tags/v')
+        working-directory: ios/ONA
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$ASC_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/asc/key.p8"
+          auth=(-allowProvisioningUpdates -authenticationKeyPath "$RUNNER_TEMP/asc/key.p8"
+                -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+          version="${GITHUB_REF_NAME#v}"
+          xcodebuild archive -project ONA.xcodeproj -scheme ONA -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/ONA.xcarchive" "${auth[@]}" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Automatic \
+            MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
+          cat > "$RUNNER_TEMP/export.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/ONA.xcarchive" -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" "${auth[@]}"
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [tauri, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "ONA $GITHUB_REF_NAME" \
+            --notes "Prototype, not audited. The model, the web and the payments are still simulated (mode: mock). The desktop apps need tor installed for the Tor mode. See docs/RELEASE.md."
