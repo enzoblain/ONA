@@ -126,7 +126,8 @@ with the content, but the account, the network address, the payment and the agen
 
 Setup and details are in [docs/INSTALL.md](docs/INSTALL.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-`./verify.sh` runs every test, compiles the three contracts (and a test staking pool used only on a local node) without local
+`./verify.sh` (after `cargo fetch` once, see [INSTALL](docs/INSTALL.md#check-everything)) runs every test, compiles the three
+contracts (and, used only on a local node or testnet, the pool's test build with a one-minute admin delay and a test staking pool) without local
 paths and prints their SHA-256. It needs Rust 1.99.1 and the
 `wasm32-unknown-unknown` target, and no key, no funded account, no Docker and no browser.
 
@@ -138,7 +139,7 @@ cargo run -p ona-server --bin ona-mock-relay -- 8787     # a fake relay on local
 To measure gas on a local node, run `verify.sh`, set `NEAR_SANDBOX_BIN_PATH` to a `near-sandbox` binary you have checked (required: the
 program refuses to let the library download one), and run `cargo run -p ona-sandbox`. `cargo run -p ona-sandbox --bin
 ona-sandbox-pool` is written to run the pool, its agent and the pool commands on a local node against a test staking pool, fallback
-included, and print the gas of each call; it has not been run yet.
+included, and print the gas of each call; it has not been run to the end yet.
 
 ## Next steps (product direction, not built yet)
 

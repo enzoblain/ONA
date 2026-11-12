@@ -208,14 +208,17 @@ Tested on the mocked NEAR VM only; the wasm build of this version is not verifie
 The account that holds the funds the agent places. Never deployed, tested on the mocked NEAR VM only, with notes made by
 `ona-token`. No staking pool has been called for real. Gas is not measured. `ona-sandbox-pool` (docs/INSTALL.md, "The pool and its
 agent on a local node") is written to run the pool, the agent and `ona-core`'s pool commands on a local node against
-`ona-test-staking` and print the gas of each call; it has not been run yet, and a stand-in proves nothing about the standard staking
+`ona-test-staking` and print the gas of each call; it has not been run to the end yet, and a stand-in proves nothing about the standard staking
 pool.
 
 - **Roles.** Created by `ona-deploy pool` with no access key. The `guardian` lists vaults, freezes them, sets the agent account and the
   fee. The `agent` is an account set by the guardian. Checking that the agent's key lives in an attested enclave is done outside the
   contract and is not built. A new agent (`set_agent`), a new vault (`add_vault`) or a new fee (`set_fee_bps`) is announced and takes
   effect only after the admin delay (set at creation, from 7 to 30 days, 7 by default: meant to be at least as long as a staking pool
-  takes to return unstaked funds, which is not verified). Meanwhile the current agent keeps working but cannot place nor enter, and
+  takes to return unstaked funds, which is not verified). A **test build** (cargo feature `short-admin-delay`, written by
+  `verify.sh` as `ona_pool_short_admin_delay.wasm`, its own SHA-256) accepts an admin delay from one minute, for a local node and
+  testnet only: with it holders have no time to leave before an announcement takes effect, and `get_config` shows the delay chosen.
+  Meanwhile the current agent keeps working but cannot place nor enter, and
   the escape is open to everyone. Freezing a vault takes effect at once: it stops entries and placements, nothing else.
 - **Two compartments.** Money inside the pool is either **cash**, which backs blind cash notes of fixed value and belongs to no vault,
   or in a **vault**, which backs that vault's share notes. Deposits become cash (`issue_cash`), cash enters a vault (`enter`), shares
@@ -844,7 +847,7 @@ a backslash or `=` is refused. It then fails if a wasm contains the repository p
 directory, `/Users/` or `/home/`, and prints each SHA-256.
 
 To check a deployed contract: build the same commit with `verify.sh` and compare the printed SHA-256, in base58, with the `code_hash` of
-the account (`view_account`). Measured: the registry built here had 26 paths under the home directory without the rewrites and none with them. **Not
+the account (`view_account`): `ona_pool.wasm` for a real deployment, `ona_pool_short_admin_delay.wasm` only for the test build. Measured: the registry built here had 26 paths under the home directory without the rewrites and none with them. **Not
 verified:** that a second machine gets the same bytes. A different Rust version, a different `CARGO_HOME` layout or another crates.io index
 directory name gives other bytes, and C code compiled by build scripts was not checked. No reference hash is published yet. The Rust
 version is written in INSTALL.md only: the repository has no `rust-toolchain.toml` yet.

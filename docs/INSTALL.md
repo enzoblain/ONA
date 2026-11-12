@@ -20,8 +20,13 @@ A C compiler is also needed, for `blst`. On macOS: `xcode-select --install`.
 ## Check everything
 
 ```
+cargo fetch
+cargo fetch --manifest-path desktop/OnaCoreBridge/Cargo.toml
 ./verify.sh
 ```
+
+The two `cargo fetch` download, once and online, the exact versions the lock files list: the lock check below runs offline and
+stops with `no matching package named …` on a machine that never downloaded them.
 
 It first checks the `Cargo.lock` of each desktop app (`desktop/OnaCoreBridge`, `desktop/tauri/src-tauri`), which are built outside
 the workspace: each must match its `Cargo.toml`, and a package shared with the root must have the root's version within the same
@@ -201,7 +206,10 @@ pool's tests: no `unstake` above what is staked, no `withdraw` above what is uns
 after the last `unstake`. The program then, on one local node:
 
 1. deploys `ona-pool` with the plan of `ona-deploy pool` (three cash tiers, escape delay one day) and the test staking pool, lists it
-   as vault 0, and moves the node's clock past the 7-day admin delay (`sandbox_fast_forward`);
+   as vault 0, and moves the node's clock past the admin delay (`sandbox_fast_forward`). It deploys the pool's test build
+   (`ona_pool_short_admin_delay.wasm`, built by `verify.sh`) with an admin delay of two minutes: with the normal build's 7 days,
+   the wait would take about 3 h 30 (estimated on 12/11/2026 from about 50 blocks per second, each adding about one second of
+   block time, read twice from the node on an Apple Silicon Mac);
 2. starts the agent in the same process, from the `ona-agent` library (its `Agent`, its HTTP API and the relay's HTTP front, as
    `ona-agent run`), reading the one node as both of its endpoints, which `ona-agent run` refuses: only this test run does it. The
    program ticks the agent and moves the clock forward instead of waiting, with batches of one request and no delay;
@@ -213,7 +221,7 @@ after the last `unstake`. The program then, on one local node:
    `withdraw` with amounts fixed by the contract) and pays a share note.
 
 It stops at the first step that fails, names it, and prints what was verified before, then the gas burnt by every transaction,
-the agent's included, as a table ready for SPEC. It has not been run yet: SPEC still says "not measured" for the pool and the agent.
+the agent's included, as a table ready for SPEC. It has not been run to the end yet: SPEC still says "not measured" for the pool and the agent.
 The deposit's wallet signature is made with the agent's own NEP-413 layout, so the run does not check that layout against a real
 wallet. Run it from a normal terminal, as above.
 
@@ -256,7 +264,7 @@ checks that the account holds no access key and that the code it runs has the SH
 | `ONA_REGISTRY_OWNER_1`, `ONA_REGISTRY_OWNER_2`, `ONA_AGGREGATOR_ACCOUNT` | registry only |
 | `ONA_AGENT_ACCOUNT` | pool only: the account allowed to place funds and pay exits, different from the guardian |
 | `ONA_ESCAPE_DELAY_SECS` | optional, pool only, seconds without agent activity before anyone can pay exits, from 60 to 30 days, default 7 days |
-| `ONA_ADMIN_DELAY_SECS` | optional, pool only, seconds before a new agent, vault or fee takes effect, from 7 to 30 days, default 7 days |
+| `ONA_ADMIN_DELAY_SECS` | optional, pool only, seconds before a new agent, vault or fee takes effect, from 7 to 30 days, default 7 days. From one minute with the pool's test build (`ONA_POOL_WASM=target/wasm32-unknown-unknown/contract/ona_pool_short_admin_delay.wasm`), for testnet only: holders then have no time to leave before a change |
 | `ONA_POOL_CASH_TIERS` | pool only: a JSON file listing the cash notes, `[{"value": "<yoctoNEAR>", "pk_g2": "<base64 of the 96-byte compressed key>"}]`, 1 to 8 tiers, each key used once, each value above 0.004 NEAR |
 | `ONA_CASH_HOURLY_CAP` | pool only: most yoctoNEAR the cash exits may pay per hour, at least two of the largest cash notes |
 | `ONA_MAX_RATE_BPS` | optional, pool only: yearly growth of each account's exit limit in basis points, at most 10000, default 2000 |

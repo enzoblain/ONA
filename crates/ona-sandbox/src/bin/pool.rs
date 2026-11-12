@@ -1,6 +1,7 @@
 //! Runs `ona-pool` and its agent on a local `near-sandbox` node, with real transactions:
 //!
-//! 1. deploys `ona-pool` with the plan `ona-deploy pool` uses, and `ona-test-staking`, a test stand-in for a staking
+//! 1. deploys the test build of `ona-pool` (feature `short-admin-delay`, created with an admin delay of two minutes
+//!    instead of 7 days) with the plan `ona-deploy pool` uses, and `ona-test-staking`, a test stand-in for a staking
 //!    pool (the standard staking pool is not available offline), then lists it as vault 0;
 //! 2. runs the agent of `ona-agent` in this process (its `Agent`, its HTTP API and the relay's HTTP front, as
 //!    `ona-agent run` does) against the node, reading the node twice as its two endpoints, which `ona-agent run`
@@ -52,9 +53,12 @@ const MILLI: u128 = NEAR / 1000;
 const SECOND_NS: u64 = 1_000_000_000;
 const MINUTE_NS: u64 = 60 * SECOND_NS;
 const HOUR_NS: u64 = 60 * MINUTE_NS;
+#[cfg(test)]
 const DAY_NS: u64 = 24 * HOUR_NS;
-/// The contract's shortest admin delay: a new vault takes entries only after it.
-const ADMIN_DELAY_NS: u64 = 7 * DAY_NS;
+/// Admin delay the pool is created with: a new vault takes entries only after it. Two minutes, which only the pool's
+/// test build (`short-admin-delay`) accepts; the normal build refuses less than 7 days.
+const ADMIN_DELAY_SECS: u64 = 120;
+const ADMIN_DELAY_NS: u64 = ADMIN_DELAY_SECS * SECOND_NS;
 /// The escape opens after the agent has been silent this long.
 const ESCAPE_DELAY_SECS: u64 = 86_400;
 /// How long the test staking pool keeps unstaked funds locked.
@@ -77,7 +81,9 @@ const PROBE_BLOCKS: u64 = 1_000;
 const MAX_FAST_FORWARD: u64 = 200_000;
 const MAX_FAST_FORWARDS: usize = 16;
 const NETWORK: &str = "sandbox";
-const POOL_WASM: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/wasm32-unknown-unknown/contract/ona_pool.wasm");
+/// The pool's test build, which `verify.sh` writes next to the normal one.
+const POOL_WASM: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/wasm32-unknown-unknown/contract/ona_pool_short_admin_delay.wasm");
 const STAKING_WASM: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/wasm32-unknown-unknown/contract/ona_test_staking.wasm");
 
@@ -423,7 +429,7 @@ async fn run_all(report: &mut Report) -> Result<()> {
         max_rate_bps: None,
         min_live_notes: 1,
     };
-    let args = ona_deploy::pool_init_args(&guardian, &agent_account, NETWORK, Some(ESCAPE_DELAY_SECS), None, &cash)?;
+    let args = ona_deploy::pool_init_args(&guardian, &agent_account, NETWORK, Some(ESCAPE_DELAY_SECS), Some(ADMIN_DELAY_SECS), &cash)?;
     let o = chain.send(&root, &pool, ona_deploy::deploy_actions(20 * NEAR, pool_code.clone(), &args))?;
     report.record("deploy + new (ona-pool, 3 cash tiers)", &o)?;
     println!("  ona-pool wasm: {} bytes", pool_code.len());
@@ -490,11 +496,15 @@ async fn run_all(report: &mut Report) -> Result<()> {
     println!("  block time per fast-forwarded block: {:.0} ns", time.ns_per_block.unwrap_or(0.0));
     let config = chain.view_final(&pool, "get_config", json!({}))?;
     report.check(config["admin_pending_until"].as_u64().unwrap_or(u64::MAX) <= time.now()?, "the admin delay is over", &config)?;
-    // The agent was silent for longer than the escape delay. Its planner syncs only vaults that hold something, so
-    // nothing of its own would close the escape: the program has it sync the empty vault once.
+    // A sync of the empty vault by the agent counts as its activity: the kind of call its planner makes, even with no
+    // funds placed, once half the escape delay passed without activity. With a two-minute admin delay the escape did
+    // not open meanwhile, so the check is that the contract recorded the call.
+    report.check(config["escape_open"] == json!(false), "the escape is closed before the agent's first call", &config)?;
+    let before = config["last_agent_call"].as_u64().ok_or_else(|| anyhow!("get_config has no last_agent_call: {config}"))?;
     agent.lock().map_err(|_| anyhow!("agent state unusable"))?.chain.run(&Call::Sync(0)).map_err(|e| anyhow!("sync: {}", e.message()))?;
     let config = chain.view_final(&pool, "get_config", json!({}))?;
-    report.check(config["escape_open"] == json!(false), "one sync by the agent closed the escape", &config)?;
+    let after = config["last_agent_call"].as_u64().unwrap_or(0);
+    report.check(after > before && config["escape_open"] == json!(false), "a sync by the agent counts as its activity", &config)?;
 
     report.step("deposit from the depositor's own account, then the cash issue");
     let wallet_path = std::env::temp_dir().join(format!("ona-sandbox-pool-wallet-{}", std::process::id()));
