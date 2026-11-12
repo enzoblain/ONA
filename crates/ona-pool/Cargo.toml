@@ -8,6 +8,11 @@ license = "MIT"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Test build only (a local node, testnet): the admin delay may be as short as one minute instead of 7 days. Its code
+# hash differs from the normal build, and `get_config` shows the admin delay the pool was created with.
+short-admin-delay = []
+
 [dependencies]
 near-sdk = { version = "5.30", features = ["legacy"] }
 

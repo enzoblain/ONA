@@ -103,7 +103,7 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-token` blind BLS tokens | done | native tests |
 | `ona-mint` contract | done, gas measured ([SPEC](SPEC.md#measured-gas)) | mocked NEAR VM with real BLS and ed25519 host functions, and a local NEAR node |
 | `ona-registry` contract | done | mocked NEAR VM only |
-| `ona-pool` contract: listed staking vaults, cash notes with no vault and share notes, exits that name no vault, only to depositors, exit limits that grow only on money still in the pool, 7-day escape | done, never deployed, lending not implemented | mocked NEAR VM only, never against a real staking pool |
+| `ona-pool` contract: listed staking vaults, cash notes with no vault and share notes, exits that name no vault, only to depositors, exit limits that grow only on money still in the pool, 7-day escape | done, never deployed on testnet, lending not implemented | mocked NEAR VM, and once on a local node against a test staking pool (12/11/2026, escape exits not reached); never against a real staking pool |
 | `ona-crowd` crowd simulator for the pool demo | simulation and vault-privacy measure done; the NEAR runner has never run | in-memory chain only |
 | `ona-anchor` hourly journal anchoring, chained checkpoints and their audit, auditor key sealing in `ona-core` | library done, no program receives leaves yet, the agent does not submit checkpoints yet | fake registry only, never on a NEAR node |
 | `ona-deploy` deployment tool | done; refuses mainnet from the names, the parent account and the chain id the node reports; checks the roles and the deployed code hash; testnet not tried yet | unit tests |
@@ -113,20 +113,21 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-wallet` encrypted wallet file | done, keychain not wired in; a wallet without its seal file is refused by design (`open_adopting_unsealed` adopts one explicitly) | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
 | `ona-core` pool commands (deposit, enter, switch, exit to cash, cash payout, portfolio, recovery; prepare then execute once) and pool notes in `ona-wallet` | done; the HTTP client of the agent is built (`ONA_POOL_AGENT_URL`); the bridge's wallet setup is not ([commands](docs/desktop/pool-commands.md)) | fake pool contract with a fake agent, and with the real agent over HTTP on this machine |
-| `ona-agent` pool agent: blind-signing keys, HTTP API, durable store with retention and purge, checks before any gas, depositor check by wallet signature (NEP-413), queue sending entries, leaves and cash exits in delayed batches, planner (reserve, net settlement, steady withdrawals on a fixed grid) | done, **never run against a real chain**, not in an enclave; the NEP-413 format is not verified against a wallet; the agent itself sees every request | fake pool contract only, and the client core against it over HTTP on this machine |
-| `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
+| `ona-agent` pool agent: blind-signing keys, HTTP API, durable store with retention and purge, checks before any gas, depositor check by wallet signature (NEP-413), queue sending entries, leaves and cash exits in delayed batches, planner (reserve, net settlement, steady withdrawals on a fixed grid) | done, run once on a local node (12/11/2026), **never on testnet**, not in an enclave; the NEP-413 format is not verified against a wallet; the agent itself sees every request | fake pool contract, and the real pool on a local node with the client core over HTTP |
+| `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave; one real call with encryption version 3 through the test relay on 12/11/2026 (`e2ee_check`, model `z-ai/glm-5.3-flash`): decrypted reply, valid signature |
 | Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol v1 (commit-then-reveal pairing, signed replies, token for reads, counter against replays, signed content of each confirmation); local-network mode in debug builds only; no wallet yet | Core tests with the real `ona-core` (compiled with `swiftc`, not `swift test`); one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network ([notes](docs/desktop/app.md)) |
 | Desktop app (`desktop/tauri`, Windows and Linux) | same features and protocol v1 as the macOS app, in Rust with Tauri; no wallet yet | Rust tests of every module but `main.rs` with the real `ona-core`, run on macOS; one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network, on macOS. Never built or run on Windows or Linux ([notes](docs/desktop/tauri.md)) |
 | iOS app (`ios/`) | Tor (Arti embedded): an earlier test build reached a test onion service; the Tor screen is now a tab of the app | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
 | iOS app (`ios/`) | chat-style conversations with the agent, and a read-only Pool tab (portfolio from the computer, labelled `mock` until a pool runs), over protocol v1: commit-then-reveal QR pairing, every reply of the computer checked with its key, a token for reads, a counter and a low-s signature for writes, confirmations signed over the digest of what the phone shows, payment digest v2. The mock computer speaks v1 too, labelled `mode: mock`. Over Tor (Arti), one full v1 mission passed against the Tauri app; the first connections to the onion often took more than 60 s. The Secure Enclave key path has not run on a device yet | iOS simulator (software key) against the Tauri app (local network and Tor) and the mock, unit tests on the Mac, vectors shared with the desktop apps ([notes](docs/ios/app.md)) |
 | Client through Tor (`ona_core::tor`, re-exported by `ona-tor`) | wired into `ona`: relay, pool agent and NEAR RPC reads go through a local `tor` when `ONA_TOR_SOCKS` is set, each request with its own SOCKS credentials, no direct fallback; `ONA_REQUIRE_TOR=1` refuses to start without it. Never tested on the real Tor network ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
-| Phala enclave | not built | none |
+| Phala enclave | not built; decided on 12/11/2026: for the hackathon the relay runs on the team's own machine, outside any enclave, so whoever runs it is trusted with what a relay sees (timing, sizes, model name, token counts; content too until the client verifies quotes) | none |
 
 ## Run it
 
 Setup and details are in [docs/INSTALL.md](docs/INSTALL.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-`./verify.sh` runs every test, compiles the three contracts (and a test staking pool used only on a local node) without local
+`./verify.sh` (after `cargo fetch` once, see [INSTALL](docs/INSTALL.md#check-everything)) runs every test, compiles the three
+contracts (and, used only on a local node or testnet, the pool's test build with a one-minute admin delay and a test staking pool) without local
 paths and prints their SHA-256. It needs Rust 1.99.1 and the
 `wasm32-unknown-unknown` target, and no key, no funded account, no Docker and no browser.
 
@@ -138,7 +139,8 @@ cargo run -p ona-server --bin ona-mock-relay -- 8787     # a fake relay on local
 To measure gas on a local node, run `verify.sh`, set `NEAR_SANDBOX_BIN_PATH` to a `near-sandbox` binary you have checked (required: the
 program refuses to let the library download one), and run `cargo run -p ona-sandbox`. `cargo run -p ona-sandbox --bin
 ona-sandbox-pool` is written to run the pool, its agent and the pool commands on a local node against a test staking pool, fallback
-included, and print the gas of each call; it has not been run yet.
+included, and print the gas of each call. Run once on 12/11/2026: 25 checks passed through deposit, cash, entry, placement, leave and
+payment; the escape exits did not run, because the node refused a long fast-forward ([SPEC](SPEC.md#ona-pool-cratesona-pool), with the gas measured).
 
 ## Next steps (product direction, not built yet)
 
@@ -181,8 +183,9 @@ included, and print the gas of each call; it has not been run yet.
   chat folder until the keychain is wired in, and overwriting deleted files does not erase them on an SSD or on APFS.
 - Testnet only. The mint has no real-money deployment planned.
 - **A dishonest relay may still be able to read replies.** With encryption version 2, the relay controls which client key the reply is encrypted to.
-  The client now uses version 3, which binds the reply key, but this fixes the problem only if the NEAR AI gateway accepts version 3, which is **not verified**.
-  Version 3 was tested only against a simulated enclave. A relay running in an attested enclave is not in place yet.
+  The client now uses version 3, which binds the reply key. The NEAR AI gateway accepted version 3 in one real call on 12/11/2026 (model
+  `z-ai/glm-5.3-flash`, through the test relay: decrypted reply, valid signature, 48 tokens). That the real gateway refuses a request whose
+  reply key was replaced was tested only against a simulated enclave. A relay running in an attested enclave is not in place yet.
 - The relay serves a fixed pool of 32 connections with per-request deadlines, so 32 slow clients are enough to keep it busy. Do not expose it
   to the internet yet; behind an onion service, rely on its denial-of-service protection.
 - The signer and the relay read the chain through two RPC endpoints and stop when they disagree. Two endpoints that lie together still

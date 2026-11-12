@@ -38,7 +38,16 @@ pub const DEFAULT_ESCAPE_DELAY_NS: u64 = 7 * DAY_NS;
 /// Default and shortest wait between a guardian announcement and its effect: at least as long as a staking
 /// pool takes to return unstaked funds (not verified), so holders can leave before it.
 pub const DEFAULT_ADMIN_DELAY_NS: u64 = 7 * DAY_NS;
+#[cfg(not(feature = "short-admin-delay"))]
 pub const MIN_ADMIN_DELAY_NS: u64 = 7 * DAY_NS;
+/// Test build only (feature `short-admin-delay`, for a local node or testnet): one minute, so a test need not wait
+/// 7 days before a vault takes entries. Holders then have no time to leave before an announcement takes effect.
+#[cfg(feature = "short-admin-delay")]
+pub const MIN_ADMIN_DELAY_NS: u64 = 60_000_000_000;
+#[cfg(not(feature = "short-admin-delay"))]
+const ADMIN_DELAY_REFUSAL: &str = "admin delay must be between 7 and 30 days";
+#[cfg(feature = "short-admin-delay")]
+const ADMIN_DELAY_REFUSAL: &str = "admin delay must be between one minute and 30 days (test build)";
 pub const MIN_ESCAPE_DELAY_NS: u64 = 60_000_000_000;
 pub const MAX_ESCAPE_DELAY_NS: u64 = 30 * DAY_NS;
 pub const MAX_REQUESTS_PER_ACCOUNT: usize = 4;
@@ -700,7 +709,8 @@ fn sum_outputs(outputs: &[NoteOut], tiers: usize, per_tier: impl Fn(usize) -> u1
 
 #[near]
 impl Pool {
-    /// `escape_delay_secs` and `admin_delay_secs` default to 7 days each (the admin delay at least 7 days), at
+    /// `escape_delay_secs` and `admin_delay_secs` default to 7 days each (the admin delay at least 7 days, one minute in the
+    /// `short-admin-delay` test build), at
     /// most 30. `cash_tiers` sets the cash notes, each worth more than the exit fees. `cash_hourly_cap` is
     /// the most cash exits may pay per hour, at least two of the largest cash notes. `max_rate_bps` is the
     /// yearly growth of exit limits, 20 % by default, at most 100 %. `min_live_notes` (at least 1) is how many
@@ -721,7 +731,7 @@ impl Pool {
         let escape_delay_ns =
             delay_ns(escape_delay_secs, MIN_ESCAPE_DELAY_NS, "escape delay must be between one minute and 30 days");
         let admin_delay_ns =
-            delay_ns(admin_delay_secs, MIN_ADMIN_DELAY_NS, "admin delay must be between 7 and 30 days");
+            delay_ns(admin_delay_secs, MIN_ADMIN_DELAY_NS, ADMIN_DELAY_REFUSAL);
         require!(guardian != agent, "guardian and agent must differ");
         let max_rate_bps = max_rate_bps.unwrap_or(DEFAULT_MAX_RATE_BPS);
         require!(max_rate_bps <= MAX_RATE_BPS, "rate too high");
@@ -2063,7 +2073,24 @@ impl Pool {
 
 #[cfg(test)]
 mod tests {
-    use super::{mul_div, mul_div_up};
+    use super::{delay_ns, mul_div, mul_div_up, ADMIN_DELAY_REFUSAL, DAY_NS, MIN_ADMIN_DELAY_NS};
+
+    /// The normal build refuses an admin delay under 7 days; only the `short-admin-delay` test build accepts one
+    /// minute. `verify.sh` runs this test in both builds.
+    #[test]
+    fn the_shortest_admin_delay_depends_on_the_build() {
+        let one_minute = std::panic::catch_unwind(|| delay_ns(Some(60), MIN_ADMIN_DELAY_NS, ADMIN_DELAY_REFUSAL));
+        let below_a_minute = std::panic::catch_unwind(|| delay_ns(Some(59), MIN_ADMIN_DELAY_NS, ADMIN_DELAY_REFUSAL));
+        assert!(below_a_minute.is_err());
+        if cfg!(feature = "short-admin-delay") {
+            assert_eq!(one_minute.ok(), Some(60_000_000_000));
+        } else {
+            assert!(one_minute.is_err());
+            let just_under = std::panic::catch_unwind(|| delay_ns(Some(7 * 86_400 - 1), MIN_ADMIN_DELAY_NS, ADMIN_DELAY_REFUSAL));
+            assert!(just_under.is_err());
+        }
+        assert_eq!(delay_ns(Some(7 * 86_400), MIN_ADMIN_DELAY_NS, ADMIN_DELAY_REFUSAL), 7 * DAY_NS);
+    }
 
     #[test]
     fn mul_div_is_exact_beyond_128_bits() {
