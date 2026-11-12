@@ -103,3 +103,35 @@ no system task is needed to erase them. ona-core's vault (chats kept up to 24 ho
 an erasure task running while the app is closed will be needed. The app's folder (`~/Library/Application Support/ONA`:
 onion key, tor's state, `model.json`) is marked excluded from Time Machine at every launch; a failure is shown in the
 window. A request tokens file elsewhere is not covered.
+
+## Pool
+
+The **Pool** toolbar button opens a sheet with the pool (docs/desktop/pool-commands.md): the total, the cash, one line
+per vault (its value, "gelé" when frozen, a clock while notes are spending or waiting for their signature), and the
+operations: **Placer du cash** (enter), **Changer** and **Sortir** on a vault (switch, exit), **Payer vers un compte**
+(exit_cash), **Déposer** (deposit) and **Récupérer** (`pool_recover`). Each operation is prepared by ona-core
+(`pool_prepare`), its summary shown (amount, vaults or account, what is received, what is left in the pool's cash and
+lost, exit limit, fees, warnings, network, contract, expiry; not the share price), and executed only when the person
+clicks **Confirmer** in this sheet: never from the phone, which only reads the portfolio. An `outcome unknown` error is
+shown as sent to the pool agent, result later through **Récupérer**. A deposit is prepared and its summary and wallet
+call shown, without a confirm button: it is sent and signed by the person's own NEAR wallet, and connecting a wallet to
+the app is not built. Amounts typed in NEAR ("1.5", "1,5", or "tout" where the operation allows it) are turned into
+yoctoNEAR exactly, without floating point.
+
+Settings: `~/Library/Application Support/ONA/pool.json`, with the same keys as the Tauri app (docs/desktop/tauri.md,
+"Pool"): `wallet_file`, `wallet_key_file`, `pool`, `rpc_url`, and optionally `rpc_url_2`, `recommended_near`,
+`agent_url`. The bridge (`ona_core_new_with` with a `pool` object) refuses unknown keys and values that are not text.
+Without the file the pool answers `no pool wallet configured`; an unreadable file is refused with its reason. With it,
+the pool goes through the app's tor only, like the real model, and never has the real model itself.
+
+The app has one pool core, on a serial queue of its own (`CoreQueue`). The sheet awaits its replies without holding
+the main actor. When tor's port for the core changes (checked every 1.5 s), the core is released once the commands
+already sent are answered, and the next pool command makes a new one: the wallet file is locked by the core that
+opened it, so the new one is made only after the old one is gone. The phone's portfolio read still waits for its reply
+on the main actor.
+
+Tested with unit tests: the bridge's pool setup and refusals (`cargo test` in `desktop/OnaCoreBridge`), the settings
+file handling, the engine's pool commands (only the four pool commands accepted, one core, a new core only after the
+old one is released, the main actor not held) with a fake core, the NEAR amount conversions, and the reading of the
+example replies of pool-commands.md. Not tested: the sheet itself (built, not run or looked at), and the pool against a
+pool contract, an RPC node or a pool agent.

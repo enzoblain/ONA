@@ -714,3 +714,221 @@ struct OnionPublishedTests {
         try? FileManager.default.removeItem(at: folder)
     }
 }
+
+@Suite struct PoolSettingsTests {
+    private func folder() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "ona-pool-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func setup(_ text: String) throws -> [String: Any] {
+        try #require(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+    }
+
+    @Test func withoutPoolJSONThePoolIsNotConfigured() throws {
+        let text = RealModel.poolSetup(file: try folder().appending(path: "pool.json"), coreSocks: 9050)
+        let json = try setup(text)
+        #expect(json["pool"] is NSNull && json["model"] is NSNull && json["core_socks"] as? Int == 9050)
+        let reply = OnaCoreMission(setup: text).dispatch(["cmd": "pool_portfolio"])
+        #expect(reply["error"] as? String == "no pool wallet configured")
+    }
+
+    @Test func anUnreadablePoolJSONIsRefusedNotIgnored() throws {
+        let file = try folder().appending(path: "pool.json")
+        try Data("[1]".utf8).write(to: file)
+        let text = RealModel.poolSetup(file: file, coreSocks: 9050)
+        #expect((try setup(text)["error"] as? String)?.hasPrefix("pool.json") == true)
+        let reply = OnaCoreMission(setup: text).dispatch(["cmd": "pool_portfolio"])
+        #expect(reply["ok"] as? Bool == false)
+        #expect(reply["mode"] as? String == "real")
+        #expect((reply["error"] as? String)?.hasPrefix("pool.json") == true)
+    }
+
+    @Test func thePoolWaitsForTorThenUsesItsSettings() throws {
+        let file = try folder().appending(path: "pool.json")
+        try Data(#"{"wallet_file":"/nonexistent/wallet","wallet_key_file":"/nonexistent/key","pool":"pool.testnet","rpc_url":"https://rpc.testnet.near.org"}"#.utf8)
+            .write(to: file)
+        let text = RealModel.poolSetup(file: file, coreSocks: nil)
+        #expect((try setup(text)["pool"] as? [String: Any])?["pool"] as? String == "pool.testnet")
+        let waiting = OnaCoreMission(setup: text).dispatch(["cmd": "pool_portfolio"])
+        #expect((waiting["error"] as? String)?.contains("Tor") == true)
+        // With tor, ona-core reads the key file: missing here, so refused with ona-core's reason.
+        let refused = OnaCoreMission(setup: RealModel.poolSetup(file: file, coreSocks: 9)).dispatch(["cmd": "pool_portfolio"])
+        #expect(refused["mode"] as? String == "real")
+        #expect((refused["error"] as? String)?.contains("wallet key") == true)
+    }
+
+    @Test func modelJSONIsNotReadForThePool() throws {
+        // The pool core never gets the real model: model stays null whatever model.json says.
+        let json = try setup(RealModel.poolSetup(file: try folder().appending(path: "pool.json"), coreSocks: nil))
+        #expect(json["model"] is NSNull)
+    }
+}
+
+@MainActor
+@Suite struct PoolEngineTests {
+    /// How many fake cores of one test are alive.
+    final class Alive: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        var value: Int { lock.withLock { count } }
+        func add(_ n: Int) { lock.withLock { count += n } }
+    }
+
+    /// Answers every pool command with its name.
+    final class FakePool: MissionCore, @unchecked Sendable {
+        let alive: Alive?
+        let delay: TimeInterval
+        /// When set, every command waits for it (at most 5 s, then refuses).
+        let gate: DispatchSemaphore?
+        private(set) var received: [String] = []
+        init(delay: TimeInterval = 0, gate: DispatchSemaphore? = nil, alive: Alive? = nil) {
+            self.delay = delay
+            self.gate = gate
+            self.alive = alive
+            alive?.add(1)
+        }
+        deinit { alive?.add(-1) }
+        func dispatch(_ request: [String: Any]) -> [String: Any] {
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            if let gate, gate.wait(timeout: .now() + 5) == .timedOut { return ["ok": false, "error": "blocked"] }
+            let cmd = request["cmd"] as? String ?? "?"
+            received.append(cmd)
+            if cmd == "pool_portfolio" {
+                return ["ok": true, "mode": "mock", "total": "0", "vault_count": 0, "vaults": [],
+                        "cash": ["value": "0", "spending_value": "0", "awaiting_signature": 0, "tiers": []]]
+            }
+            return ["ok": true, "mode": "mock", "cmd": cmd]
+        }
+    }
+
+    @Test func onlyPoolCommandsAndOneCoreForTheApp() async {
+        var made: [FakePool] = []
+        var chatCores = 0
+        let engine = ChatEngine(makeCore: { chatCores += 1; return OnaCoreMission() },
+                                makePoolCore: { let core = FakePool(); made.append(core); return core })
+        for cmd in ["open", "pay", "pool_request_exit", "confirm_payment"] {
+            #expect(await engine.pool(["cmd": cmd])["error"] as? String == "commande du pool inconnue")
+        }
+        #expect(await engine.pool(["foo": 1])["ok"] as? Bool == false)
+        #expect(made.isEmpty)
+        for cmd in ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover"] {
+            #expect(await engine.pool(["cmd": cmd])["ok"] as? Bool == true)
+        }
+        #expect(engine.poolPortfolio().map { $0["mode"] as? String } == .success("mock"))
+        #expect(made.count == 1)
+        #expect(made[0].received == ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover", "pool_portfolio"])
+        #expect(chatCores == 0)
+    }
+
+    @Test func resetMakesANewCoreOnlyOnceTheOldOneIsReleased() async {
+        let alive = Alive()
+        var made = 0
+        var aliveWhenMade: [Int] = []
+        let engine = ChatEngine(makeCore: { OnaCoreMission() }, makePoolCore: {
+            made += 1
+            aliveWhenMade.append(alive.value)
+            return FakePool(delay: 0.3, alive: alive)
+        })
+        engine.resetPool() // nothing made yet: nothing to do
+        _ = await engine.pool(["cmd": "pool_recover"])
+        // A slow command in flight, then tor's port changes: the old core (and its wallet lock) goes first.
+        let slow = Task { await engine.pool(["cmd": "pool_recover"])["ok"] as? Bool == true }
+        try? await Task.sleep(for: .milliseconds(50))
+        engine.resetPool()
+        _ = await engine.pool(["cmd": "pool_portfolio"])
+        #expect(made == 2)
+        #expect(aliveWhenMade == [0, 0])
+        #expect(alive.value == 1)
+        #expect(await slow.value)
+    }
+
+    @Test func aSlowPoolDoesNotHoldTheMainActor() async throws {
+        // ona-core answers only once this test, on the main actor, lets it: if the engine held the main actor while
+        // waiting for the reply, the test could not run and the fake would refuse after 5 s.
+        let gate = DispatchSemaphore(value: 0)
+        let engine = ChatEngine(makeCore: { OnaCoreMission() }, makePoolCore: { FakePool(gate: gate) })
+        let pending = Task { await engine.pool(["cmd": "pool_portfolio"])["ok"] as? Bool == true }
+        try await Task.sleep(for: .milliseconds(100))
+        gate.signal()
+        #expect(await pending.value)
+    }
+
+    @Test func withoutAPoolWalletTheRealCoreSaysSo() async {
+        let engine = ChatEngine(makeCore: { OnaCoreMission() })
+        #expect(await engine.pool(["cmd": "pool_portfolio"])["error"] as? String == "no pool wallet configured")
+    }
+}
+
+@Suite struct PoolWindowTests {
+    @Test func nearAmountsAreExact() {
+        #expect(NEARAmount.yocto(fromNEAR: "1.5") == "1500000000000000000000000")
+        #expect(NEARAmount.yocto(fromNEAR: " 1,5 ") == "1500000000000000000000000")
+        #expect(NEARAmount.yocto(fromNEAR: "0.000000000000000000000001") == "1")
+        #expect(NEARAmount.yocto(fromNEAR: "2000") == "2000000000000000000000000000")
+        #expect(NEARAmount.yocto(fromNEAR: "0.1234567890123456789012345") == nil) // 25 decimals
+        #expect(NEARAmount.yocto(fromNEAR: "340282366920938463463374607431768211455") == nil) // overflows
+        for bad in ["", "abc", "1.2.3", "-1", ".5", "1e3", "1 000"] { #expect(NEARAmount.yocto(fromNEAR: bad) == nil) }
+        #expect(NEARAmount.text("9990000000000000000000000") == "9.99")
+        #expect(NEARAmount.text("1") == "0.000000000000000000000001")
+        #expect(NEARAmount.text("12") != nil && NEARAmount.text("1.5") == nil)
+        let typed = "123456.000000000000000000000789"
+        #expect(NEARAmount.text(NEARAmount.yocto(fromNEAR: typed)!) == "123456.000000000000000000000789")
+    }
+
+    @Test func buildsThePrepareRequests() throws {
+        let enter = try PoolRequest.prepare(.enter, amount: "tout", vault: 2).get()
+        #expect(enter["cmd"] as? String == "pool_prepare" && enter["op"] as? String == "enter")
+        #expect(enter["amount"] as? String == "all" && enter["vault"] as? Int == 2)
+        let move = try PoolRequest.prepare(.switch, amount: "1", vault: 0, to: 1).get()
+        #expect(move["from"] as? Int == 0 && move["to"] as? Int == 1 && move["amount"] as? String == "1000000000000000000000000")
+        let pay = try PoolRequest.prepare(.exitCash, amount: "1.9", account: " alice.testnet ").get()
+        #expect(pay["to"] as? String == "alice.testnet" && pay["op"] as? String == "exit_cash")
+        let deposit = try PoolRequest.prepare(.deposit, amount: "100", account: "alice.testnet").get()
+        #expect(deposit["account"] as? String == "alice.testnet")
+        // "tout" only for what is already held; never a zero or unreadable amount.
+        #expect(throws: ProtocolErrorText.self) { try PoolRequest.prepare(.deposit, amount: "tout", account: "a.testnet").get() }
+        #expect(throws: ProtocolErrorText.self) { try PoolRequest.prepare(.exitCash, amount: "all", account: "a.testnet").get() }
+        #expect(throws: ProtocolErrorText.self) { try PoolRequest.prepare(.exit, amount: "0", vault: 0).get() }
+        #expect(throws: ProtocolErrorText.self) { try PoolRequest.prepare(.exitCash, amount: "1", account: " ").get() }
+    }
+
+    @Test func readsThePortfolioAndTheSummary() throws {
+        // The example values of docs/desktop/pool-commands.md.
+        let portfolio = try #require(PoolPortfolio([
+            "ok": true, "mode": "mock", "total": "10990000000000000000000000", "vault_count": 2,
+            "cash": ["value": "1000000000000000000000000", "spending_value": "0", "awaiting_signature": 0],
+            "vaults": [["vault": 0, "frozen": true, "share_price": "1000000000000000000", "value": "9990000000000000000000000",
+                        "spending_value": "0", "awaiting_signature": 1]],
+        ]))
+        #expect(portfolio.vaults.count == 1 && portfolio.vaultCount == 2)
+        #expect(portfolio.vaults[0].frozen && portfolio.vaults[0].pending && !portfolio.cash.pending)
+        let summary = PoolSummary(["amount": "1000000000000000000000000", "contract": "pool.test",
+                                   "expires_at": 1000000300000000000, "fees": ["storage": "20000000000000000000000"],
+                                   "from": 0, "left_in_cash": "170000000000000000000000", "network": "sandbox",
+                                   "new_shares_value": "810000000000000000000000", "op": "switch",
+                                   "share_price": "1000000000000000000", "to": 1])
+        #expect(summary.title == "Changer de vault")
+        #expect(summary.rows.map(\.label) == ["Montant", "Depuis le vault", "Vers", "Nouvelles parts (valeur)",
+                                              "Laissé dans le cash du pool (perdu)", "Frais : storage"])
+        #expect(summary.rows.map(\.value) == ["1 NEAR", "0", "1", "0.81 NEAR", "0.17 NEAR", "0.02 NEAR"])
+        #expect(!summary.rows.contains { $0.value.contains("1000000000000000000") }) // no share price
+        #expect(summary.expiresAt == Date(timeIntervalSince1970: 1000000300))
+        let deposit = PoolSummary(["op": "deposit", "account": "alice.test", "warning": "montant peu courant",
+                                   "fees": ["refundable": "unused margin"],
+                                   "wallet_call": ["receiver": "pool.test", "method": "deposit", "args": [:], "attached": "11010000000000000000000000"]])
+        #expect(deposit.warnings == ["montant peu courant"])
+        #expect(deposit.rows.last == PoolSummary.Row(label: "Frais : refundable", value: "unused margin"))
+        #expect(deposit.walletCall == #"{"args":{},"attached":"11010000000000000000000000","method":"deposit","receiver":"pool.test"}"#)
+    }
+
+    @Test func saysWhatAnExecutionDid() {
+        #expect(PoolOutcome.execute(["ok": false, "error": "outcome unknown, run pool_recover later: timeout"])
+            == "Envoyée à l'agent du pool : le résultat arrivera plus tard (Récupérer).")
+        #expect(PoolOutcome.execute(["ok": true, "complete": true]) == "Opération faite.")
+        #expect(PoolOutcome.execute(["ok": false, "error": "no vault 9"]) == "Opération refusée : no vault 9")
+        #expect(PoolOutcome.recover(["ok": true, "spent": 2, "held_again": 1, "still_spending": 0, "agent_error": "down"])
+            == "Récupération : 2 faites, 1 revenues, 0 en attente (agent : down).")
+    }
+}

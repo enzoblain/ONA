@@ -203,14 +203,18 @@ public final class Chat: Identifiable {
 
 /// One conversation's ona-core on a serial queue of its own. The main actor, which also serves the window and the phone,
 /// sends one command at a time and never waits long for a slow one (`poll`): with the real model a call takes seconds
-/// through Tor. The core is used on the queue only, after it was made.
+/// through Tor. The core is used on the queue only, after it was made. The pool's core is one too: the window awaits
+/// its replies (`send`) without holding the main actor.
 final class CoreQueue: @unchecked Sendable {
     /// How long a tick waits for ona-core: the fake model answers within it, a real call does not and is looked at
     /// again at the next tick.
     static let quickReply: DispatchTimeInterval = .milliseconds(50)
 
-    private let core: any MissionCore
+    /// Nil once released. Used on `queue` only.
+    private var core: (any MissionCore)?
     private let queue = DispatchQueue(label: "org.ona.desktop.core")
+    /// Left once the core is released (`release`).
+    private let released = DispatchGroup()
     private let lock = NSLock()
     /// Replies ready, by ticket. Under `lock`.
     private var replies: [Int: [String: Any]] = [:]
@@ -236,7 +240,7 @@ final class CoreQueue: @unchecked Sendable {
             let ticket = tickets, done = DispatchSemaphore(value: 0)
             let sent = Box(request)
             queue.async { [self] in
-                let reply = core.dispatch(sent.value)
+                let reply = dispatch(sent.value)
                 lock.withLock { replies[ticket] = reply }
                 done.signal()
             }
@@ -256,7 +260,45 @@ final class CoreQueue: @unchecked Sendable {
             self.inflight = nil
         }
         let sent = Box(request)
-        return queue.sync { Box(core.dispatch(sent.value)) }.value
+        return queue.sync { Box(dispatch(sent.value)) }.value
+    }
+
+    /// The reply, awaited: the main actor goes on serving while ona-core works on the queue.
+    @MainActor
+    func send(_ request: [String: Any]) async -> [String: Any] {
+        let sent = Box(request)
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Box<[String: Any]>, Never>) in
+            queue.async { [self] in continuation.resume(returning: Box(dispatch(sent.value))) }
+        }.value
+    }
+
+    /// Drops the core once the commands already sent are answered: its wallet file is unlocked then. Later commands
+    /// answer `ona-core stopped`.
+    @MainActor
+    func release() {
+        released.enter()
+        queue.async { [self] in
+            core = nil
+            released.leave()
+        }
+    }
+
+    /// Waits until `release` has dropped the core.
+    func waitReleased() {
+        released.wait()
+    }
+
+    /// Same, awaited.
+    @MainActor
+    func whenReleased() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            released.notify(queue: .global()) { @Sendable in continuation.resume() }
+        }
+    }
+
+    /// On `queue` only.
+    private func dispatch(_ request: [String: Any]) -> [String: Any] {
+        core?.dispatch(request) ?? ["ok": false, "error": "ona-core stopped"]
     }
 
     private func take(_ ticket: Int) -> [String: Any] {
@@ -323,20 +365,60 @@ public final class ChatEngine {
     static let busyMessage = "Je suis encore sur la mission en cours : je vous tiens au courant ici."
 
     private let makeCore: () -> any MissionCore
+    /// Makes the pool's core (`pool.json`, `RealModel.poolSetup`).
+    private let makePoolCore: () -> any MissionCore
     private var count = 0
-    /// A core of its own for the pool, created on first use (its wallet is configured by ona-core, not here).
-    private var poolCore: (any MissionCore)?
+    /// One core for the pool, on its own queue, made on first use: it holds the wallet file's lock.
+    private var poolQueue: CoreQueue?
+    /// Pool cores dropped by `resetPool` whose release may not be done yet: a new one is made only after, since the
+    /// wallet file is locked by the core that opened it.
+    private var releasingPools: [CoreQueue] = []
 
-    public init(makeCore: @escaping () -> any MissionCore) {
+    /// The commands the pool window may send (docs/desktop/pool-commands.md).
+    public static let poolCommands: Set<String> = ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover"]
+
+    /// `makePoolCore` makes the pool's core; by default `makeCore`.
+    public init(makeCore: @escaping () -> any MissionCore, makePoolCore: (() -> any MissionCore)? = nil) {
         self.makeCore = makeCore
+        self.makePoolCore = makePoolCore ?? makeCore
+    }
+
+    /// Drops the pool's core, so that the next pool command makes a new one: when tor's port for the core changes.
+    public func resetPool() {
+        guard let old = poolQueue else { return }
+        poolQueue = nil
+        old.release()
+        releasingPools.append(old)
+    }
+
+    /// A pool command from the Mac's window: `pool_portfolio`, `pool_prepare`, `pool_execute` or `pool_recover`.
+    /// ona-core works on the pool core's queue: the main actor, which serves the window and the phone, is not held.
+    /// Pool operations are confirmed on the Mac only, never from the phone.
+    public func pool(_ request: [String: Any]) async -> [String: Any] {
+        guard let cmd = request["cmd"] as? String, Self.poolCommands.contains(cmd) else {
+            return ["ok": false, "error": "commande du pool inconnue"]
+        }
+        while let old = releasingPools.first {
+            await old.whenReleased()
+            releasingPools.removeAll { $0 === old }
+        }
+        return await currentPool().send(request)
+    }
+
+    private func currentPool() -> CoreQueue {
+        if let poolQueue { return poolQueue }
+        let made = CoreQueue(core: makePoolCore())
+        poolQueue = made
+        return made
     }
 
     /// The pool portfolio for the phone, read only: ona-core's `pool_portfolio` (cash, shares per vault, total). On
     /// failure, ona-core's error, for instance `no pool wallet configured`. Pool operations are confirmed on the Mac.
+    /// It waits for ona-core's reply on the main actor (through Tor, seconds), like the Tauri app's worker thread.
     public func poolPortfolio() -> Result<[String: Any], PoolError> {
-        let core = poolCore ?? makeCore()
-        poolCore = core
-        var reply = core.dispatch(["cmd": "pool_portfolio"])
+        for old in releasingPools { old.waitReleased() }
+        releasingPools.removeAll()
+        var reply = currentPool().call(["cmd": "pool_portfolio"])
         guard reply["ok"] as? Bool == true else {
             return .failure(PoolError(code: reply["error"] as? String ?? "pool unavailable"))
         }

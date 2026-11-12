@@ -51,7 +51,9 @@ final class DesktopModel {
         pairing = PairingAuthority(name: Host.current().localizedName ?? "Mon Mac", store: KeychainPairingStore())
         let tor = self.tor
         // Read when each core is made: a change to model.json, or tor becoming ready, applies to the next conversation.
-        engine = ChatEngine(makeCore: { OnaCoreMission(setup: RealModel.setup(coreSocks: tor.coreSocks)) })
+        // The pool's core (pool.json): one for the app, made again when tor's port for the core changes.
+        engine = ChatEngine(makeCore: { OnaCoreMission(setup: RealModel.setup(coreSocks: tor.coreSocks)) },
+                            makePoolCore: { OnaCoreMission(setup: RealModel.poolSetup(coreSocks: tor.coreSocks)) })
         mode = ConnectionMode(rawValue: LocalModePolicy.resolve(stored: UserDefaults.standard.string(forKey: "connectionMode"))) ?? .tor
         let router = PhoneRouter(pairing: pairing, engine: engine)
         router.onRequest = { [weak self] line in
@@ -62,10 +64,18 @@ final class DesktopModel {
         self.router = router
         startServing()
         ticker = Task { [weak self] in
+            var poolSocks: UInt16?
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(1500))
-                self?.engine.tick()
-                self?.pairing.tick()
+                guard let self else { return }
+                self.engine.tick()
+                self.pairing.tick()
+                // The pool core goes through tor's port only: made again through the new one (or refusing without tor).
+                let socks = self.tor.coreSocks
+                if socks != poolSocks {
+                    poolSocks = socks
+                    self.engine.resetPool()
+                }
             }
         }
     }

@@ -4,6 +4,7 @@ struct ContentView: View {
     @Bindable var model: DesktopModel
     @State private var selection: Selection? = .newChat
     @State private var showingPhone = false
+    @State private var showingPool = false
     @State private var chatToDelete: Chat?
 
     enum Selection: Hashable {
@@ -29,6 +30,14 @@ struct ContentView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
+                    showingPool = true
+                } label: {
+                    Label("Pool", systemImage: "building.columns")
+                }
+                .help("Le pool : portefeuille et opérations, confirmées sur ce Mac")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
                     showingPhone = true
                 } label: {
                     Label(phoneLabel, systemImage: phoneSymbol)
@@ -38,6 +47,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingPhone) {
             PhoneSheet(model: model)
+        }
+        .sheet(isPresented: $showingPool) {
+            PoolSheet(engine: model.engine)
         }
         // A phone that just paired: the codes must be compared now.
         .onChange(of: model.pairing.awaiting) { _, awaiting in

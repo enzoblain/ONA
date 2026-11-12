@@ -55,7 +55,10 @@ pub extern "C" fn ona_core_new() -> *mut Core {
 /// Creates a core from the app's settings, a JSON object: `{"model": null}` for the fake model, or
 /// `{"model": {"relay_url", "model", "max_tokens", "token_budget", "tokens_file"}, "core_socks": <tor's port or null>}`
 /// for the real one (the names of `ona real`, docs/INSTALL.md), or `{"error": "<why>"}` when the app could not read its
-/// settings. Never null.
+/// settings. `{"model": null, "pool": {"wallet_file", "wallet_key_file", "pool", "rpc_url", "rpc_url_2",
+/// "recommended_near", "agent_url"}, "core_socks": …}` makes the app's pool core (`pool.json`, the names of `ona`'s
+/// `ONA_WALLET_FILE`… variables, docs/desktop/pool-commands.md): its wallet, its RPC nodes and its agent reached through
+/// tor only. A pool core never has the real model. Never null.
 ///
 /// # Safety
 /// `setup` must be a NUL-terminated string.
@@ -82,14 +85,17 @@ fn core_from_setup(text: &str) -> Result<OnaCore, String> {
         return Err(reason.to_owned());
     }
     let model = &setup["model"];
+    let pool = &setup["pool"];
+    if !pool.is_null() {
+        if !model.is_null() {
+            return Err("the pool and the real model each have their own core".to_owned());
+        }
+        return pool_core(pool, &setup["core_socks"]);
+    }
     if model.is_null() {
         return Ok(OnaCore::new());
     }
-    let socks = setup["core_socks"]
-        .as_u64()
-        .ok_or("le vrai modèle passe par Tor : choisissez le mode Tor, et attendez que le code QR apparaisse")?;
-    // ONA_REQUIRE_TOR: nothing the core sends may go straight to its destination.
-    let network = ona_core::tor::Network::from_values(Some(&format!("127.0.0.1:{socks}")), Some("1"))?;
+    let network = network(&setup["core_socks"], "le vrai modèle")?;
     let field = |key: &str| -> Option<String> {
         match &model[key] {
             serde_json::Value::String(text) => Some(text.clone()),
@@ -107,6 +113,47 @@ fn core_from_setup(text: &str) -> Result<OnaCore, String> {
     })?;
     let mut core = OnaCore::new();
     core.use_real_model(config, &network)?;
+    Ok(core)
+}
+
+/// Through the app's tor only (`ONA_REQUIRE_TOR`): nothing the core sends may go straight to its destination.
+fn network(core_socks: &serde_json::Value, what: &str) -> Result<ona_core::tor::Network, String> {
+    let socks = core_socks
+        .as_u64()
+        .ok_or_else(|| format!("{what} passe par Tor : choisissez le mode Tor, et attendez que le code QR apparaisse"))?;
+    ona_core::tor::Network::from_values(Some(&format!("127.0.0.1:{socks}")), Some("1"))
+}
+
+/// The keys of `pool.json`, with the variable of `ona` each one stands for.
+const POOL_KEYS: [(&str, &str); 7] = [
+    ("wallet_file", "ONA_WALLET_FILE"),
+    ("wallet_key_file", "ONA_WALLET_KEY_FILE"),
+    ("pool", "ONA_POOL"),
+    ("rpc_url", "ONA_RPC_URL"),
+    ("rpc_url_2", "ONA_RPC_URL_2"),
+    ("recommended_near", "ONA_POOL_RECOMMENDED_NEAR"),
+    ("agent_url", "ONA_POOL_AGENT_URL"),
+];
+
+/// The core that answers the pool commands, from `pool.json`. One for the whole app: the core that opens the wallet
+/// file locks it.
+fn pool_core(settings: &serde_json::Value, core_socks: &serde_json::Value) -> Result<OnaCore, String> {
+    let settings = settings.as_object().ok_or("pool.json : not an object")?;
+    if let Some(unknown) = settings.keys().find(|key| !POOL_KEYS.iter().any(|(name, _)| name == key)) {
+        return Err(format!("pool.json : unknown field `{unknown}`"));
+    }
+    let network = network(core_socks, "le pool")?;
+    let lookup = |variable: &str| -> Result<Option<String>, String> {
+        let Some((key, _)) = POOL_KEYS.iter().find(|(_, name)| *name == variable) else { return Ok(None) };
+        match settings.get(*key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(text)) => Ok(Some(text.clone())),
+            Some(_) => Err(format!("pool.json : `{key}` is not text")),
+        }
+    };
+    let client = ona_core::pool::PoolClient::from_lookup(lookup, &network)?.ok_or("pool.json : no wallet_file")?;
+    let mut core = OnaCore::new();
+    core.set_pool(client);
     Ok(core)
 }
 
@@ -247,6 +294,34 @@ mod tests {
         assert_eq!(unsafe { &*core }.refusal, None);
         unsafe { ona_core_free(core) };
         let _ = std::fs::remove_file(tokens);
+    }
+
+    #[test]
+    fn without_pool_settings_the_pool_is_not_configured() {
+        let core = new_with(serde_json::json!({"model": null, "pool": null, "core_socks": 9}));
+        assert_eq!(call(core, r#"{"cmd":"pool_portfolio"}"#)["error"], "no pool wallet configured");
+        unsafe { ona_core_free(core) };
+    }
+
+    #[test]
+    fn the_pool_waits_for_tor_and_reads_its_settings() {
+        let pool = serde_json::json!({"wallet_file": "/nonexistent/wallet", "wallet_key_file": "/nonexistent/key",
+            "pool": "pool.testnet", "rpc_url": "https://rpc.testnet.near.org"});
+        for (setup, reason) in [
+            (serde_json::json!({"model": null, "pool": pool, "core_socks": null}), "Tor"),
+            // With tor, ona-core reads the key file: missing here, so refused with ona-core's reason.
+            (serde_json::json!({"model": null, "pool": pool, "core_socks": 9}), "wallet key"),
+            (serde_json::json!({"model": null, "pool": {"wallet_file": "/w", "colour": "x"}, "core_socks": 9}), "unknown field"),
+            (serde_json::json!({"model": null, "pool": {"wallet_file": 3}, "core_socks": 9}), "not text"),
+            (serde_json::json!({"model": {"relay_url": "x"}, "pool": pool, "core_socks": 9}), "own core"),
+            (serde_json::json!({"error": "pool.json : unreadable"}), "unreadable"),
+        ] {
+            let core = new_with(setup);
+            let reply = call(core, r#"{"cmd":"pool_portfolio"}"#);
+            assert_eq!((reply["ok"].clone(), reply["mode"].clone()), (serde_json::json!(false), serde_json::json!("real")));
+            assert!(reply["error"].as_str().unwrap().contains(reason), "{reply}");
+            unsafe { ona_core_free(core) };
+        }
     }
 
     #[test]
