@@ -139,6 +139,9 @@ pub trait SecretStore {
     fn set(&self, secret: &[u8]) -> Result<(), String>;
 }
 
+/// The secret store and what it held, or why it could not be read.
+pub type LoadedSecrets = Result<(Box<dyn SecretStore>, Option<Vec<u8>>), String>;
+
 /// macOS Keychain, Windows Credential Manager, or the Secret Service on Linux (keyring crate).
 pub struct SystemStore(keyring::Entry);
 
@@ -207,10 +210,28 @@ impl PairingAuthority {
     /// read (no Secret Service running on Linux, for instance), the secrets stay in the file, readable by this user
     /// only, and the window says so.
     pub fn with_secret_store(name: &str, path: PathBuf, store: Result<Box<dyn SecretStore>, String>) -> Self {
-        Self::load(name, Some(path), Some(store))
+        let loaded = store.and_then(|store| store.get().map(|got| (store, got)));
+        Self::load(name, Some(path), Some(loaded))
     }
 
-    fn load(name: &str, path: Option<PathBuf>, store: Option<Result<Box<dyn SecretStore>, String>>) -> Self {
+    /// Like `with_secret_store`, with the store already read (`SecretStore::get`), on another thread: reading the
+    /// Keychain can wait for the person to answer a macOS dialog, and the worker thread must keep serving meanwhile.
+    pub fn with_loaded_secrets(name: &str, path: PathBuf, loaded: LoadedSecrets) -> Self {
+        Self::load(name, Some(path), Some(loaded))
+    }
+
+    /// While the secret store is being read: no pairing, no QR code, nothing written; the window says why.
+    pub fn waiting(name: &str) -> Self {
+        let reason = "Lecture du trousseau du système… Si une fenêtre le demande, autorisez ONA.".to_owned();
+        Self {
+            name: name.to_owned(),
+            record: Record { computer_key: SigningKey::random(&mut OsRng).to_bytes().to_vec(), phone: None, onion_auth: Vec::new() },
+            pairing_code: None, awaiting: None, commit: None, failed_codes: 0, path: None,
+            storage_error: Some(reason.clone()), unreadable: Some(reason), secrets: None, stored: None, fallback: None,
+        }
+    }
+
+    fn load(name: &str, path: Option<PathBuf>, store: Option<LoadedSecrets>) -> Self {
         let mut unreadable = None;
         let saved = match path.as_ref().map(std::fs::read) {
             None => None,
@@ -238,7 +259,7 @@ impl PairingAuthority {
         let mut created = saved.is_none();
         let mut record = saved.unwrap_or(Record { computer_key: Vec::new(), phone: None, onion_auth: Vec::new() });
         let (mut secrets, mut stored, mut fallback) = (None, None, None);
-        match store.map(|s| s.and_then(|store| store.get().map(|got| (store, got)))) {
+        match store {
             None => {}
             Some(Ok((store, got))) => {
                 match got.as_deref().map(serde_json::from_slice::<Secrets>) {

@@ -86,6 +86,11 @@ le téléphone : à réserver aux tests. La fenêtre ne reçoit que l'image du Q
   restent dans le fichier, lisible par l'utilisateur seul, et la fenêtre le dit. Testé avec un faux coffre ; le vrai
   coffre de chaque système n'a pas été essayé. Un autre programme du même utilisateur peut en général lire le coffre
   aussi : il protège surtout contre la copie d'un fichier (sauvegarde, autre machine).
+- Le coffre est lu au démarrage sur un fil à part : macOS peut d'abord demander l'accord de la personne (après une mise
+  à jour non signée de la même façon, par exemple). Pendant ce temps la fenêtre répond et dit « Lecture du trousseau du
+  système… » ; le téléphone n'est pas servi et aucun QR n'est montré tant que l'appairage n'est pas chargé. Une écriture
+  dans le coffre (nouvel appairage) se fait encore sur le fil principal. Les tests n'utilisent jamais le coffre du
+  système.
 - Le fichier d'appairage et la clé du service onion (`tor/hs`) sous Windows n'ont pas de droits restreints au-delà du
   dossier de l'utilisateur (pas d'ACL posée). Sous Linux, la clé onion est un fichier simple dans un dossier 0700 : qui
   la copie peut publier la même adresse ; les réponses signées par la clé de l'ordinateur limitent alors l'usurpation.
