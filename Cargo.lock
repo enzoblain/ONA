@@ -2162,10 +2162,7 @@ version = "0.0.1"
 dependencies = [
  "ed25519-dalek",
  "ona-core",
- "ona-near",
- "rand",
  "serde_json",
- "ureq",
 ]
 
 [[package]]

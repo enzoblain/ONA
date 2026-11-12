@@ -1,11 +1,13 @@
 # Tor
 
-`crates/ona-tor` sends the relay traffic and NEAR RPC calls through a local `tor` daemon. **No ONA program uses it yet:** the crate
-is tested, the wiring into the wallet and the app is still to do.
+`ona_core::tor` (re-exported by `crates/ona-tor`) sends the client's traffic through a local `tor` daemon. `ona` uses it when
+`ONA_TOR_SOCKS` is set: the relay (`ona real`), the pool agent and the NEAR RPC reads of the pool commands all go through Tor, each
+request on its own circuit, and nothing goes directly (docs/INSTALL.md, "Go through Tor"). Without it `ona` says at start that it
+connects directly; `ONA_REQUIRE_TOR=1` makes it refuse to start. The desktop and phone apps do not set it yet.
 
-**Do not publish the relay as an onion service yet.** It handles one connection at a time, so an anonymous client can stall it. Requests
-of one transport share a Tor circuit, so the relay can link them; build one transport per mission (see below). Never run `ona-mock-relay` with the onion
-service active: it hands out free test credits. The `/opt/homebrew` paths below are for Apple Silicon Macs.
+**Do not publish the relay as an onion service yet.** It handles one connection at a time, so an anonymous client can stall it. Never
+run `ona-mock-relay` with the onion service active: it hands out free test credits. The `/opt/homebrew` paths below are for Apple
+Silicon Macs.
 
 ## Choice: SOCKS5 to a local `tor`
 
@@ -21,7 +23,8 @@ the same `Transport` trait.
 
 ## What the code guarantees
 
-Each point has a test in `crates/ona-tor` (`tests/` and the unit tests in `src/lib.rs`), run against a fake SOCKS5 server on localhost.
+Each point has a test in `crates/ona-tor/tests`, `crates/ona-core/tests/tor.rs` or the unit tests of `crates/ona-core/src/tor.rs`,
+run against a fake SOCKS5 server on localhost.
 
 - Host names go to Tor unresolved (`socks5h`), as a SOCKS domain name.
 - **Fails closed.** If Tor is down, refuses the connection, or is not speaking SOCKS, the request returns an error and nothing is
@@ -31,9 +34,10 @@ Each point has a test in `crates/ona-tor` (`tests/` and the unit tests in `src/l
   IP addresses (also written as names: `127.1`, `0x7f.1`, `2130706433`), `localhost` and `*.localhost`, names without a dot, a port that
   is not plain digits (`:+443`), and a query or fragment in the base address are refused.
 - Redirects are not followed. No `User-Agent` header is sent.
-- Each `TorTransport` and each `near_client` gets its own random SOCKS username and password. Tor's `IsolateSOCKSAuth`, on by default
-  according to the Tor manual, puts streams with different credentials on different circuits; this is not verified on the real network.
-  Requests made through one transport can still share a circuit, so use one transport per mission.
+- Every request of a `TorTransport`, and each `near_client`, gets its own random SOCKS username and password; `ona`'s RPC reads make a
+  new client each. Tor's `IsolateSOCKSAuth`, on by default according to the Tor manual, puts streams with different credentials on
+  different circuits; this is not verified on the real network. A cash issue and a vault entry therefore never share a circuit.
+- Without Tor, `ona` refuses an onion address, so the name never reaches the local resolver.
 
 ## Run the relay as an onion service
 
@@ -62,6 +66,9 @@ tor -f docs/torrc.client.example --DataDirectory "$HOME/.ona-tor-client"
 Wait for `Bootstrapped 100%` in its output. The template opens two ports, so that relay traffic and NEAR transactions do not share a
 circuit: Tor [keeps separate SOCKS ports apart by default](https://2019.www.torproject.org/docs/tor-manual.html.en) (read through a
 search summary on 2026-11-10, on an older copy of the manual). `SafeSocks 1` makes Tor itself refuse a request carrying an IP address.
+
+`ona` uses one port for everything, its requests kept apart by their credentials: `ONA_TOR_SOCKS=127.0.0.1:9050 ona real`. A program
+that builds its own transport or RPC client can use the two ports:
 
 ```rust
 use ona_tor::{near_client, TorProxy, TorTransport};

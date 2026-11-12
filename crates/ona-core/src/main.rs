@@ -1,12 +1,15 @@
 //! `ona`: reads one JSON request per line on stdin and prints one JSON reply per line.
 //! `ona demo` runs a full mission against the fakes. `ona real` uses the real model, configured by
 //! the `ONA_REAL_*` variables. With `ONA_WALLET_FILE` set, the pool commands read the pool contract (`ONA_POOL`)
-//! through `ONA_RPC_URL`, views only; no transport to the pool agent exists yet. Nothing else touches a network.
+//! through `ONA_RPC_URL` and reach the pool agent at `ONA_POOL_AGENT_URL`. Nothing else touches a network.
+//! With `ONA_TOR_SOCKS` set, all of it goes through that local Tor port; without it `ona` says so on stderr, and
+//! `ONA_REQUIRE_TOR=1` makes it refuse to start.
 
 use std::io;
 
 use ona_core::pool::PoolClient;
 use ona_core::remote::RemoteConfig;
+use ona_core::tor::Network;
 use ona_core::{serve, Core};
 use serde_json::{json, Value};
 
@@ -39,20 +42,38 @@ fn main() {
         run_demo();
         return;
     }
+    // Read once: the relay, the pool agent and the RPC nodes all go the same way.
+    let network = match Network::from_env() {
+        Ok(network) => network,
+        Err(e) => {
+            eprintln!("cannot start: {e}");
+            std::process::exit(1);
+        }
+    };
     let mut core = Core::new();
+    let mut online = false;
     if std::env::args().nth(1).as_deref() == Some("real") {
-        if let Err(e) = RemoteConfig::from_env().and_then(|config| core.use_real_model(config)) {
+        if let Err(e) = RemoteConfig::from_env().and_then(|config| core.use_real_model(config, &network)) {
             eprintln!("cannot use the real model: {e}");
             std::process::exit(1);
         }
+        online = true;
     }
-    match PoolClient::from_env() {
-        Ok(Some(pool)) => core.set_pool(pool),
+    match PoolClient::from_env(&network) {
+        Ok(Some(pool)) => {
+            core.set_pool(pool);
+            online = true;
+        }
         Ok(None) => {}
         Err(e) => {
             eprintln!("cannot open the pool wallet: {e}");
             std::process::exit(1);
         }
+    }
+    match network.warning() {
+        Some(warning) if online => eprintln!("warning: {warning}"),
+        _ if online => eprintln!("network: every connection goes through Tor, each request on its own circuit"),
+        _ => {}
     }
     if let Err(e) = serve(&mut core, io::stdin().lock(), io::stdout().lock()) {
         eprintln!("cannot read stdin or write stdout: {e}");

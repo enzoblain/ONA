@@ -11,7 +11,8 @@
 //! follows the formats of SPEC (`ona-pool`), built by `ona_wallet::pool`. Calls only the agent may make
 //! (`issue_cash`, `enter`, `leave`, `pay_exit`) go through `PoolAgent`: `pool_agent::HttpAgent` when
 //! `ONA_POOL_AGENT_URL` is set, otherwise `NoAgent`, which refuses them. Reading the portfolio reads the
-//! configuration, the cash and every vault, whoever runs it, and sends nothing to the relay.
+//! configuration, the cash and every vault, whoever runs it, and sends nothing to the relay. With `ONA_TOR_SOCKS` set,
+//! every RPC read and every agent call goes through Tor, each request on its own circuit (`tor::Network`).
 //!
 //! A deposit's `pool_execute` runs twice: the first call makes the cash notes and returns `sign_message`, the text the
 //! user's own NEAR wallet signs (NEP-413 `signMessage`); the second call carries that signature
@@ -29,6 +30,8 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+use crate::tor::Network;
 
 const NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 /// Share price of a vault with no share, as in the contract.
@@ -85,22 +88,43 @@ pub trait PoolChain {
 /// Most blocks the two endpoints' final blocks may be apart, as in `ona-server`'s cross-checked reads.
 pub const MAX_HEIGHT_GAP: u64 = 20;
 
-/// The pool read through a NEAR RPC endpoint, on final blocks.
+/// The pool read through a NEAR RPC endpoint, on final blocks. Each read makes its own client: through Tor, its own
+/// circuit, so the endpoint cannot tie the reads of one recovery or of two operations to one circuit.
 pub struct NearPool {
-    client: ona_near::Client,
+    url: String,
     pool: String,
+    network: Network,
 }
 
 impl NearPool {
+    /// Directly to `rpc_url`, unchecked (a local test node over plain http included).
     pub fn new(rpc_url: &str, pool: &str) -> Self {
-        // Views sign nothing; the client only needs a key to exist.
-        Self { client: ona_near::Client::new(rpc_url, SigningKey::generate(&mut OsRng)), pool: pool.into() }
+        Self { url: rpc_url.into(), pool: pool.into(), network: Network::Direct }
+    }
+
+    /// `rpc_url` reached through `network`, checked for it: through Tor `https` to a host name or `http` to an onion
+    /// service; directly `https`, or `http` to this machine, never an onion address.
+    pub fn through(network: &Network, rpc_url: &str, pool: &str) -> Result<Self, String> {
+        network.check(rpc_url)?;
+        if !network.is_tor() {
+            ona_near::check_rpc_url(rpc_url).map_err(|e| e.to_string())?;
+        }
+        Ok(Self { url: rpc_url.into(), pool: pool.into(), network: network.clone() })
+    }
+
+    /// Views sign nothing; the client only needs a key to exist.
+    fn client(&self) -> Result<ona_near::Client, String> {
+        let key = SigningKey::generate(&mut OsRng);
+        match &self.network {
+            Network::Direct => Ok(ona_near::Client::new(&self.url, key)),
+            Network::Tor(proxy) => crate::tor::near_client(&self.url, key, proxy),
+        }
     }
 }
 
 impl PoolChain for NearPool {
     fn view(&self, method: &str, args: Value) -> Result<Value, String> {
-        self.client.view_final(&self.pool, method, args).map_err(|e| e.to_string())
+        self.client()?.view_final(&self.pool, method, args).map_err(|e| e.to_string())
     }
 
     fn mode(&self) -> &'static str {
@@ -112,7 +136,7 @@ impl PoolChain for NearPool {
             None => json!({"finality": "final"}),
             Some(h) => json!({"block_id": h}),
         };
-        let block = self.client.post("block", params).map_err(|e| e.to_string())?;
+        let block = self.client()?.post("block", params).map_err(|e| e.to_string())?;
         let header = &block["header"];
         let height = header["height"].as_u64().ok_or("unexpected block reply")?;
         let hash = header["hash"].as_str().filter(|h| !h.is_empty()).ok_or("unexpected block reply")?;
@@ -121,7 +145,7 @@ impl PoolChain for NearPool {
 
     fn view_at(&self, block_hash: &str, method: &str, args: Value) -> Result<Value, String> {
         let result = self
-            .client
+            .client()?
             .post(
                 "query",
                 json!({
@@ -568,8 +592,9 @@ impl PoolClient {
 
     /// `None` when `ONA_WALLET_FILE` is not set. Otherwise `ONA_WALLET_KEY_FILE`, `ONA_POOL` and `ONA_RPC_URL` are
     /// needed, and `ONA_POOL_RECOMMENDED_NEAR` may list the recommended deposits. The agent is reached at
-    /// `ONA_POOL_AGENT_URL` when it is set; otherwise it is `NoAgent`, which refuses every agent call.
-    pub fn from_env() -> Result<Option<Self>, String> {
+    /// `ONA_POOL_AGENT_URL` when it is set; otherwise it is `NoAgent`, which refuses every agent call. Every RPC node and
+    /// the agent are reached through `network` (`tor::Network::from_env`), their addresses checked for it.
+    pub fn from_env(network: &Network) -> Result<Option<Self>, String> {
         let Ok(file) = std::env::var("ONA_WALLET_FILE") else {
             return Ok(None);
         };
@@ -577,32 +602,32 @@ impl PoolClient {
         let key = load_wallet_key(Path::new(&need("ONA_WALLET_KEY_FILE")?))?;
         let pool = need("ONA_POOL")?;
         let rpc = need("ONA_RPC_URL")?;
-        ona_near::check_rpc_url(&rpc).map_err(|e| format!("ONA_RPC_URL: {e}"))?;
+        let first = NearPool::through(network, &rpc, &pool).map_err(|e| format!("ONA_RPC_URL: {e}"))?;
         let recommended = match std::env::var("ONA_POOL_RECOMMENDED_NEAR") {
             Ok(text) => Some(parse_recommended(&text).map_err(|e| format!("ONA_POOL_RECOMMENDED_NEAR: {e}"))?),
             Err(std::env::VarError::NotPresent) => None,
             Err(_) => return Err("ONA_POOL_RECOMMENDED_NEAR is not valid text".into()),
         };
         let second = match std::env::var("ONA_RPC_URL_2") {
-            Ok(url) => {
-                ona_near::check_rpc_url(&url).map_err(|e| format!("ONA_RPC_URL_2: {e}"))?;
-                Some(url)
-            }
+            Ok(url) => Some(NearPool::through(network, &url, &pool).map_err(|e| format!("ONA_RPC_URL_2: {e}"))?),
             Err(std::env::VarError::NotPresent) => None,
             Err(_) => return Err("ONA_RPC_URL_2 is not valid text".into()),
         };
-        let wallet = Wallet::open(Path::new(&file), &key)?;
-        // The agent's address follows the RPC rule: https, or plain http to this machine only.
+        // Directly, the agent's address follows the RPC rule: https, or plain http to this machine only. Through Tor,
+        // https to a host name or http to an onion service.
         let agent: Box<dyn PoolAgent> = match std::env::var("ONA_POOL_AGENT_URL") {
             Ok(url) => {
-                ona_near::check_rpc_url(&url).map_err(|e| format!("ONA_POOL_AGENT_URL: {e}"))?;
-                Box::new(crate::pool_agent::HttpAgent::to_url(&url))
+                if !network.is_tor() {
+                    ona_near::check_rpc_url(&url).map_err(|e| format!("ONA_POOL_AGENT_URL: {e}"))?;
+                }
+                Box::new(crate::pool_agent::HttpAgent::through(network, &url).map_err(|e| format!("ONA_POOL_AGENT_URL: {e}"))?)
             }
             Err(_) => Box::new(NoAgent),
         };
-        let mut client = Self::new(wallet, Box::new(NearPool::new(&rpc, &pool)), agent, &pool);
-        if let Some(url) = second {
-            client = client.with_second_chain(Box::new(NearPool::new(&url, &pool)));
+        let wallet = Wallet::open(Path::new(&file), &key)?;
+        let mut client = Self::new(wallet, Box::new(first), agent, &pool);
+        if let Some(second) = second {
+            client = client.with_second_chain(Box::new(second));
         }
         Ok(Some(match recommended {
             Some(r) => client.with_recommended(r),

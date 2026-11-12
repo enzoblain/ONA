@@ -592,18 +592,43 @@ note kept by the wallet is paid by the contract.
   later spend.
 - **What leaves the computer.** `pool_portfolio` and every preparation read `get_config`, `get_cash` and `get_vault` for every vault,
   on final blocks, whatever the user holds; nothing goes to the relay. `exit_cash` also reads `get_holder` for the paid account,
-  `pool_recover` `is_spent` for its spending notes. The agent receives the signed notes it must submit.
-- **The agent.** `pool_agent::HttpAgent` speaks `ona-agent`'s HTTP API when `ONA_POOL_AGENT_URL` is set (`https`, or `http` to the
-  machine itself, a final `/` ignored; no redirect, no proxy from the environment; any `e2ee::Transport` can carry it, Tor included).
-  Each operation opens a new connection, so a cash issue and the entry that follows share none; through Tor a host passes
-  `ona-tor`'s transport, which draws new SOCKS credentials each time it is created, so Tor keeps each operation on its own circuit
-  (`IsolateSOCKSAuth`, Tor's default; not tested over the real Tor network). 200 is
+  `pool_recover` `is_spent` for its spending notes. The agent receives the signed notes it must submit. With `ONA_TOR_SOCKS` set
+  every read and every agent call goes through Tor (see "Network: Tor" below); without it, `ona` says at start that the RPC nodes
+  and the agent see the computer's IP address.
+- **The agent.** `pool_agent::HttpAgent` speaks `ona-agent`'s HTTP API when `ONA_POOL_AGENT_URL` is set (directly `https`, or `http`
+  to the machine itself; through Tor `https` to a host name or `http` to an onion service; a final `/` ignored; no redirect, no proxy
+  from the environment). Each operation opens a new connection, so a cash issue and the entry that follows share none; through Tor
+  each request draws new SOCKS credentials, so Tor keeps each operation on its own circuit (`IsolateSOCKSAuth`, Tor's default;
+  tested against a fake SOCKS server only, not over the real Tor network). 200 is
   done; 202, a 5xx or a transport failure is an unknown outcome; any other status is a certain refusal. Without the variable the agent is
   `NoAgent`, which refuses every call before anything is sent; the notes prepared for a refused operation are forgotten.
 - **Not built.** Configuring a pool wallet through the C bridge. Checking on chain that the user's deposit arrived before asking for
   cash (the agent checks it). The contract's minimum of live notes per tier and its waiting rules are not planned around: the agent
   may refuse, and the note is then held again. Tested against a fake contract, with a fake agent and with the real agent over HTTP on
   the machine itself.
+
+## Network: Tor (`crates/ona-core/src/tor.rs`)
+`ona` reads `ONA_TOR_SOCKS` once at start (`tor::Network::from_env`) and builds every connection it opens from it: the relay's
+transport (`remote::http_model`), the pool agent's (`HttpAgent::through`) and the NEAR RPC clients of the pool commands
+(`NearPool::through`). `ona-tor` re-exports this module; no other crate depends on it for now.
+
+- **Set** (`ip:port` on this machine; another machine is refused, the link to it would not be encrypted): SOCKS5 with remote name
+  resolution (`socks5h`): host names go to Tor as SOCKS domain names, nothing is resolved locally. Every request makes a new HTTP
+  agent with a random 8-byte SOCKS user name and password, so with `IsolateSOCKSAuth` (Tor's default, from the Tor manual, not
+  verified on the real network) each request, and so each pool operation and each RPC read, has its own circuit. Destinations must be
+  `https` to a public host name or `http` to a version 3 onion service; a local name, an IP address (also written as a name), plain
+  `http` to the internet, a non-numeric port, a query or a fragment are refused before anything is sent. A Tor that is down,
+  refuses, or does not speak SOCKS makes the request fail; nothing is retried directly. No proxy is read from the environment, no
+  redirect followed, no `User-Agent` sent.
+- **Unset**: connections go straight to their destinations, and `ona real` or a configured pool prints on stderr that the relay,
+  the agent and the RPC nodes see the computer's IP address. An onion address is then refused, so its name never reaches the local
+  resolver. `ONA_REQUIRE_TOR=1` makes `ona` refuse to start instead.
+- **Tests**: a fake SOCKS5 server on localhost that asks for credentials (`crates/ona-core/tests/tor.rs`): a cash issue, an entry
+  and a signature request through `HttpAgent` use three different user names and the onion name unresolved; two RPC reads use two;
+  the relay's requests one each; with Tor down every call fails. The unit tests of `tor.rs` check, with a listener standing for the
+  destination, that nothing reaches it directly when Tor is down, refuses or does not speak SOCKS.
+- **Not covered**: the real Tor network (circuits, exits accepting NEAR RPC, TLS through the tunnel); timing and size of the traffic,
+  which Tor does not hide from an observer of both ends; `examples/e2ee_check.rs`, a manual check tool, which still connects directly.
 
 ## Pool agent (`crates/ona-agent`)
 **Never run against a real chain, not in an enclave.** The program that acts on `ona-pool` for its users.
@@ -762,7 +787,7 @@ What the client does refuse is being made to sign something else than what its c
   error. A longer value would have let the node append actions of its choice to the signed bytes. The nonce is `nonce + 1`, refused on
   overflow. Both are read with finality `final`. Signer and receiver must be well-formed account ids.
 - `ONA_RPC_URL` must be `https`, or `http` to `127.0.0.1`, `localhost` or `[::1]`. Plain `http` to a `.onion` address is accepted only by
-  the client that sends everything through Tor (`Client::with_agent`, used by `ona_tor::near_client`), never by `Client::new` or
+  the client that sends everything through Tor (`Client::with_agent`, used by `ona_core::tor::near_client`), never by `Client::new` or
   `Client::connect`. Redirects are not followed (a 3xx is an error), proxy variables from the environment are ignored, and the body of an
   HTTP error is read.
 

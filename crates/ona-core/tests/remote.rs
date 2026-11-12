@@ -754,7 +754,7 @@ fn the_journal_salt_does_not_come_from_the_mission() {
 fn the_model_cannot_change_during_a_mission() {
     let mut core = Core::new();
     dispatch(&mut core, json!({"cmd":"open","mission":"x"}));
-    assert!(core.use_real_model(config(100, 1000)).unwrap_err().contains("mission"));
+    assert!(core.use_real_model(config(100, 1000), &ona_core::tor::Network::Direct).unwrap_err().contains("mission"));
     assert!(core.set_model(Box::new(MockModel::default())).is_err());
 }
 

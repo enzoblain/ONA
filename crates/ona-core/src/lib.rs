@@ -13,6 +13,7 @@ pub mod pseudonym;
 pub mod quote;
 pub mod reader;
 pub mod remote;
+pub mod tor;
 pub mod vault;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -974,8 +975,8 @@ impl Core {
     }
 
     /// Switches to the real model. Only an explicit call with a full configuration does this.
-    pub fn use_real_model(&mut self, config: remote::RemoteConfig) -> Result<(), String> {
-        self.set_model(Box::new(remote::http_model(config)?))
+    pub fn use_real_model(&mut self, config: remote::RemoteConfig, network: &tor::Network) -> Result<(), String> {
+        self.set_model(Box::new(remote::http_model(config, network)?))
     }
 
     fn run(&mut self, request: &Value) -> Reply {

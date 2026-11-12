@@ -80,7 +80,7 @@ with the content, but the account, the network address, the payment and the agen
 
 | Component | Role | Language |
 |---|---|---|
-| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Planned to reach the network through a local `tor` over SOCKS5 (`ona-tor`); today `ona real` connects to the relay directly | Rust |
+| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Reaches the relay, the pool agent and the NEAR RPC nodes through a local `tor` over SOCKS5 when `ONA_TOR_SOCKS` is set, one circuit per request; otherwise directly, and says so at start | Rust |
 | Desktop app | Connects a NEAR wallet for deposits, starts missions, asks for confirmations, shows the exposure report | Swift (SwiftUI) on macOS; Rust + Tauri with HTML/JavaScript on Windows and Linux; both on `ona-core` (to be confirmed) |
 | iOS app | Remote control of the computer over Tor: mission progress and confirmations. Holds no tokens and no pseudonym table | Swift |
 | `ona-server` | Thin relay in a TEE (Phala dstack): holds the NEAR AI Cloud key, enforces a flat request size, submits transactions | Rust |
@@ -119,7 +119,7 @@ with the content, but the account, the network address, the payment and the agen
 | Desktop app (`desktop/tauri`, Windows and Linux) | same features and protocol v1 as the macOS app, in Rust with Tauri; no wallet yet | Rust tests of every module but `main.rs` with the real `ona-core`, run on macOS; one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network, on macOS. Never built or run on Windows or Linux ([notes](docs/desktop/tauri.md)) |
 | iOS app (`ios/`) | Tor (Arti embedded): an earlier test build reached a test onion service; the Tor screen is now a tab of the app | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
 | iOS app (`ios/`) | chat-style conversations with the agent over protocol v1: commit-then-reveal QR pairing, every reply of the computer checked with its key, a token for reads, a counter and a low-s signature for writes, confirmations signed over the digest of what the phone shows, payment digest v2. The mock computer speaks v1 too, labelled `mode: mock`. Over Tor (Arti), one full v1 mission passed against the Tauri app; the first connections to the onion often took more than 60 s. The Secure Enclave key path has not run on a device yet | iOS simulator (software key) against the Tauri app (local network and Tor) and the mock, unit tests on the Mac, vectors shared with the desktop apps ([notes](docs/ios/app.md)) |
-| `ona-tor` client through Tor | library done, no program uses it yet ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
+| Client through Tor (`ona_core::tor`, re-exported by `ona-tor`) | wired into `ona`: relay, pool agent and NEAR RPC reads go through a local `tor` when `ONA_TOR_SOCKS` is set, each request with its own SOCKS credentials, no direct fallback; `ONA_REQUIRE_TOR=1` refuses to start without it. Never tested on the real Tor network ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
 | Phala enclave | not built | none |
 
 ## Run it

@@ -7,10 +7,7 @@ license = "MIT"
 
 [dependencies]
 ona-core = { path = "../ona-core" }
-ona-near = { path = "../ona-near" }
-ed25519-dalek = "2"
-ureq = { version = "3", default-features = false, features = ["rustls", "socks-proxy"] }
-rand = "0.8"
 
 [dev-dependencies]
 serde_json = "1"
+ed25519-dalek = "2"

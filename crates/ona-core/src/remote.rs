@@ -14,7 +14,8 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde_json::Value;
 
-use crate::e2ee::{E2eeClient, HttpTransport, Transport};
+use crate::e2ee::{E2eeClient, Transport};
+use crate::tor::{NetTransport, Network};
 use crate::{Model, ModelFailure, ModelReply, RealCall};
 
 pub const REAL_MODE: &str = "real";
@@ -107,8 +108,9 @@ fn relay_url_is_acceptable(url: &str) -> bool {
     if host.is_empty() || port.is_some_and(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
         return false;
     }
-    // Plain HTTP would expose the request token, so it stays on this machine.
-    secure || matches!(host, "127.0.0.1" | "localhost")
+    // Plain HTTP would expose the request token, so it stays on this machine, or goes to an onion service, which Tor
+    // encrypts end to end (reachable only when the client goes through Tor).
+    secure || matches!(host, "127.0.0.1" | "localhost") || crate::tor::is_onion_v3(host)
 }
 
 /// Reads a request tokens file, refusing one that other accounts can read or write.
@@ -130,7 +132,7 @@ fn read_tokens_file(path: &Path) -> Result<Vec<String>, String> {
 impl RemoteConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !relay_url_is_acceptable(&self.relay_url) {
-            return Err("relay URL must be https, or http on localhost, without user info".into());
+            return Err("relay URL must be https, or http on localhost or to an onion service, without user info".into());
         }
         // The name goes into a request path as it is.
         let model_ok = !self.model.is_empty()
@@ -446,8 +448,9 @@ impl<T: Transport> Model for RemoteModel<T> {
     }
 }
 
-/// The model used by `Core` in real mode.
-pub fn http_model(config: RemoteConfig) -> Result<RemoteModel<HttpTransport>, String> {
-    let transport = HttpTransport::new(&config.relay_url);
+/// The model used by `Core` in real mode, reaching the relay through `network`: through Tor, each request has its own
+/// circuit; an onion relay without Tor, or a local relay through Tor, is refused before anything is sent.
+pub fn http_model(config: RemoteConfig, network: &Network) -> Result<RemoteModel<NetTransport>, String> {
+    let transport = network.transport(&config.relay_url).map_err(|e| format!("relay URL: {e}"))?;
     RemoteModel::new(transport, config)
 }

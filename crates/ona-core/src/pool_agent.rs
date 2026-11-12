@@ -1,8 +1,8 @@
 //! `HttpAgent`: the client's side of `ona-agent`'s HTTP API (see `crates/ona-agent/src/api.rs`). Every operation opens
 //! a new transport, so no connection is kept from one operation to the next (a cash issue and the entry that follows
 //! do not share one). `HttpAgent::to_url` uses `HttpTransport` (no redirect, no proxy from the environment, no
-//! `User-Agent`); a host can pass its own, for example `ona-tor`'s, which draws new SOCKS credentials each time it is
-//! created, so Tor (`IsolateSOCKSAuth`, its default) keeps each operation on its own circuit.
+//! `User-Agent`). `HttpAgent::through` takes the client's `tor::Network`: through Tor every request draws new SOCKS
+//! credentials, so Tor (`IsolateSOCKSAuth`, its default) keeps each operation on its own circuit.
 //!
 //! 200 is done; 202 (queued, sent or waiting for the chain), a transport failure and any 5xx are "outcome unknown";
 //! any other status is a certain refusal.
@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use crate::e2ee::{HttpTransport, Transport};
 use crate::pool::{AgentError, DepositorProof, PoolAgent, SignedNote};
+use crate::tor::Network;
 
 type Connect = Box<dyn FnMut() -> Result<Box<dyn Transport>, String>>;
 
@@ -31,6 +32,16 @@ impl HttpAgent {
     pub fn to_url(url: &str) -> Self {
         let url = url.trim_end_matches('/').to_string();
         Self::new(move || Ok(Box::new(HttpTransport::new(&url)) as Box<dyn Transport>))
+    }
+
+    /// `url` reached through `network`: through Tor, every request on its own circuit, so a cash issue (which names the
+    /// account) and an entry into a vault never share one. The address is checked for that network here, before any
+    /// operation.
+    pub fn through(network: &Network, url: &str) -> Result<Self, String> {
+        let url = url.trim_end_matches('/').to_string();
+        network.check(&url)?;
+        let network = network.clone();
+        Ok(Self::new(move || Ok(Box::new(network.transport(&url)?) as Box<dyn Transport>)))
     }
 
     fn call(&mut self, route: &str, body: &Value) -> Result<Value, AgentError> {

@@ -21,7 +21,7 @@ hkdf = "0.12"
 rand = "0.8"
 ed25519-dalek = { version = "2", features = ["rand_core", "hazmat"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "socks-proxy"] }
 zeroize = "1"
 unicode-normalization = "=0.1.26"
 base64 = "0.22"

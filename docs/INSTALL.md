@@ -76,10 +76,10 @@ could turn it into cash notes, and it would wait in the contract for a refund.
 | `ONA_WALLET_FILE` | the encrypted wallet file, created if missing. Without it the pool commands answer `no pool wallet configured` |
 | `ONA_WALLET_KEY_FILE` | a file holding the wallet key as 64 hex characters, readable by its owner only |
 | `ONA_POOL` | the pool contract account |
-| `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only) |
+| `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only). Through Tor (`ONA_TOR_SOCKS`, see "Go through Tor"): `https` to a host name, or `http` to an onion service |
 | `ONA_RPC_URL_2` | optional, a second NEAR RPC endpoint run by another operator: `pool_recover` decides a note's fate only when both agree. Without it the first endpoint is trusted |
 | `ONA_POOL_RECOMMENDED_NEAR` | optional, the deposit amounts the app recommends, whole NEAR separated by commas, each at least 0.1 NEAR; default `100,500,2000`. A deposit of another amount is still allowed, with a warning |
-| `ONA_POOL_AGENT_URL` | optional, the pool agent's address, `https` (plain `http` to this machine only). Requests follow no redirect and ignore proxy variables. Without it, agent calls are refused |
+| `ONA_POOL_AGENT_URL` | optional, the pool agent's address, `https` (plain `http` to this machine only; through Tor, `https` to a host name or `http` to an onion service). Requests follow no redirect and ignore proxy variables. Without it, agent calls are refused |
 
 A fake relay on localhost, for front-end work:
 
@@ -102,7 +102,7 @@ Nothing selects this mode by default: without the word `real`, or with any requi
 
 | Variable | Value |
 |---|---|
-| `ONA_REAL_RELAY_URL` | relay address: `https`, or `http` on `127.0.0.1` or `localhost` only |
+| `ONA_REAL_RELAY_URL` | relay address: `https`, or `http` on `127.0.0.1` or `localhost` only. Through Tor: `https` to a host name, or `http` to an onion service; an onion address is refused without Tor |
 | `ONA_REAL_MODEL` | model name, which the relay must allow |
 | `ONA_REAL_MAX_TOKENS` | ceiling on the reply tokens of one call, at most the relay's own limit. The prompt counts on top of it |
 | `ONA_REAL_TOKEN_BUDGET` | most tokens in total for this run of `ona`, prompts and replies, at least one call's ceiling |
@@ -110,11 +110,43 @@ Nothing selects this mode by default: without the word `real`, or with any requi
 
 **Until the enclave quotes are verified in this client, the relay can read the content of a mission and make up replies. Do not run a
 sensitive mission in this mode.** Proxy variables of the environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) are ignored and
-redirects are not followed. `ona real` connects to the relay directly, not through Tor.
+redirects are not followed. `ona real` connects to the relay directly unless `ONA_TOR_SOCKS` is set (see "Go through Tor").
 
 ```
 cargo run -p ona-core --bin ona -- real
 ```
+
+### Go through Tor
+
+With `ONA_TOR_SOCKS` set, **everything** `ona` sends to the network goes through that local Tor daemon: the relay (`ona real`), the
+pool agent and the NEAR RPC nodes of the pool commands. Without it, `ona real` and the pool commands print on stderr, at start, that
+the relay, the agent and the RPC nodes see this computer's IP address. `ona demo` and plain `ona` without a pool touch no network.
+
+| Variable | Value |
+|---|---|
+| `ONA_TOR_SOCKS` | optional, the SOCKS port of a `tor` running on this machine, `ip:port`, for example `127.0.0.1:9050`. A proxy on another machine is refused |
+| `ONA_REQUIRE_TOR` | optional, `1` makes `ona` refuse to start when `ONA_TOR_SOCKS` is not set; `0` or unset does not |
+
+Through Tor:
+- host names go to Tor unresolved (SOCKS5 with remote resolution); nothing is looked up on this machine;
+- every request gets its own random SOCKS user name and password, so with Tor's `IsolateSOCKSAuth` (on by default) each request has
+  its own circuit: a cash issue, which names the depositing account, and an entry into a vault never share one, nor do two RPC
+  reads. This is Tor's documented behaviour, not verified on the real Tor network;
+- if Tor is down or refuses a connection the request fails: nothing is retried directly. Proxy variables of the environment are
+  ignored and redirects are not followed;
+- destinations must be `https` to a public host name or `http` to a version 3 onion service: a local address (`127.0.0.1`,
+  `localhost`), an IP address or plain `http` to the internet is refused before anything is sent. Without Tor, an onion address is
+  refused, so its name never reaches the local resolver.
+
+A minimal `torrc` for the client (`tor -f torrc`, then wait for `Bootstrapped 100%`):
+
+```
+SocksPort 127.0.0.1:9050
+SafeSocks 1
+```
+
+`SafeSocks 1` makes Tor refuse a request carrying an IP address. `docs/torrc.client.example` and [docs/TOR.md](TOR.md) have more.
+None of this has run on the real Tor network: only against a fake SOCKS server on this machine.
 
 Each call reserves its reply ceiling plus one token per byte of prompt before it is sent. That reservation stays spent if the call fails,
 and only the usage in a validly signed reply replaces it, so the real cost of a call can exceed the ceiling. A mission is limited to 4 KB and
@@ -194,7 +226,7 @@ disagree (see below), which removes the need to trust one of them, not both. One
 with the same key read the same nonce, and one of them is refused.
 
 - `ONA_RPC_URL` must start with `https://`. Plain `http://` is accepted only to `127.0.0.1`, `localhost` or `[::1]` (a local node);
-  only a client that goes through Tor also accepts it to a `.onion` address. Redirects are not followed, and the `HTTPS_PROXY`,
+  only a client that goes through Tor (for `ona`, `ONA_TOR_SOCKS`) also accepts it to a `.onion` address. Redirects are not followed, and the `HTTPS_PROXY`,
   `HTTP_PROXY` and `ALL_PROXY` variables are ignored.
 - When a transaction gets no clear answer (a timeout, an HTTP error, a result that is not stated final), the client asks the node a few
   times what became of it, and never sends it again. If the node still cannot say, the error gives the transaction hash: check it on an
