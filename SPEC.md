@@ -482,7 +482,9 @@ for one chat, `forget` deletes any chat at once. No chat result ever goes on cha
 ## Encrypted model client (`crates/ona-core/src/e2ee.rs`)
 NEAR AI encryption version 3 through the relay, written from the public `nearai/inference-proxy` sources and tested only against a simulated
 enclave. Each encrypted request field is bound to the reply key, so a relay replacing `X-Client-Pub-Key` makes the request undecryptable. This
-fixes the reply-key attack only if the NEAR AI gateway accepts version 3, which is **not verified**. Version 2 needs an explicit setting, and a
+fixes the reply-key attack only if the NEAR AI gateway enforces that binding. The gateway accepted version 3 in one real call on 12/11/2026
+(`examples/e2ee_check.rs`, model `z-ai/glm-5.3-flash`, through a test relay holding the key: decrypted reply, valid signature, 26 prompt and
+22 reply tokens as the relay saw them); a request with a replaced reply key was **not tried** against the real gateway. Version 2 needs an explicit setting, and a
 failed call never falls back to it. Version 3 does not bind a reply to one precise request, a replay carrying the original reply key is still
 processed, and the relay still sees sizes and counters. Each request gets a new client key and a fresh attestation nonce. A reply counts only
 if the signature comes from the attested model key (`provider_tee`) and covers the exact bytes sent and received. Every request carries
@@ -749,7 +751,7 @@ attestations back and drops the tickets. Showing the same token on the attestati
 as their timing already does.
 
 The relay is not trusted with content: with encryption version 2 a dishonest relay can replace the client key and read the reply. Version 3 closes this
-only if the NEAR AI gateway accepts it, which is not verified.
+only if the NEAR AI gateway enforces the binding: it accepted version 3 in one real call (12/11/2026), a replaced reply key was not tried.
 
 Parsing is strict (`HTTP/1.1` only, one `Content-Length` of digits, no `Transfer-Encoding`). Each connection has 5 seconds for its request line and headers,
 30 for the whole request and 30 to receive the reply. Connections are served by 32 threads with a queue of 256, and a full queue answers 503: 32 slow clients
