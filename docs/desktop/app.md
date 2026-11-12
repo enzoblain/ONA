@@ -90,3 +90,8 @@ goes through the app's tor, on a second SOCKS port. Tested with unit tests only,
 
 The bridge's release profile does not strip build-time dylibs (proc macros): the `strip` of Xcode 27 (beta) leaves them
 unloadable.
+
+Each conversation's ona-core runs on a serial queue of its own (`CoreQueue`). The main actor, which also serves the
+window and the phone, sends one command at a time and waits at most 50 ms per tick: a real model call goes on while
+the app stays responsive, and its reply is taken at a later tick. Confirmations and the end of a mission wait for their
+reply (they do not reach the model). Reading the pool for the phone still waits for its reply.

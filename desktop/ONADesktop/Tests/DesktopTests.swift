@@ -679,3 +679,28 @@ struct OnionPublishedTests {
         #expect((reply["error"] as? String)?.contains("Tor") == true)
     }
 }
+
+@MainActor
+@Suite struct SlowCoreTests {
+    /// The real model through Tor takes seconds: the window and the phone are still served meanwhile.
+    final class Slow: MissionCore {
+        let core = OnaCoreMission()
+        func dispatch(_ request: [String: Any]) -> [String: Any] {
+            if request["cmd"] as? String == "propose_plan" { Thread.sleep(forTimeInterval: 1.5) }
+            return core.dispatch(request)
+        }
+    }
+
+    @Test func aSlowCoreDoesNotBlockTheEngine() throws {
+        let engine = ChatEngine(makeCore: { Slow() })
+        let started = Date.now
+        _ = try engine.create("Trouve-moi un avocat en droit du travail à Paris").get()
+        engine.tick()
+        #expect(Date.now.timeIntervalSince(started) < 1.0)
+        #expect(engine.chats.first?.status == .working)
+        #expect(engine.chats.first?.working?.tool == "think")
+        let deadline = started.addingTimeInterval(10)
+        while engine.chats.first?.status == .working, Date.now < deadline { engine.tick() }
+        #expect(engine.chats.first?.status == .waiting)
+    }
+}
