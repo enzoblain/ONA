@@ -592,36 +592,47 @@ impl PoolClient {
     /// `None` when `ONA_WALLET_FILE` is not set. Otherwise `ONA_WALLET_KEY_FILE`, `ONA_POOL` and `ONA_RPC_URL` are
     /// needed, and `ONA_POOL_RECOMMENDED_NEAR` may list the recommended deposits. The agent is reached at
     /// `ONA_POOL_AGENT_URL` when it is set; otherwise it is `NoAgent`, which refuses every agent call. Every RPC node and
-    /// the agent are reached through `network` (`tor::Network::from_env`), their addresses checked for it.
+    /// the agent are reached through `network` (`tor::Network::from_env`), their addresses checked for it. A variable
+    /// that is not valid text is an error.
     pub fn from_env(network: &Network) -> Result<Option<Self>, String> {
-        let Ok(file) = std::env::var("ONA_WALLET_FILE") else {
+        Self::from_lookup(
+            |name| match std::env::var(name) {
+                Ok(value) => Ok(Some(value)),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(_) => Err(format!("{name} is not valid text")),
+            },
+            network,
+        )
+    }
+
+    /// Like `from_env`, with the settings read by name from `get` (the desktop apps read them from a file).
+    pub fn from_lookup(get: impl Fn(&str) -> Result<Option<String>, String>, network: &Network) -> Result<Option<Self>, String> {
+        let Some(file) = get("ONA_WALLET_FILE")? else {
             return Ok(None);
         };
-        let need = |k: &str| std::env::var(k).map_err(|_| format!("{k} is not set"));
+        let need = |k: &str| get(k)?.ok_or_else(|| format!("{k} is not set"));
         let key = load_wallet_key(Path::new(&need("ONA_WALLET_KEY_FILE")?))?;
         let pool = need("ONA_POOL")?;
         let rpc = need("ONA_RPC_URL")?;
         let first = NearPool::through(network, &rpc, &pool).map_err(|e| format!("ONA_RPC_URL: {e}"))?;
-        let recommended = match std::env::var("ONA_POOL_RECOMMENDED_NEAR") {
-            Ok(text) => Some(parse_recommended(&text).map_err(|e| format!("ONA_POOL_RECOMMENDED_NEAR: {e}"))?),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(_) => return Err("ONA_POOL_RECOMMENDED_NEAR is not valid text".into()),
+        let recommended = match get("ONA_POOL_RECOMMENDED_NEAR")? {
+            Some(text) => Some(parse_recommended(&text).map_err(|e| format!("ONA_POOL_RECOMMENDED_NEAR: {e}"))?),
+            None => None,
         };
-        let second = match std::env::var("ONA_RPC_URL_2") {
-            Ok(url) => Some(NearPool::through(network, &url, &pool).map_err(|e| format!("ONA_RPC_URL_2: {e}"))?),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(_) => return Err("ONA_RPC_URL_2 is not valid text".into()),
+        let second = match get("ONA_RPC_URL_2")? {
+            Some(url) => Some(NearPool::through(network, &url, &pool).map_err(|e| format!("ONA_RPC_URL_2: {e}"))?),
+            None => None,
         };
         // Directly, the agent's address follows the RPC rule: https, or plain http to this machine only. Through Tor,
         // https to a host name or http to an onion service.
-        let agent: Box<dyn PoolAgent> = match std::env::var("ONA_POOL_AGENT_URL") {
-            Ok(url) => {
+        let agent: Box<dyn PoolAgent> = match get("ONA_POOL_AGENT_URL")? {
+            Some(url) => {
                 if !network.is_tor() {
                     ona_near::check_rpc_url(&url).map_err(|e| format!("ONA_POOL_AGENT_URL: {e}"))?;
                 }
                 Box::new(crate::pool_agent::HttpAgent::through(network, &url).map_err(|e| format!("ONA_POOL_AGENT_URL: {e}"))?)
             }
-            Err(_) => Box::new(NoAgent),
+            None => Box::new(NoAgent),
         };
         let wallet = Wallet::open(Path::new(&file), &key)?;
         let mut client = Self::new(wallet, Box::new(first), agent, &pool);

@@ -15,6 +15,59 @@ use serde_json::{Value, json};
 use crate::engine::{Guarded, MissionCore};
 
 pub const FILE: &str = "model.json";
+pub const POOL_FILE: &str = "pool.json";
+
+/// Reads a settings file of the data folder: None when it does not exist, Err when it cannot be read.
+fn load_settings<T: serde::de::DeserializeOwned>(data_dir: &Path, name: &str) -> Result<Option<T>, String> {
+    let text = match std::fs::read_to_string(data_dir.join(name)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{name} : {e}")),
+    };
+    serde_json::from_str(&text).map(Some).map_err(|e| format!("{name} : {e}"))
+}
+
+/// `pool.json`: the pool wallet (docs/desktop/pool-commands.md, "Setup"; the names of `ona`'s variables).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoolSettings {
+    /// `ONA_WALLET_FILE`: the encrypted wallet, created if missing.
+    pub wallet_file: PathBuf,
+    /// `ONA_WALLET_KEY_FILE`: 64 hex characters, readable by its owner only.
+    pub wallet_key_file: PathBuf,
+    /// `ONA_POOL`: the pool contract account.
+    pub pool: String,
+    /// `ONA_RPC_URL`.
+    pub rpc_url: String,
+    /// `ONA_RPC_URL_2`, a second endpoint run by another operator.
+    #[serde(default)]
+    pub rpc_url_2: Option<String>,
+    /// `ONA_POOL_RECOMMENDED_NEAR`.
+    #[serde(default)]
+    pub recommended_near: Option<String>,
+    /// `ONA_POOL_AGENT_URL`.
+    #[serde(default)]
+    pub agent_url: Option<String>,
+}
+
+impl PoolSettings {
+    pub fn load(data_dir: &Path) -> Result<Option<Self>, String> {
+        load_settings(data_dir, POOL_FILE)
+    }
+
+    fn lookup(&self, name: &str) -> Option<String> {
+        match name {
+            "ONA_WALLET_FILE" => Some(self.wallet_file.to_string_lossy().into_owned()),
+            "ONA_WALLET_KEY_FILE" => Some(self.wallet_key_file.to_string_lossy().into_owned()),
+            "ONA_POOL" => Some(self.pool.clone()),
+            "ONA_RPC_URL" => Some(self.rpc_url.clone()),
+            "ONA_RPC_URL_2" => self.rpc_url_2.clone(),
+            "ONA_POOL_RECOMMENDED_NEAR" => self.recommended_near.clone(),
+            "ONA_POOL_AGENT_URL" => self.agent_url.clone(),
+            _ => None,
+        }
+    }
+}
 
 /// `model.json`. The names are those of `ona real` (docs/INSTALL.md, "Use the real model").
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -35,12 +88,7 @@ pub struct ModelSettings {
 impl ModelSettings {
     /// None when there is no file (the fake model); Err when there is one that cannot be read.
     pub fn load(data_dir: &Path) -> Result<Option<Self>, String> {
-        let text = match std::fs::read_to_string(data_dir.join(FILE)) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("{FILE} : {e}")),
-        };
-        serde_json::from_str(&text).map(Some).map_err(|e| format!("{FILE} : {e}"))
+        load_settings(data_dir, FILE)
     }
 
     fn lookup(&self, name: &str) -> Option<String> {
@@ -59,13 +107,15 @@ impl ModelSettings {
 pub struct CoreSetup {
     /// `model.json`: None for the fake model, Err when the file is unreadable.
     pub model: Result<Option<ModelSettings>, String>,
+    /// `pool.json`: None without a pool wallet, Err when the file is unreadable.
+    pub pool: Result<Option<PoolSettings>, String>,
     /// tor's SOCKS port for the core's own traffic, once tor runs.
     pub core_socks: Option<u16>,
 }
 
 impl Default for CoreSetup {
     fn default() -> Self {
-        Self { model: Ok(None), core_socks: None }
+        Self { model: Ok(None), pool: Ok(None), core_socks: None }
     }
 }
 
@@ -84,10 +134,35 @@ pub fn make_core(setup: &CoreSetup) -> Box<dyn MissionCore> {
     }
 }
 
+/// Through the app's tor only (`ONA_REQUIRE_TOR`): nothing the core sends may go straight to its destination.
+fn network(core_socks: Option<u16>, what: &str) -> Result<ona_core::tor::Network, String> {
+    let socks = core_socks.ok_or_else(|| format!("{what} passe par Tor : choisissez le mode Tor, et attendez que le code QR apparaisse"))?;
+    ona_core::tor::Network::from_values(Some(&format!("127.0.0.1:{socks}")), Some("1"))
+}
+
+/// The core that answers the pool commands: one for the whole app (the wallet file is locked by the core that opens
+/// it). Without `pool.json` it answers `no pool wallet configured`, like `ona` without a wallet.
+pub fn make_pool_core(setup: &CoreSetup) -> Box<dyn MissionCore> {
+    let settings = match &setup.pool {
+        Ok(None) => return Box::new(Guarded::new(ona_core::Core::new())),
+        Ok(Some(settings)) => settings,
+        Err(e) => return Box::new(Refusing(e.clone())),
+    };
+    let made = network(setup.core_socks, "le pool").and_then(|network| {
+        let client = ona_core::pool::PoolClient::from_lookup(|name| Ok(settings.lookup(name)), &network)?
+            .ok_or("pool.json : no wallet file")?;
+        let mut core = ona_core::Core::new();
+        core.set_pool(client);
+        Ok(core)
+    });
+    match made {
+        Ok(core) => Box::new(Guarded::new(core)),
+        Err(e) => Box::new(Refusing(e)),
+    }
+}
+
 fn real_core(settings: &ModelSettings, core_socks: Option<u16>) -> Result<ona_core::Core, String> {
-    let socks = core_socks.ok_or("le vrai modèle passe par Tor : choisissez le mode Tor, et attendez que le code QR apparaisse")?;
-    // ONA_REQUIRE_TOR: nothing the core sends may go straight to its destination.
-    let network = ona_core::tor::Network::from_values(Some(&format!("127.0.0.1:{socks}")), Some("1"))?;
+    let network = network(core_socks, "le vrai modèle")?;
     let config = ona_core::remote::RemoteConfig::from_lookup(|name| settings.lookup(name))?;
     let mut core = ona_core::Core::new();
     core.use_real_model(config, &network)?;
@@ -139,7 +214,7 @@ mod tests {
         std::fs::write(dir.join(FILE), r#"{"relay_url": "x", "unknown": 1}"#).unwrap();
         let model = ModelSettings::load(&dir);
         assert!(model.as_ref().is_err_and(|e| e.starts_with(FILE)), "{model:?}");
-        let mut core = make_core(&CoreSetup { model, core_socks: Some(9050) });
+        let mut core = make_core(&CoreSetup { model, pool: Ok(None), core_socks: Some(9050) });
         let reply = core.dispatch(json!({"cmd": "exposure"}));
         assert_eq!((reply["ok"].clone(), reply["mode"].clone()), (json!(false), json!("real")));
         let _ = std::fs::remove_dir_all(dir);
@@ -147,7 +222,7 @@ mod tests {
 
     #[test]
     fn the_real_model_waits_for_tor() {
-        let mut core = make_core(&CoreSetup { model: Ok(Some(settings("/nonexistent".into()))), core_socks: None });
+        let mut core = make_core(&CoreSetup { model: Ok(Some(settings("/nonexistent".into()))), pool: Ok(None), core_socks: None });
         let reply = core.dispatch(json!({"cmd": "open", "mission": "x"}));
         assert_eq!(reply["mode"], "real");
         assert!(reply["error"].as_str().unwrap().contains("Tor"), "{reply}");
@@ -172,6 +247,29 @@ mod tests {
         // Nothing listens on that port: the core is made (real), and fails only when it calls the relay.
         let real = real_core(&settings(tokens), Some(9));
         assert!(real.is_ok(), "{:?}", real.err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn without_pool_json_the_pool_is_not_configured() {
+        let mut core = make_pool_core(&CoreSetup::default());
+        assert_eq!(core.dispatch(json!({"cmd": "pool_portfolio"}))["error"], "no pool wallet configured");
+    }
+
+    #[test]
+    fn the_pool_waits_for_tor_and_reads_its_settings() {
+        let dir = temp_dir("pool");
+        std::fs::write(dir.join(POOL_FILE), r#"{"wallet_file": "/w", "wallet_key_file": "/k", "pool": "pool.testnet",
+            "rpc_url": "https://rpc.testnet.near.org"}"#).unwrap();
+        let pool = PoolSettings::load(&dir);
+        assert_eq!(pool.as_ref().map(|p| p.as_ref().map(|p| p.pool.clone())), Ok(Some("pool.testnet".into())));
+        let mut waiting = make_pool_core(&CoreSetup { model: Ok(None), pool: pool.clone(), core_socks: None });
+        assert!(waiting.dispatch(json!({"cmd": "pool_portfolio"}))["error"].as_str().unwrap().contains("Tor"));
+        // With tor, ona-core reads the key file: missing here, so refused with ona-core's reason.
+        let mut refused = make_pool_core(&CoreSetup { model: Ok(None), pool, core_socks: Some(9) });
+        let reply = refused.dispatch(json!({"cmd": "pool_portfolio"}));
+        assert_eq!((reply["ok"].clone(), reply["mode"].clone()), (json!(false), json!("real")));
+        assert!(reply["error"].as_str().unwrap().contains("wallet key"), "{reply}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

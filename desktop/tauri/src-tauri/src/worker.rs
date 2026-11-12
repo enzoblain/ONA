@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::engine::ChatEngine;
 use crate::pairing::{PairingAuthority, SecretStore, SystemStore};
 use crate::server::{self, Exposure, PhoneServer};
-use crate::real::{ModelSettings, SharedSetup};
+use crate::real::{ModelSettings, PoolSettings, SharedSetup};
 use crate::tor::{TorService, TorState};
 use crate::{http, router};
 
@@ -83,6 +83,7 @@ impl Worker {
             let setup = SharedSetup::default();
             if let Ok(mut setup) = setup.lock() {
                 setup.model = ModelSettings::load(&data_dir);
+                setup.pool = PoolSettings::load(&data_dir);
             }
             let mut app = App {
                 pairing: PairingAuthority::with_secret_store(
@@ -132,8 +133,10 @@ fn run(mut app: App, inbox: Receiver<Job>) {
                     app.engine.tick();
                     app.pairing.tick();
                     app.tor.poll();
-                    if let Ok(mut setup) = app.setup.lock() {
-                        setup.core_socks = app.tor.core_socks();
+                    let socks = app.tor.core_socks();
+                    let changed = app.setup.lock().map(|mut setup| std::mem::replace(&mut setup.core_socks, socks) != socks);
+                    if changed.unwrap_or(false) {
+                        app.engine.reset_pool(); // made again through the new port (or refusing without tor)
                     }
                     if app.server.is_none() {
                         app.serve(); // listening failed: try again

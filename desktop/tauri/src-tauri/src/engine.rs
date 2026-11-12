@@ -344,22 +344,43 @@ pub struct ChatEngine {
     /// Mode of the model behind ona-core: "mock" while the model is the fake.
     pub mode: String,
     make_core: CoreFactory,
+    /// Makes the pool's core (`pool.json`).
+    make_pool_core: CoreFactory,
     count: u64,
-    /// A core of its own for the pool, created on first use (its wallet is configured by ona-core, not here).
-    pool: Option<Box<dyn MissionCore>>,
+    /// One core for the pool, on its own thread, made on first use: it holds the wallet file's lock.
+    pool: Option<CoreThread>,
 }
 
 impl ChatEngine {
     pub fn new(make_core: impl Fn() -> Box<dyn MissionCore> + Send + Sync + 'static) -> Self {
-        Self { chats: Vec::new(), mode: "mock".into(), make_core: Arc::new(make_core), count: 0, pool: None }
+        let make_core: CoreFactory = Arc::new(make_core);
+        Self { chats: Vec::new(), mode: "mock".into(), make_pool_core: make_core.clone(), make_core, count: 0, pool: None }
     }
 
     /// ona-core cores, with the fake model or the real one as `setup` says when each core is made.
     pub fn with_ona_core(setup: crate::real::SharedSetup) -> Self {
-        Self::new(move || match setup.lock() {
+        let pool_setup = setup.clone();
+        let mut engine = Self::new(move || match setup.lock() {
             Ok(setup) => crate::real::make_core(&setup),
             Err(_) => crate::real::make_core(&crate::real::CoreSetup::default()),
-        })
+        });
+        engine.make_pool_core = Arc::new(move || match pool_setup.lock() {
+            Ok(setup) => crate::real::make_pool_core(&setup),
+            Err(_) => crate::real::make_pool_core(&crate::real::CoreSetup::default()),
+        });
+        engine
+    }
+
+    /// Drops the pool's core, so that the next pool command makes a new one: when tor becomes ready or stops.
+    pub fn reset_pool(&mut self) {
+        self.pool = None;
+    }
+
+    /// Where the window sends its pool commands, answered on the pool's own thread: the window waits for the reply
+    /// there, not on the worker thread.
+    pub fn pool_sender(&mut self) -> Sender<(Value, Sender<Value>)> {
+        let factory = &self.make_pool_core;
+        self.pool.get_or_insert_with(|| CoreThread::spawn(factory)).requests.clone()
     }
 
     fn sorted(&self) -> Vec<&Chat> {
@@ -497,9 +518,9 @@ impl ChatEngine {
     /// The pool portfolio for the phone, read only: ona-core's `pool_portfolio` (cash, shares per vault, total). Err
     /// with ona-core's error, for instance `no pool wallet configured`. Pool operations are confirmed on the computer.
     pub fn pool_portfolio(&mut self) -> Result<Value, String> {
-        let make_core = &self.make_core;
-        let core = self.pool.get_or_insert_with(|| make_core());
-        let mut reply = core.dispatch(json!({"cmd": "pool_portfolio"}));
+        let factory = &self.make_pool_core;
+        let core = self.pool.get_or_insert_with(|| CoreThread::spawn(factory));
+        let mut reply = core.call(json!({"cmd": "pool_portfolio"}));
         if reply["ok"] != true {
             return Err(reply["error"].as_str().unwrap_or("pool unavailable").to_owned());
         }

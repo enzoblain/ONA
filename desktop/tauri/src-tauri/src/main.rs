@@ -58,6 +58,23 @@ async fn confirm(worker: State<'_, Worker>, id: String, decision: String, firm: 
     })
 }
 
+/// A pool command from this window (docs/desktop/pool-commands.md). Pool operations are confirmed here only, never on
+/// the phone. Answered on the pool's own thread: a read through Tor does not hold the window or the phone.
+#[tauri::command]
+async fn pool(worker: State<'_, Worker>, request: Value) -> Reply {
+    if !matches!(request["cmd"].as_str(), Some("pool_portfolio" | "pool_prepare" | "pool_execute" | "pool_recover")) {
+        return Err("commande du pool inconnue".into());
+    }
+    let sender = worker.call(|app| app.engine.pool_sender()).ok_or("ONA s'est arrêté")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (reply, answer) = std::sync::mpsc::channel();
+        sender.send((request, reply)).map_err(|_| "ona-core stopped".to_string())?;
+        answer.recv().map_err(|_| "ona-core stopped".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The person saw the same 6-digit code on both screens.
 #[tauri::command]
 async fn confirm_code(worker: State<'_, Worker>) -> Reply {
@@ -124,7 +141,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            state, chat, create_chat, post_message, delete_chat, confirm, confirm_code, forget_phone, set_mode
+            state, chat, create_chat, post_message, delete_chat, confirm, confirm_code, forget_phone, set_mode, pool
         ])
         .build(tauri::generate_context!())
         .expect("ONA could not start");

@@ -336,6 +336,166 @@ $("delete-chat").addEventListener("click", async () => {
   refresh();
 });
 
+// Pool dialog (docs/desktop/pool-commands.md). Every operation: prepare, show the summary, confirm here, execute.
+
+const POOL_OPS = {
+  enter: "Placer du cash dans un vault",
+  switch: "Changer de vault",
+  exit: "Sortir d'un vault (en cash)",
+  exit_cash: "Payer le cash vers un compte",
+  deposit: "Déposer depuis un portefeuille NEAR",
+};
+const SUMMARY_LABELS = {
+  amount: "Montant", vault: "Vault", from: "Depuis le vault", to: "Vers", shares_value: "Parts reçues (valeur)",
+  new_shares_value: "Nouvelles parts (valeur)", cash_value: "Cash reçu", received: "Reçu", left_in_cash: "Laissé dans le cash du pool (perdu)",
+  exit_limit: "Limite de sortie du compte", account: "Compte",
+};
+const NOT_AMOUNTS = new Set(["vault", "from", "to", "account"]);
+
+async function pool(request) {
+  const reply = await run("pool", { request });
+  if (reply.ok !== true) throw new Error(reply.error || "erreur du pool");
+  return reply;
+}
+
+/** "1.5" NEAR as yoctoNEAR (decimal string), exact; null when not a number. */
+function yocto(text) {
+  const match = /^\s*(\d+)(?:[.,](\d{0,24}))?\s*$/.exec(text);
+  if (!match) return null;
+  return (BigInt(match[1]) * 10n ** 24n + BigInt((match[2] || "").padEnd(24, "0"))).toString();
+}
+
+async function openPool() {
+  $("pool-dialog").showModal();
+  await drawPortfolio();
+}
+
+async function drawPortfolio() {
+  const body = $("pool-body");
+  body.replaceChildren(el("p", { class: "help" }, "Lecture du pool…"));
+  let portfolio;
+  try {
+    portfolio = await pool({ cmd: "pool_portfolio" });
+  } catch (error) {
+    body.replaceChildren(el("p", { class: "error" }, `Pool indisponible : ${error.message}`),
+      el("p", { class: "help" }, "Le pool se configure avec pool.json dans le dossier de l'app (voir docs/desktop/tauri.md)."));
+    return;
+  }
+  const holding = (name, value, pending, ...buttons) => el("div", { class: "holding" },
+    el("span", { class: "name" }, name, pending ? el("span", { class: "help" }, "  · opération en cours") : null),
+    el("span", { class: "value" }, near(value)), ...buttons);
+  const vaults = portfolio.vaults || [];
+  body.replaceChildren(
+    el("div", {}, el("p", { class: "help" }, "Valeur totale"), el("div", { class: "total" }, near(portfolio.total))),
+    portfolio.mode === "mock" ? el("p", { class: "warn" }, "Simulation : pool fictif (mode mock).") : null,
+    el("div", {},
+      holding("Cash", portfolio.cash.value, portfolio.cash.spending_value !== "0"),
+      ...vaults.map((v) => holding(`Vault ${v.vault}${v.frozen ? " (gelé)" : ""}`, v.value,
+        v.spending_value !== "0" || v.awaiting_signature > 0,
+        el("button", { class: "secondary", onclick: () => poolForm("switch", portfolio, v.vault) }, "Changer"),
+        el("button", { class: "secondary", onclick: () => poolForm("exit", portfolio, v.vault) }, "Sortir")))),
+    el("div", { class: "ops" },
+      el("button", { class: "primary", onclick: () => poolForm("enter", portfolio) }, "Placer du cash"),
+      el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Payer vers un compte"),
+      el("button", { class: "secondary", onclick: () => poolForm("deposit", portfolio) }, "Déposer"),
+      el("button", { class: "secondary", onclick: recover }, "Récupérer les opérations en attente")),
+  );
+}
+
+/** The form of one operation; on submit, `pool_prepare`, then the summary to confirm. */
+function poolForm(op, portfolio, vault) {
+  const vaultOptions = (except) => Array.from({ length: portfolio.vault_count || 0 }, (_, i) => i)
+    .filter((i) => i !== except).map((i) => el("option", { value: i }, `Vault ${i}`));
+  const amountField = (label, all) => el("label", {}, label,
+    el("input", { name: "amount", placeholder: all ? "en NEAR, ou « tout »" : "en NEAR", required: true }));
+  const fields = {
+    enter: [el("label", {}, "Vault", el("select", { name: "vault" }, vaultOptions())), amountField("Cash à placer", true)],
+    switch: [el("label", {}, "Vers le vault", el("select", { name: "to" }, vaultOptions(vault))), amountField(`Parts du vault ${vault} à déplacer`, true)],
+    exit: [amountField(`Parts du vault ${vault} à sortir en cash`, true)],
+    exit_cash: [el("label", {}, "Compte NEAR qui a déposé", el("input", { name: "to", placeholder: "nom.testnet", required: true })), amountField("Cash à payer", false)],
+    deposit: [el("label", {}, "Votre compte NEAR", el("input", { name: "account", placeholder: "nom.testnet", required: true })), amountField("Montant à déposer", false)],
+  }[op];
+  const form = el("form", {}, el("h3", {}, POOL_OPS[op]), ...fields,
+    el("div", { class: "card-actions actions" },
+      el("button", { type: "button", class: "secondary", onclick: drawPortfolio }, "Annuler"),
+      el("button", { type: "submit", class: "primary" }, "Préparer")));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(form));
+    const request = { cmd: "pool_prepare", op };
+    if (data.amount !== undefined) {
+      const all = /^\s*(tout|all)\s*$/i.test(data.amount);
+      const amount = all ? "all" : yocto(data.amount);
+      if (!amount) return toast("Montant illisible : écrivez par exemple 1.5");
+      request.amount = amount;
+    }
+    if (op === "enter") request.vault = Number(data.vault);
+    if (op === "switch") { request.from = vault; request.to = Number(data.to); }
+    if (op === "exit") request.from = vault;
+    if (op === "exit_cash") request.to = data.to.trim();
+    if (op === "deposit") request.account = data.account.trim();
+    try {
+      showSummary(await pool(request));
+    } catch (error) {
+      toast(`Préparation refusée : ${error.message}`);
+    }
+  });
+  $("pool-body").replaceChildren(form);
+}
+
+function summaryRows(summary) {
+  return Object.entries(SUMMARY_LABELS).filter(([key]) => summary[key] !== undefined).map(([key, label]) =>
+    el("div", { class: "row" }, el("span", {}, label),
+      el("span", {}, NOT_AMOUNTS.has(key) ? String(summary[key]) : near(String(summary[key])))));
+}
+
+/** What will be done, from ona-core's summary; executed only once the person confirms here. */
+function showSummary(prepared) {
+  const summary = prepared.summary;
+  const fees = Object.entries(summary.fees || {}).map(([key, value]) =>
+    el("div", { class: "row" }, el("span", {}, `Frais : ${key}`), el("span", {}, /^\d+$/.test(String(value)) ? near(String(value)) : String(value))));
+  const warnings = [summary.warning, ...(summary.warnings || [])].filter(Boolean).map((w) => el("p", { class: "warn" }, w));
+  const expires = new Date(Number(BigInt(summary.expires_at) / 1000000n)).toLocaleTimeString("fr-FR");
+  const card = el("div", { class: "card" }, el("h3", {}, POOL_OPS[summary.op] || summary.op),
+    ...summaryRows(summary), ...fees, ...warnings,
+    el("p", { class: "help" }, `Réseau ${summary.network}, contrat ${summary.contract}. Valable jusqu'à ${expires}.`));
+  if (summary.op === "deposit") {
+    // The deposit is sent and signed by the person's own NEAR wallet: no wallet is connected to this app yet.
+    card.append(el("p", { class: "warn" }, "Le dépôt s'envoie avec votre propre portefeuille NEAR, puis ce portefeuille signe un message. La connexion d'un portefeuille à l'app n'existe pas encore : ce dépôt ne peut pas être fait ici."),
+      el("div", { class: "row" }, el("span", {}, "Appel à envoyer"), el("span", { class: "mono" }, JSON.stringify(summary.wallet_call))),
+      el("div", { class: "card-actions actions" }, el("button", { class: "secondary", onclick: drawPortfolio }, "Retour")));
+  } else {
+    card.append(el("div", { class: "card-actions actions" },
+      el("button", { class: "secondary", onclick: drawPortfolio }, "Annuler"),
+      el("button", { class: "primary", onclick: () => execute(prepared.prepared_id) }, "Confirmer")));
+  }
+  $("pool-body").replaceChildren(card);
+}
+
+async function execute(preparedId) {
+  try {
+    const reply = await pool({ cmd: "pool_execute", prepared_id: preparedId });
+    toast(reply.complete ? "Opération faite." : "Opération en partie faite : voir les étapes.");
+  } catch (error) {
+    // Entries, exits and cash payments are queued by the pool agent: their outcome comes later through pool_recover.
+    if (/outcome unknown/.test(error.message)) toast("Envoyée à l'agent du pool : le résultat arrivera plus tard (Récupérer).");
+    else toast(`Opération refusée : ${error.message}`);
+  }
+  await drawPortfolio();
+}
+
+async function recover() {
+  try {
+    const r = await pool({ cmd: "pool_recover" });
+    toast(`Récupération : ${r.spent} faites, ${r.held_again} revenues, ${r.still_spending} en attente${r.agent_error ? ` (agent : ${r.agent_error})` : ""}.`);
+  } catch (error) {
+    toast(`Récupération impossible : ${error.message}`);
+  }
+  await drawPortfolio();
+}
+
+$("pool-button").addEventListener("click", openPool);
+$("close-pool").addEventListener("click", () => $("pool-dialog").close());
 $("phone-button").addEventListener("click", () => $("phone-dialog").showModal());
 $("close-phone").addEventListener("click", () => $("phone-dialog").close());
 for (const button of document.querySelectorAll(".segmented button")) {

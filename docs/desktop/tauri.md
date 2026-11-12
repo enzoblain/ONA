@@ -124,3 +124,35 @@ Tested with unit tests only (settings, refusals, a core set up through a SOCKS p
 Conversations are kept in memory only and are gone when the app quits; nothing about them is written to disk. Nothing
 marks the app's data folder (onion key, `pairing.json`, `model.json`) as excluded from backups on Windows or Linux:
 there is no single mechanism every backup tool follows there.
+
+## Pool
+
+The **Pool** button opens the pool: the total, the cash, one line per vault, and the operations of
+docs/desktop/pool-commands.md. Each operation is prepared by ona-core (`pool_prepare`), its summary shown (amount, what
+is received, what is left in the pool's cash and lost, fees, network, contract, expiry), and executed only when the
+person clicks **Confirmer** in this window: never from the phone, which only reads the portfolio. Entries, exits and
+payments are queued by the pool agent: the window says the result comes later, and **Récupérer** runs `pool_recover`.
+A deposit is prepared and its summary shown, but cannot be finished: it is sent and signed by the person's own NEAR
+wallet, and connecting a wallet to the app is not decided yet.
+
+Settings: `pool.json` in the app's data folder, with the names of `ona`'s variables (docs/INSTALL.md, "The pool
+commands"):
+
+```json
+{
+  "wallet_file": "/path/to/wallet",
+  "wallet_key_file": "/path/to/wallet-key",
+  "pool": "pool.<account>.testnet",
+  "rpc_url": "https://…",
+  "rpc_url_2": "https://… (optional, another operator)",
+  "recommended_near": "100,500,2000",
+  "agent_url": "https://… or http://….onion (optional)"
+}
+```
+
+Without the file, the pool answers `no pool wallet configured`. With it, the pool goes through the app's tor only, like
+the real model, and its core is made again when tor's port changes. Its core runs on its own thread: the window waits
+for a pool reply there; the phone's portfolio read waits on the worker thread.
+
+Tested: the settings and refusals (unit tests), and the window against a fake bridge returning the example values of
+pool-commands.md (in a browser). Not run against a pool contract.
