@@ -144,3 +144,13 @@ code gives the secret to the phone (`onion_auth`); the key is kept in the pairin
 phone makes a new key and starts `tor` again; a pairing made before this change is dropped once. The QR waits for the
 self-check through `tor`, which answers "missing client authorization" (0xF4, `ExtendedErrors`) for a restricted
 service it found.
+
+## Relay published for named clients
+
+Same as the Tauri app (docs/desktop/tauri.md, "A relay published for named clients only"): `tokens_file` is optional,
+and for an `http://…onion` relay the app's tor presents a client key made once in
+`~/Library/Application Support/ONA/tor/relay-client/`; the line to give the relay's operator is shown in the phone
+sheet ("Clé pour le relais"). Tested with unit tests; the same file layout reached a restricted service with C tor.
+
+**A local test node** (development builds only): same `"local_node": true` as the Tauri app; the Swift side passes it to the
+bridge as `pool_direct` in Debug builds and refuses it in Release. Tested with unit tests only.

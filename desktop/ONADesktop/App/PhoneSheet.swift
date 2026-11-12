@@ -188,6 +188,11 @@ struct SettingsView: View {
             if let request = model.lastPhoneRequest {
                 LabeledContent("Dernière requête du téléphone") { Text(request).font(.caption.monospaced()) }
             }
+            if RealModel.relayOnion() != nil, let line = try? TorService.relayClientAuth() {
+                LabeledContent("Clé pour le relais") { Text(line).font(.caption.monospaced()).textSelection(.enabled) }
+                Text("Si le relais .onion est réservé à des clients nommés, donnez cette ligne à la personne qui le fait tourner.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 520)

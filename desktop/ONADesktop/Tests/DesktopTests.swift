@@ -964,3 +964,41 @@ struct OnionPublishedTests {
         #expect(pairing.onionClientAuth != line)
     }
 }
+
+
+@MainActor
+@Suite struct RelayClientTests {
+    @Test func oneClientKeyForARestrictedRelay() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "ona-relay-\(UUID().uuidString)")
+        let line = try TorService.relayClientAuth(dir: dir)
+        #expect(line.hasPrefix("descriptor:x25519:") && line.count == 18 + 52)
+        #expect(try TorService.relayClientAuth(dir: dir) == line, "the same key next time")
+        let onion = String(repeating: "c", count: 56)
+        let auth = try TorService.relayAuthDir(onion: onion, dir: dir)
+        let text = try String(contentsOf: auth.appending(path: "relay.auth_private"), encoding: .utf8)
+        #expect(text.hasPrefix(onion + ":descriptor:x25519:") && text.hasSuffix("\n"))
+    }
+
+    @Test func theRelayOnionComesFromModelJSON() throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "ona-model-\(UUID().uuidString).json")
+        let onion = String(repeating: "d", count: 56)
+        try Data(#"{"relay_url":"http://\#(onion).onion/","model":"m","max_tokens":1,"token_budget":1}"#.utf8).write(to: file)
+        #expect(RealModel.relayOnion(file: file) == onion)
+        try Data(#"{"relay_url":"https://relay.example.org"}"#.utf8).write(to: file)
+        #expect(RealModel.relayOnion(file: file) == nil)
+    }
+}
+
+@Suite struct LocalNodePoolTests {
+    /// `local_node` leaves pool.json for the bridge's `pool_direct`, in development builds (tests run in debug).
+    @Test func aLocalNodeGoesDirectInDevelopmentBuilds() throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "ona-pool-\(UUID().uuidString).json")
+        try Data(#"{"wallet_file":"/w","wallet_key_file":"/nonexistent/key","pool":"pool.test.near","rpc_url":"http://127.0.0.1:3030","local_node":true}"#.utf8).write(to: file)
+        let setup = RealModel.poolSetup(file: file, coreSocks: nil)
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(setup.utf8)) as? [String: Any])
+        #expect(object["pool_direct"] as? Bool == true)
+        #expect((object["pool"] as? [String: Any])?["local_node"] == nil)
+        let reply = OnaCoreMission(setup: setup).dispatch(["cmd": "pool_portfolio"])
+        #expect((reply["error"] as? String)?.contains("wallet key") == true, "past the network checks: \(reply)")
+    }
+}

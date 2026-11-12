@@ -96,12 +96,16 @@ impl Worker {
             thread::spawn(move || {
                 let _ = loaded.send(read_secret_store());
             });
+            let mut tor = TorService::new(data_dir.join("tor"));
+            if let Ok(setup) = setup.lock() {
+                tor.set_relay_onion(setup.model.as_ref().ok().and_then(|m| m.as_ref()).and_then(|m| m.relay_onion()));
+            }
             let mut app = App {
                 pairing: PairingAuthority::waiting(&name),
                 name,
                 secrets: Some(secrets),
                 engine: ChatEngine::with_ona_core(setup.clone()),
-                tor: TorService::new(data_dir.join("tor")),
+                tor,
                 server: None,
                 server_error: None,
                 mode,
@@ -305,6 +309,9 @@ impl App {
         let qr = payload.as_deref().and_then(|p| self.qr_svg(p));
         let phone = self.pairing.record.phone.as_ref().map(|p| json!({"paired_at": p.paired_at, "verified": true}));
         let error = self.server_error.clone().or_else(|| self.pairing.storage_error.clone());
+        // With a relay on an onion address: the line its operator adds so that this computer may reach it.
+        let relay_onion = self.setup.lock().ok().and_then(|s| s.model.as_ref().ok().and_then(|m| m.as_ref()).and_then(|m| m.relay_onion()));
+        let relay_client = relay_onion.and_then(|_| self.tor.relay_client_auth().ok());
         json!({
             "name": self.pairing.name,
             "mode": self.mode.name(),
@@ -317,6 +324,7 @@ impl App {
             "server_error": error,
             "tor": {"state": tor_state, "message": tor_message},
             "last_request": self.last_request,
+            "relay_client": relay_client,
             "chats": self.engine.list_json(),
         })
     }

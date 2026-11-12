@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 
@@ -19,6 +20,9 @@ public final class TorService {
     public private(set) var state: State = .off
     /// tor's second SOCKS port, for everything ona-core sends (the relay, the pool agent, NEAR RPC nodes).
     private var coreSocksPort: UInt16?
+    /// The relay's onion address (56 characters, without `.onion`): from the next start, tor presents this app's
+    /// client key to it (`ClientOnionAuthDir`), in case the relay is published for named clients only.
+    public var relayOnion: String?
     private var process: Process?
     private var watch: Task<Void, Never>?
 
@@ -98,9 +102,14 @@ public final class TorService {
                 return
             }
             self.coreSocksPort = coreSocksPort
-            try Self.torrc(data: data.path, hs: hs.path, port: port, owner: ProcessInfo.processInfo.processIdentifier,
-                           socksPort: socksPort, coreSocksPort: coreSocksPort)
-                .write(to: torrc, atomically: true, encoding: .utf8)
+            var config = Self.torrc(data: data.path, hs: hs.path, port: port,
+                                    owner: ProcessInfo.processInfo.processIdentifier,
+                                    socksPort: socksPort, coreSocksPort: coreSocksPort)
+            if let relayOnion {
+                let dir = try Self.relayAuthDir(onion: relayOnion)
+                config += "ClientOnionAuthDir \"\(dir.path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\"\n"
+            }
+            try config.write(to: torrc, atomically: true, encoding: .utf8)
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: binary)
@@ -142,6 +151,43 @@ public final class TorService {
         } catch {
             state = .failed(error.localizedDescription)
         }
+    }
+
+    // MARK: - Restricted relay (onion client authorization, docs/TOR.md)
+
+    public static var relayClientDir: URL { root.appending(path: "relay-client", directoryHint: .isDirectory) }
+
+    /// This app's x25519 secret for restricted relays, made once and kept in `tor/relay-client/key` (0600).
+    static func relayClientSecret(dir: URL = relayClientDir) throws -> Data {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let file = dir.appending(path: "key")
+        if let data = try? Data(contentsOf: file), data.count == 32 { return data }
+        let secret = Curve25519.KeyAgreement.PrivateKey().rawRepresentation
+        guard FileManager.default.createFile(atPath: file.path, contents: secret, attributes: [.posixPermissions: 0o600]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return secret
+    }
+
+    /// The line to give the relay's operator, for `authorized_clients/` of the relay's onion service.
+    public static func relayClientAuth(dir: URL = relayClientDir) throws -> String {
+        let secret = try relayClientSecret(dir: dir)
+        let key = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: secret)
+        return "descriptor:x25519:" + ProtocolBytes.base32(key.publicKey.rawRepresentation)
+    }
+
+    /// The `ClientOnionAuthDir` tor reads, holding the key for `onion` only.
+    static func relayAuthDir(onion: String, dir: URL = relayClientDir) throws -> URL {
+        let secret = try relayClientSecret(dir: dir)
+        let auth = dir.appending(path: "auth", directoryHint: .isDirectory)
+        try? FileManager.default.removeItem(at: auth)
+        try FileManager.default.createDirectory(at: auth, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let line = "\(onion):descriptor:x25519:\(ProtocolBytes.base32(secret))\n"
+        guard FileManager.default.createFile(atPath: auth.appending(path: "relay.auth_private").path,
+                                             contents: Data(line.utf8), attributes: [.posixPermissions: 0o600]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return auth
     }
 
     public func stop() {

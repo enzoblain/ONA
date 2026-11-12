@@ -48,6 +48,10 @@ pub struct PoolSettings {
     /// `ONA_POOL_AGENT_URL`.
     #[serde(default)]
     pub agent_url: Option<String>,
+    /// A local test node and agent on this computer (for example Hugo's `ona-sandbox-pool`): no Tor, `http` to
+    /// 127.0.0.1. Development builds only; a release build refuses it.
+    #[serde(default)]
+    pub local_node: bool,
 }
 
 impl PoolSettings {
@@ -81,8 +85,10 @@ pub struct ModelSettings {
     pub max_tokens: u32,
     /// `ONA_REAL_TOKEN_BUDGET`, for each conversation.
     pub token_budget: u64,
-    /// `ONA_REAL_TOKENS_FILE`: one request token per line, readable by its owner only.
-    pub tokens_file: PathBuf,
+    /// `ONA_REAL_TOKENS_FILE`: one request token per line, readable by its owner only. Optional: a test relay may ask
+    /// for none (`ona-relay` refuses a chat without one).
+    #[serde(default)]
+    pub tokens_file: Option<PathBuf>,
 }
 
 impl ModelSettings {
@@ -91,13 +97,21 @@ impl ModelSettings {
         load_settings(data_dir, FILE)
     }
 
+    /// The relay's onion address without `.onion`, when it is one: the app's tor presents its client key to it, in
+    /// case the relay is published for named clients only (docs/TOR.md, "onion client authorization").
+    pub fn relay_onion(&self) -> Option<String> {
+        let rest = self.relay_url.strip_prefix("http://")?;
+        let host = rest.split(['/', ':']).next()?;
+        ona_core::tor::is_onion_v3(host).then(|| host.trim_end_matches(".onion").to_owned())
+    }
+
     fn lookup(&self, name: &str) -> Option<String> {
         Some(match name {
             "ONA_REAL_RELAY_URL" => self.relay_url.clone(),
             "ONA_REAL_MODEL" => self.model.clone(),
             "ONA_REAL_MAX_TOKENS" => self.max_tokens.to_string(),
             "ONA_REAL_TOKEN_BUDGET" => self.token_budget.to_string(),
-            "ONA_REAL_TOKENS_FILE" => self.tokens_file.to_string_lossy().into_owned(),
+            "ONA_REAL_TOKENS_FILE" => self.tokens_file.as_ref()?.to_string_lossy().into_owned(),
             _ => return None,
         })
     }
@@ -148,7 +162,16 @@ pub fn make_pool_core(setup: &CoreSetup) -> Box<dyn MissionCore> {
         Ok(Some(settings)) => settings,
         Err(e) => return Box::new(Refusing(e.clone())),
     };
-    let made = network(setup.core_socks, "le pool").and_then(|network| {
+    let network = if settings.local_node {
+        if cfg!(debug_assertions) {
+            ona_core::tor::Network::from_values(None, Some("0"))
+        } else {
+            Err("pool.json : local_node est réservé aux versions de développement".to_owned())
+        }
+    } else {
+        network(setup.core_socks, "le pool")
+    };
+    let made = network.and_then(|network| {
         let client = ona_core::pool::PoolClient::from_lookup(|name| Ok(settings.lookup(name)), &network)?
             .ok_or("pool.json : no wallet file")?;
         let mut core = ona_core::Core::new();
@@ -195,7 +218,7 @@ mod tests {
             model: "test-model".into(),
             max_tokens: 200,
             token_budget: 2000,
-            tokens_file,
+            tokens_file: Some(tokens_file),
         }
     }
 
@@ -271,5 +294,72 @@ mod tests {
         assert_eq!((reply["ok"].clone(), reply["mode"].clone()), (json!(false), json!("real")));
         assert!(reply["error"].as_str().unwrap().contains("wallet key"), "{reply}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_relay_without_request_tokens_and_its_onion() {
+        let onion = format!("{}.onion", "a".repeat(56));
+        let settings: ModelSettings = serde_json::from_value(json!({
+            "relay_url": format!("http://{onion}/"), "model": "m", "max_tokens": 200, "token_budget": 2000,
+        })).unwrap();
+        assert_eq!(settings.tokens_file, None);
+        assert_eq!(settings.relay_onion(), Some("a".repeat(56)));
+        assert!(real_core(&settings, Some(9)).is_ok(), "no tokens file is allowed");
+        let https = ModelSettings { relay_url: "https://relay.example.org".into(), ..settings };
+        assert_eq!(https.relay_onion(), None);
+    }
+
+    /// A local test node: no Tor (development builds), `http` to 127.0.0.1 accepted by ona-core.
+    #[test]
+    fn a_local_node_pool_goes_direct_in_development_builds() {
+        let settings = PoolSettings {
+            wallet_file: "/w".into(), wallet_key_file: "/nonexistent/key".into(), pool: "pool.test.near".into(),
+            rpc_url: "http://127.0.0.1:3030".into(), rpc_url_2: None, recommended_near: None,
+            agent_url: Some("http://127.0.0.1:8790".into()), local_node: true,
+        };
+        let mut core = make_pool_core(&CoreSetup { model: Ok(None), pool: Ok(Some(settings)), core_socks: None });
+        let error = core.dispatch(json!({"cmd": "pool_portfolio"}))["error"].as_str().unwrap().to_owned();
+        assert!(error.contains("wallet key"), "past the network checks, stopped at the key file: {error}");
+    }
+
+    /// Against a running local pool (`ona-sandbox-pool --serve`, docs/INSTALL.md): the window's path, from `pool.json`
+    /// through the engine's pool thread to the contract and the agent. Run by hand:
+    /// `ONA_TEST_POOL_DIR=<its folder> cargo test -- --ignored local_pool`.
+    #[test]
+    #[ignore]
+    fn local_pool_through_the_engine() {
+        let dir = std::path::PathBuf::from(std::env::var("ONA_TEST_POOL_DIR").expect("ONA_TEST_POOL_DIR"));
+        let pool = PoolSettings::load(&dir).unwrap().expect("pool.json");
+        assert!(pool.local_node);
+        let setup = std::sync::Arc::new(std::sync::Mutex::new(CoreSetup { model: Ok(None), pool: Ok(Some(pool)), core_socks: None }));
+        let mut engine = crate::engine::ChatEngine::with_ona_core(setup);
+        let sender = engine.pool_sender();
+        let ask = |request: Value| -> Value {
+            let (reply, answer) = std::sync::mpsc::channel();
+            sender.send((request.clone(), reply)).unwrap();
+            let value = answer.recv().unwrap();
+            println!("{request} -> {value}");
+            value
+        };
+        let portfolio = ask(json!({"cmd": "pool_portfolio"}));
+        assert_eq!(portfolio["ok"], true);
+        assert_eq!(portfolio["cash"]["value"], "12000000000000000000000000", "the 12 NEAR deposited by --serve");
+        let prepared = ask(json!({"cmd": "pool_prepare", "op": "enter", "vault": 0, "amount": "10000000000000000000000000"}));
+        assert_eq!(prepared["ok"], true);
+        let executed = ask(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}));
+        let queued = executed["error"].as_str().is_some_and(|e| e.contains("outcome unknown"));
+        assert!(executed["complete"] == true || queued, "{executed}");
+        // The agent sends the entry in its next batch: --serve ticks it every two seconds.
+        let mut entered = false;
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let recover = ask(json!({"cmd": "pool_recover"}));
+            let portfolio = ask(json!({"cmd": "pool_portfolio"}));
+            if recover["still_spending"] == 0 && portfolio["vaults"].as_array().is_some_and(|v| !v.is_empty()) {
+                entered = true;
+                break;
+            }
+        }
+        assert!(entered, "the entry into vault 0 did not complete");
     }
 }

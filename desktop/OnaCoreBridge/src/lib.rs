@@ -90,7 +90,7 @@ fn core_from_setup(text: &str) -> Result<OnaCore, String> {
         if !model.is_null() {
             return Err("the pool and the real model each have their own core".to_owned());
         }
-        return pool_core(pool, &setup["core_socks"]);
+        return pool_core(pool, &setup["core_socks"], setup["pool_direct"] == true);
     }
     if model.is_null() {
         return Ok(OnaCore::new());
@@ -137,12 +137,18 @@ const POOL_KEYS: [(&str, &str); 7] = [
 
 /// The core that answers the pool commands, from `pool.json`. One for the whole app: the core that opens the wallet
 /// file locks it.
-fn pool_core(settings: &serde_json::Value, core_socks: &serde_json::Value) -> Result<OnaCore, String> {
+/// `direct`: a local test node and agent on this computer, without Tor. The app sets it from `pool.json`'s `local_node`
+/// in development builds only.
+fn pool_core(settings: &serde_json::Value, core_socks: &serde_json::Value, direct: bool) -> Result<OnaCore, String> {
     let settings = settings.as_object().ok_or("pool.json : not an object")?;
     if let Some(unknown) = settings.keys().find(|key| !POOL_KEYS.iter().any(|(name, _)| name == key)) {
         return Err(format!("pool.json : unknown field `{unknown}`"));
     }
-    let network = network(core_socks, "le pool")?;
+    let network = if direct {
+        ona_core::tor::Network::from_values(None, Some("0"))?
+    } else {
+        network(core_socks, "le pool")?
+    };
     let lookup = |variable: &str| -> Result<Option<String>, String> {
         let Some((key, _)) = POOL_KEYS.iter().find(|(_, name)| *name == variable) else { return Ok(None) };
         match settings.get(*key) {
@@ -313,6 +319,8 @@ mod tests {
             (serde_json::json!({"model": null, "pool": pool, "core_socks": 9}), "wallet key"),
             (serde_json::json!({"model": null, "pool": {"wallet_file": "/w", "colour": "x"}, "core_socks": 9}), "unknown field"),
             (serde_json::json!({"model": null, "pool": {"wallet_file": 3}, "core_socks": 9}), "not text"),
+            // Direct (local node): no Tor needed, the wallet key file is read and missing here.
+            (serde_json::json!({"model": null, "pool": pool, "core_socks": null, "pool_direct": true}), "wallet key"),
             (serde_json::json!({"model": {"relay_url": "x"}, "pool": pool, "core_socks": 9}), "own core"),
             (serde_json::json!({"error": "pool.json : unreadable"}), "unreadable"),
         ] {
