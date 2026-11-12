@@ -168,13 +168,36 @@ pub fn payment_digest_v2(network: &str, contract: &str, mission_id: &str, nonce_
 }
 
 /// Text of the pairing QR code: `ona-pair:` + base64url(JSON).
-pub fn pairing_payload(name: &str, address: Option<&str>, onion: Option<&str>, computer_key: &[u8], code: &str,
-                       expires_at: u64) -> String {
-    let object = json!({
+/// `onion_auth`: with an onion address, the phone's key for this computer's restricted onion service (Tor client
+/// authorization), base32 of the 32-byte x25519 secret. Absent without an onion address.
+pub fn pairing_payload(name: &str, address: Option<&str>, onion: Option<&str>, onion_auth: Option<&str>,
+                       computer_key: &[u8], code: &str, expires_at: u64) -> String {
+    let mut object = json!({
         "v": VERSION, "name": name, "address": address, "onion": onion,
         "computer_key": STANDARD.encode(computer_key), "code": code, "expires_at": expires_at,
     });
+    if let (Some(auth), Some(_)) = (onion_auth, onion) {
+        object["onion_auth"] = json!(auth);
+    }
     format!("{PAYLOAD_PREFIX}{}", URL_SAFE_NO_PAD.encode(object.to_string()))
+}
+
+/// RFC 4648 base32, upper case, without padding: the form Tor uses for client authorization keys.
+pub fn base32(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let (mut out, mut buffer, mut bits) = (String::new(), 0u32, 0u32);
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buffer >> bits) & 31) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buffer << (5 - bits)) & 31) as usize] as char);
+    }
+    out
 }
 
 pub fn b64url(bytes: &[u8]) -> String {
@@ -348,5 +371,15 @@ pub mod tests {
         assert!(same_secret(b"abc", b"abc"));
         assert!(!same_secret(b"abc", b"abd"));
         assert!(!same_secret(b"abc", b"ab"));
+    }
+
+    /// RFC 4648 test vectors (without padding).
+    #[test]
+    fn base32_matches_rfc4648() {
+        for (input, expected) in [("", ""), ("f", "MY"), ("fo", "MZXQ"), ("foo", "MZXW6"), ("foob", "MZXW6YQ"),
+                                  ("fooba", "MZXW6YTB"), ("foobar", "MZXW6YTBOI")] {
+            assert_eq!(base32(input.as_bytes()), expected);
+        }
+        assert_eq!(base32(&[0u8; 32]).len(), 52);
     }
 }

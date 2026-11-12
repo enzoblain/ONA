@@ -73,13 +73,104 @@ le téléphone : à réserver aux tests. La fenêtre ne reçoit que l'image du Q
 - Le téléphone joignant l'app par Tor (seule la publication de l'adresse a été vue).
 - Les clics dans la vraie fenêtre Tauri (pas de clic automatisé possible ici) ; le QR affiché dans la fenêtre.
 - Les installeurs.
-- Les appels à `ona-core` se font sur le fil unique qui sert aussi la fenêtre et le téléphone : avec un vrai modèle,
-  tout attendrait la fin de chaque appel.
-- `pairing.json` contient **en clair la clé privée de l'ordinateur** (qui signe les réponses au téléphone) et le
-  **jeton** du téléphone (qui ouvre les lectures), protégés seulement par les droits 0600 et la session de
-  l'utilisateur. Qui le copie (sauvegarde, autre programme du même utilisateur, administrateur) peut se faire passer
-  pour l'ordinateur auprès du téléphone et lire les conversations ; il ne peut pas signer à la place du téléphone
-  (clé dans son Secure Enclave). Pas de trousseau système utilisé sous Linux ni Windows.
+- Chaque conversation a son `ona-core` sur un fil à elle. Le fil qui sert la fenêtre et le téléphone lui envoie une
+  commande à la fois et n'attend pas plus de 200 ms : un appel au vrai modèle continue pendant que la fenêtre et le
+  téléphone sont servis, et la réponse est reprise au tour suivant. Les confirmations (plan, destinataire, paiement)
+  et la fin de mission attendent la réponse : elles ne passent pas par le modèle. La lecture du pool pour le téléphone
+  attend encore la sienne.
+- La **clé privée de l'ordinateur** (qui signe les réponses au téléphone) et le **jeton** du téléphone (qui ouvre les
+  lectures) sont dans le coffre du système (bibliothèque `keyring` : Trousseau sur Mac, Gestionnaire d'identification
+  sous Windows, Secret Service sous Linux), pas dans `pairing.json`, qui ne garde que la clé publique du téléphone, le
+  compteur et les identifiants déjà utilisés. Un `pairing.json` d'une version précédente donne ses secrets au coffre
+  au démarrage, puis est réécrit sans eux. Sans coffre utilisable (Linux sans Secret Service lancé), les secrets
+  restent dans le fichier, lisible par l'utilisateur seul, et la fenêtre le dit. Testé avec un faux coffre ; le vrai
+  coffre de chaque système n'a pas été essayé. Un autre programme du même utilisateur peut en général lire le coffre
+  aussi : il protège surtout contre la copie d'un fichier (sauvegarde, autre machine).
+- Le coffre est lu au démarrage sur un fil à part : macOS peut d'abord demander l'accord de la personne (après une mise
+  à jour non signée de la même façon, par exemple). Pendant ce temps la fenêtre répond et dit « Lecture du trousseau du
+  système… » ; le téléphone n'est pas servi et aucun QR n'est montré tant que l'appairage n'est pas chargé. Une écriture
+  dans le coffre (nouvel appairage) se fait encore sur le fil principal. Les tests n'utilisent jamais le coffre du
+  système.
 - Le fichier d'appairage et la clé du service onion (`tor/hs`) sous Windows n'ont pas de droits restreints au-delà du
   dossier de l'utilisateur (pas d'ACL posée). Sous Linux, la clé onion est un fichier simple dans un dossier 0700 : qui
   la copie peut publier la même adresse ; les réponses signées par la clé de l'ordinateur limitent alors l'usurpation.
+
+## Real model
+
+Without settings, ona-core keeps its fake model (`mode: mock`) and the app and the phone show the simulation banner. To
+use the real one, write `model.json` in the app's data folder (next to `pairing.json`):
+
+```json
+{
+  "relay_url": "https://relay.example.org",
+  "model": "<a model the relay allows>",
+  "max_tokens": 512,
+  "token_budget": 20000,
+  "tokens_file": "/path/to/request-tokens"
+}
+```
+
+The names are those of `ona real` (docs/INSTALL.md, "Use the real model"); `token_budget` is for each conversation.
+`tokens_file` holds one request token per line, readable by its owner only.
+
+- Every connection ona-core opens goes through the app's own tor, on a second SOCKS port that is not onion-only
+  (`ONA_REQUIRE_TOR`). The real model is used only in Tor mode, once the QR code is shown; before that, or in the
+  local-network mode, a conversation is refused with the reason. Through Tor, the relay must be an `https` host name
+  or an `http` onion address: an IP address is refused by ona-core.
+- An unreadable `model.json`, or settings ona-core refuses, give a core that refuses every command with the reason: the
+  app never falls back to the fake model in silence.
+- The NEAR AI key is not in the app: the relay holds it (docs/INSTALL.md, "Run the relay").
+- Only one conversation at a time can use the tokens file (ona-core locks it).
+
+Tested with unit tests only (settings, refusals, a core set up through a SOCKS port). Not run against a relay yet.
+
+## Erasure and backups
+
+Conversations are kept in memory only and are gone when the app quits; nothing about them is written to disk. Nothing
+marks the app's data folder (onion key, `pairing.json`, `model.json`) as excluded from backups on Windows or Linux:
+there is no single mechanism every backup tool follows there.
+
+## Pool
+
+The **Pool** button opens the pool: the total, the cash, one line per vault, and the operations of
+docs/desktop/pool-commands.md. Each operation is prepared by ona-core (`pool_prepare`), its summary shown (amount, what
+is received, what is left in the pool's cash and lost, fees, network, contract, expiry), and executed only when the
+person clicks **Confirmer** in this window: never from the phone, which only reads the portfolio. Entries, exits and
+payments are queued by the pool agent: the window says the result comes later, and **Récupérer** runs `pool_recover`.
+A deposit is prepared and its summary shown, but cannot be finished: it is sent and signed by the person's own NEAR
+wallet, and connecting a wallet to the app is not decided yet.
+
+Settings: `pool.json` in the app's data folder, with the names of `ona`'s variables (docs/INSTALL.md, "The pool
+commands"):
+
+```json
+{
+  "wallet_file": "/path/to/wallet",
+  "wallet_key_file": "/path/to/wallet-key",
+  "pool": "pool.<account>.testnet",
+  "rpc_url": "https://…",
+  "rpc_url_2": "https://… (optional, another operator)",
+  "recommended_near": "100,500,2000",
+  "agent_url": "https://… or http://….onion (optional)"
+}
+```
+
+Without the file, the pool answers `no pool wallet configured`. With it, the pool goes through the app's tor only, like
+the real model, and its core is made again when tor's port changes. Its core runs on its own thread: the window waits
+for a pool reply there; the phone's portfolio read waits on the worker thread.
+
+Tested: the settings and refusals (unit tests), and the window against a fake bridge returning the example values of
+pool-commands.md (in a browser). Not run against a pool contract.
+
+## Tor client authorization
+
+In Tor mode the onion service is published for the paired phone's client key only (Tor "restricted discovery"): a Tor
+client without the key cannot find it, so it cannot try a pairing code or a request. The app makes an x25519 key,
+writes its public half to `tor/hs/authorized_clients/phone.auth` before starting `tor`, and gives the secret half to
+the phone in the QR code (`onion_auth`, docs/ios/protocol-draft.md). The secret is kept with the pairing secrets (in
+the system's credential store). Forgetting the phone makes a new key and starts `tor` again. A pairing made before
+this change is dropped once: the phone pairs again.
+
+Before showing the QR code, the app checks its own onion address through its own `tor` without the key: with
+`ExtendedErrors` on that SOCKS port, `tor` answers "missing client authorization" (0xF4) once it found the descriptor,
+which shows the service is published.

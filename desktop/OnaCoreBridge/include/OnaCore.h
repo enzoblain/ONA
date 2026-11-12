@@ -9,6 +9,8 @@ extern "C" {
 typedef struct OnaCore OnaCore;
 
 OnaCore *ona_core_new(void);
+/// From the app's settings (JSON, see ../src/lib.rs): the fake model, or the real one through tor. Never null.
+OnaCore *ona_core_new_with(const char *setup);
 void ona_core_free(OnaCore *core);
 /// JSON command in, JSON reply out (release it with ona_core_string_free). Blocking: not on the main thread.
 char *ona_core_dispatch(OnaCore *core, const char *request);

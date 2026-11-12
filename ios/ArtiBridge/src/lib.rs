@@ -172,6 +172,33 @@ pub unsafe extern "C" fn arti_bridge_bootstrap(state_dir: *const c_char, cache_d
     })
 }
 
+/// Gives the client the key of a restricted onion service (Tor client authorization, "restricted discovery"): the
+/// 32-byte x25519 secret from the computer's QR code. Without it, a restricted service cannot even be found. Kept in
+/// Arti's key store (in `state_dir`), replacing any key held for that address. Call after `arti_bridge_bootstrap`.
+///
+/// Returns `{"ok":true}`.
+///
+/// # Safety
+/// `host` must be a NUL-terminated string; `secret` must point to `secret_len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arti_bridge_set_onion_auth(host: *const c_char, secret: *const u8, secret_len: usize) -> *mut c_char {
+    let host = unsafe { arg(host, "host") };
+    let secret: Option<[u8; 32]> = (!secret.is_null() && secret_len == 32)
+        .then(|| unsafe { std::slice::from_raw_parts(secret, secret_len) }.try_into().ok())
+        .flatten();
+    ffi(move || {
+        let host = host?;
+        let secret = secret.ok_or("the client key must be 32 bytes")?;
+        let client = current_client().ok_or("Tor is not started")?;
+        let hsid: tor_hscrypto::pk::HsId = host.parse().map_err(|e| format!("onion address: {e}"))?;
+        let key = tor_hscrypto::pk::HsClientDescEncSecretKey::from(tor_llcrypto::pk::curve25519::StaticSecret::from(secret));
+        client
+            .insert_service_discovery_key(arti_client::KeystoreSelector::Primary, hsid, key)
+            .map_err(|e| arti_error("client key", &e))?;
+        Ok(json!({}))
+    })
+}
+
 /// `{"ok":true,"started":bool,"progress":0.0..1.0,"ready":bool,"description":"…"}`. Never blocks for long.
 #[unsafe(no_mangle)]
 pub extern "C" fn arti_bridge_status() -> *mut c_char {
@@ -406,6 +433,23 @@ mod tests {
         assert!(check_target("example.onion", "/a b").is_err());
         assert!(check_target("example.onion", "v0/state").is_err());
         assert!(check_target("", "/").is_err());
+    }
+
+    fn reply(raw: *mut c_char) -> serde_json::Value {
+        let text = unsafe { CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+        unsafe { arti_bridge_string_free(raw) };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn a_client_key_must_be_32_bytes_and_needs_a_started_client() {
+        let host = c"example.onion";
+        let short = [1u8; 31];
+        let wrong = reply(unsafe { arti_bridge_set_onion_auth(host.as_ptr(), short.as_ptr(), short.len()) });
+        assert!(wrong["error"].as_str().unwrap().contains("32 bytes"), "{wrong}");
+        let key = [1u8; 32];
+        let early = reply(unsafe { arti_bridge_set_onion_auth(host.as_ptr(), key.as_ptr(), key.len()) });
+        assert!(early["error"].as_str().unwrap().contains("not started"), "{early}");
     }
 }
 

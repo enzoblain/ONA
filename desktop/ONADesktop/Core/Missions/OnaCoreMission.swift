@@ -9,6 +9,11 @@ public final class OnaCoreMission: MissionCore {
         core = ona_core_new()
     }
 
+    /// A core from the app's settings (`RealModel.setup`): the fake model, or the real one through tor.
+    public init(setup: String) {
+        core = setup.withCString { ona_core_new_with($0) }
+    }
+
     deinit {
         ona_core_free(core)
     }

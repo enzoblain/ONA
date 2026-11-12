@@ -171,7 +171,9 @@ public final class Chat: Identifiable {
 
     /// The step in progress, for the "en cours" line.
     public var working: (tool: String, text: String)? {
-        guard let run, case .running = run.phase, run.cursor < run.plan.count else { return nil }
+        guard let run, case .running = run.phase else { return nil }
+        if run.plan.isEmpty { return ("think", "Préparation d'un plan…") }
+        guard run.cursor < run.plan.count else { return nil }
         let tool = run.plan[run.cursor]
         guard let text = ChatEngine.runningLabels[tool] else { return nil }
         return (tool, text)
@@ -199,6 +201,117 @@ public final class Chat: Identifiable {
     }
 }
 
+/// One conversation's ona-core on a serial queue of its own. The main actor, which also serves the window and the phone,
+/// sends one command at a time and never waits long for a slow one (`poll`): with the real model a call takes seconds
+/// through Tor. The core is used on the queue only, after it was made. The pool's core is one too: the window awaits
+/// its replies (`send`) without holding the main actor.
+final class CoreQueue: @unchecked Sendable {
+    /// How long a tick waits for ona-core: the fake model answers within it, a real call does not and is looked at
+    /// again at the next tick.
+    static let quickReply: DispatchTimeInterval = .milliseconds(50)
+
+    /// Nil once released. Used on `queue` only.
+    private var core: (any MissionCore)?
+    private let queue = DispatchQueue(label: "org.ona.desktop.core")
+    /// Left once the core is released (`release`).
+    private let released = DispatchGroup()
+    private let lock = NSLock()
+    /// Replies ready, by ticket. Under `lock`.
+    private var replies: [Int: [String: Any]] = [:]
+    /// The command sent and not taken yet. Main actor only.
+    private var inflight: (request: NSDictionary, ticket: Int, done: DispatchSemaphore)?
+    private var tickets = 0
+
+    init(core: any MissionCore) {
+        self.core = core
+    }
+
+    /// ona-core's reply to `request` once it is there; nil while ona-core works on it, and the same request is asked
+    /// again at the next tick. A different request while one is in flight waits for the first one.
+    @MainActor
+    func poll(_ request: [String: Any]) -> [String: Any]? {
+        if let inflight, !inflight.request.isEqual(to: request) {
+            inflight.done.wait()
+            _ = take(inflight.ticket)
+            self.inflight = nil
+        }
+        if inflight == nil {
+            tickets += 1
+            let ticket = tickets, done = DispatchSemaphore(value: 0)
+            let sent = Box(request)
+            queue.async { [self] in
+                let reply = dispatch(sent.value)
+                lock.withLock { replies[ticket] = reply }
+                done.signal()
+            }
+            inflight = (request as NSDictionary, ticket, done)
+        }
+        guard let current = inflight, current.done.wait(timeout: .now() + Self.quickReply) == .success else { return nil }
+        inflight = nil
+        return take(current.ticket)
+    }
+
+    /// Waits for the reply: for the quick commands the person is waiting on (a confirmation, closing the mission).
+    @MainActor
+    func call(_ request: [String: Any]) -> [String: Any] {
+        if let inflight {
+            inflight.done.wait()
+            _ = take(inflight.ticket)
+            self.inflight = nil
+        }
+        let sent = Box(request)
+        return queue.sync { Box(dispatch(sent.value)) }.value
+    }
+
+    /// The reply, awaited: the main actor goes on serving while ona-core works on the queue.
+    @MainActor
+    func send(_ request: [String: Any]) async -> [String: Any] {
+        let sent = Box(request)
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Box<[String: Any]>, Never>) in
+            queue.async { [self] in continuation.resume(returning: Box(dispatch(sent.value))) }
+        }.value
+    }
+
+    /// Drops the core once the commands already sent are answered: its wallet file is unlocked then. Later commands
+    /// answer `ona-core stopped`.
+    @MainActor
+    func release() {
+        released.enter()
+        queue.async { [self] in
+            core = nil
+            released.leave()
+        }
+    }
+
+    /// Waits until `release` has dropped the core.
+    func waitReleased() {
+        released.wait()
+    }
+
+    /// Same, awaited.
+    @MainActor
+    func whenReleased() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            released.notify(queue: .global()) { @Sendable in continuation.resume() }
+        }
+    }
+
+    /// On `queue` only.
+    private func dispatch(_ request: [String: Any]) -> [String: Any] {
+        core?.dispatch(request) ?? ["ok": false, "error": "ona-core stopped"]
+    }
+
+    private func take(_ ticket: Int) -> [String: Any] {
+        lock.withLock { replies.removeValue(forKey: ticket) } ?? ["ok": false, "error": "ona-core stopped"]
+    }
+}
+
+/// JSON values cross to the core's queue and back; nothing else holds them meanwhile.
+private struct Box<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
 /// ona-core driven step by step, stopping at each human confirmation. Observable: the chat's status comes from it.
 @MainActor
 @Observable
@@ -210,7 +323,10 @@ fileprivate final class MissionRun {
         case stopped
     }
 
-    @ObservationIgnored let core: any MissionCore
+    @ObservationIgnored let core: CoreQueue
+    /// The person's request, sent to ona-core with `open`.
+    let mission: String
+    var opened = false
     var plan: [String] = []
     var cursor = 0
     var phase: Phase = .running
@@ -219,8 +335,9 @@ fileprivate final class MissionRun {
     var ranked: [Offer] = []
     var chosen: String?
 
-    init(core: any MissionCore) {
-        self.core = core
+    init(core: any MissionCore, mission: String) {
+        self.core = CoreQueue(core: core)
+        self.mission = mission
     }
 }
 
@@ -248,20 +365,60 @@ public final class ChatEngine {
     static let busyMessage = "Je suis encore sur la mission en cours : je vous tiens au courant ici."
 
     private let makeCore: () -> any MissionCore
+    /// Makes the pool's core (`pool.json`, `RealModel.poolSetup`).
+    private let makePoolCore: () -> any MissionCore
     private var count = 0
-    /// A core of its own for the pool, created on first use (its wallet is configured by ona-core, not here).
-    private var poolCore: (any MissionCore)?
+    /// One core for the pool, on its own queue, made on first use: it holds the wallet file's lock.
+    private var poolQueue: CoreQueue?
+    /// Pool cores dropped by `resetPool` whose release may not be done yet: a new one is made only after, since the
+    /// wallet file is locked by the core that opened it.
+    private var releasingPools: [CoreQueue] = []
 
-    public init(makeCore: @escaping () -> any MissionCore) {
+    /// The commands the pool window may send (docs/desktop/pool-commands.md).
+    public static let poolCommands: Set<String> = ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover"]
+
+    /// `makePoolCore` makes the pool's core; by default `makeCore`.
+    public init(makeCore: @escaping () -> any MissionCore, makePoolCore: (() -> any MissionCore)? = nil) {
         self.makeCore = makeCore
+        self.makePoolCore = makePoolCore ?? makeCore
+    }
+
+    /// Drops the pool's core, so that the next pool command makes a new one: when tor's port for the core changes.
+    public func resetPool() {
+        guard let old = poolQueue else { return }
+        poolQueue = nil
+        old.release()
+        releasingPools.append(old)
+    }
+
+    /// A pool command from the Mac's window: `pool_portfolio`, `pool_prepare`, `pool_execute` or `pool_recover`.
+    /// ona-core works on the pool core's queue: the main actor, which serves the window and the phone, is not held.
+    /// Pool operations are confirmed on the Mac only, never from the phone.
+    public func pool(_ request: [String: Any]) async -> [String: Any] {
+        guard let cmd = request["cmd"] as? String, Self.poolCommands.contains(cmd) else {
+            return ["ok": false, "error": "commande du pool inconnue"]
+        }
+        while let old = releasingPools.first {
+            await old.whenReleased()
+            releasingPools.removeAll { $0 === old }
+        }
+        return await currentPool().send(request)
+    }
+
+    private func currentPool() -> CoreQueue {
+        if let poolQueue { return poolQueue }
+        let made = CoreQueue(core: makePoolCore())
+        poolQueue = made
+        return made
     }
 
     /// The pool portfolio for the phone, read only: ona-core's `pool_portfolio` (cash, shares per vault, total). On
     /// failure, ona-core's error, for instance `no pool wallet configured`. Pool operations are confirmed on the Mac.
+    /// It waits for ona-core's reply on the main actor (through Tor, seconds), like the Tauri app's worker thread.
     public func poolPortfolio() -> Result<[String: Any], PoolError> {
-        let core = poolCore ?? makeCore()
-        poolCore = core
-        var reply = core.dispatch(["cmd": "pool_portfolio"])
+        for old in releasingPools { old.waitReleased() }
+        releasingPools.removeAll()
+        var reply = currentPool().call(["cmd": "pool_portfolio"])
         guard reply["ok"] as? Bool == true else {
             return .failure(PoolError(code: reply["error"] as? String ?? "pool unavailable"))
         }
@@ -328,15 +485,15 @@ public final class ChatEngine {
         let reply: [String: Any]
         switch pending.request {
         case .plan:
-            reply = run.core.dispatch(["cmd": "accept_plan"])
+            reply = run.core.call(["cmd": "accept_plan"])
         case .recipient:
             guard let firm else { return ProtocolError.badRequest.rawValue }
-            reply = run.core.dispatch(["cmd": "confirm_recipient", "firm": firm])
+            reply = run.core.call(["cmd": "confirm_recipient", "firm": firm])
             if Self.ok(reply) { run.chosen = firm }
         case .payment:
             // ona-core's gate checks the digest against the payment it prepared.
             guard let digest else { return ProtocolError.badRequest.rawValue }
-            reply = run.core.dispatch(["cmd": "confirm_payment", "digest": digest])
+            reply = run.core.call(["cmd": "confirm_payment", "digest": digest])
         }
         guard Self.ok(reply) else { return reply["error"] as? String ?? ProtocolError.badRequest.rawValue }
         chat.decide(id, .accepted)
@@ -370,36 +527,48 @@ public final class ChatEngine {
 
     private func start(_ text: String, in chat: Chat) {
         // A new core for every mission: the previous one (closed, or stopped by an error or a panic) is dropped.
-        let run = MissionRun(core: makeCore())
+        let run = MissionRun(core: makeCore(), mission: text)
         chat.run = run
-        let opened = run.core.dispatch(["cmd": "open", "mission": text])
-        guard Self.ok(opened) else { return fail(chat, run, opened) }
-        mode = opened["mode"] as? String ?? mode
-        chat.add(.activity(tool: "think", text: "Lecture de votre demande et préparation d'un plan"))
-        let proposal = run.core.dispatch(["cmd": "propose_plan"])
-        guard Self.ok(proposal), let plan = proposal["plan"] as? [String] else { return fail(chat, run, proposal) }
-        run.plan = plan
-        chat.add(.agent(String(format: Self.planMessage, plan.count)))
-        wait(chat, run, .plan(plan))
+        // The first steps at once: with the fake model, the plan is there before this request returns.
+        step(chat, run)
+        if case .running = run.phase { step(chat, run) }
     }
 
+    /// Moves a working mission on by one command, when ona-core has answered the previous one.
     private func step(_ chat: Chat, _ run: MissionRun) {
+        if !run.opened {
+            guard let opened = run.core.poll(["cmd": "open", "mission": run.mission]) else { return }
+            guard Self.ok(opened) else { return fail(chat, run, opened) }
+            run.opened = true
+            mode = opened["mode"] as? String ?? mode
+            chat.add(.activity(tool: "think", text: "Lecture de votre demande et préparation d'un plan"))
+            return
+        }
+        if run.plan.isEmpty {
+            guard let proposal = run.core.poll(["cmd": "propose_plan"]) else { return }
+            guard Self.ok(proposal), let plan = proposal["plan"] as? [String], !plan.isEmpty else {
+                return fail(chat, run, proposal)
+            }
+            run.plan = plan
+            chat.add(.agent(String(format: Self.planMessage, plan.count)))
+            return wait(chat, run, .plan(plan))
+        }
         guard run.cursor < run.plan.count else { return finish(chat, run, cancelled: false) }
         let tool = run.plan[run.cursor]
         switch tool {
         case "search":
-            let reply = run.core.dispatch(["cmd": "search", "template": "lawyer", "value": "paris"])
+            guard let reply = run.core.poll(["cmd": "search", "template": "lawyer", "value": "paris"]) else { return }
             guard Self.ok(reply) else { return fail(chat, run, reply) }
             run.handles = reply["handles"] as? [String] ?? []
             chat.add(.activity(tool: tool, text: "Recherche « avocat droit du travail paris » : \(run.handles.count) résultats"))
         case "read":
             guard run.readCount < run.handles.count else { return fail(chat, run, ["error": "no page left to read"]) }
-            let reply = run.core.dispatch(["cmd": "read", "handle": run.handles[run.readCount]])
+            guard let reply = run.core.poll(["cmd": "read", "handle": run.handles[run.readCount]]) else { return }
             run.readCount += 1
             guard Self.ok(reply), let offer = Offer(reply["offer"]) else { return fail(chat, run, reply) }
             chat.add(.activity(tool: tool, text: "Lecture d'une page : \(offer.firmID), \(offer.priceCents / 100) €, sous \(offer.delayDays) jours"))
         case "compare":
-            let reply = run.core.dispatch(["cmd": "compare"])
+            guard let reply = run.core.poll(["cmd": "compare"]) else { return }
             guard Self.ok(reply) else { return fail(chat, run, reply) }
             run.ranked = (reply["ranked"] as? [Any] ?? []).compactMap(Offer.init)
             chat.add(.activity(tool: tool, text: "Comparaison : \(run.ranked.count) offres classées"))
@@ -407,12 +576,12 @@ public final class ChatEngine {
             chat.add(.agent(String(format: Self.recipientMessage, run.ranked.count)))
             return wait(chat, run, .recipient(run.ranked))
         case "contact":
-            let reply = run.core.dispatch(["cmd": "contact", "message": Self.contactMessage])
+            guard let reply = run.core.poll(["cmd": "contact", "message": Self.contactMessage]) else { return }
             guard Self.ok(reply) else { return fail(chat, run, reply) }
             chat.add(.activity(tool: tool, text: "Message générique envoyé à \(run.chosen ?? "?")"))
         case "prepare_payment":
             // No amount: ona-core computes it from the chosen offer's price and the policy's rate.
-            let reply = run.core.dispatch(["cmd": "prepare_payment"])
+            guard let reply = run.core.poll(["cmd": "prepare_payment"]) else { return }
             guard Self.ok(reply) else { return fail(chat, run, reply) }
             let request: Pending.Request
             switch Pending.preparedPayment(reply) {
@@ -429,7 +598,7 @@ public final class ChatEngine {
         case "confirm_payment":
             return fail(chat, run, ["error": "payment confirmation without a prepared payment"])
         case "pay":
-            let reply = run.core.dispatch(["cmd": "pay"])
+            guard let reply = run.core.poll(["cmd": "pay"]) else { return }
             guard Self.ok(reply) else { return fail(chat, run, reply) }
             chat.add(.activity(tool: tool, text: "Paiement envoyé : \(reply["tx"] as? String ?? "?")"))
         default:
@@ -446,8 +615,8 @@ public final class ChatEngine {
     }
 
     private func finish(_ chat: Chat, _ run: MissionRun, cancelled: Bool) {
-        _ = run.core.dispatch(["cmd": "close"])
-        var exposure = run.core.dispatch(["cmd": "exposure"])
+        _ = run.core.call(["cmd": "close"])
+        var exposure = run.core.call(["cmd": "exposure"])
         exposure.removeValue(forKey: "ok")
         run.phase = cancelled ? .stopped : .done
         chat.add(.agent(cancelled ? Self.cancelledMessage : Self.doneMessage))

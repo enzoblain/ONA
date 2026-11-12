@@ -1,5 +1,6 @@
 import ArtiBridge
 import Foundation
+import Synchronization
 
 /// The app's Tor client: Arti embedded through the Rust `arti-bridge` library (ios/ArtiBridge).
 ///
@@ -9,6 +10,8 @@ final class ArtiTor: Sendable {
 
     private let queue = DispatchQueue(label: "org.ona.remote.arti", qos: .userInitiated)
     private let bootstrap = BootstrapOnce()
+    /// Client keys already given to this Tor client, by onion address (Arti keeps them in its key store).
+    private let clientKeys = Mutex<[String: Data]>([:])
 
     private init() {
         #if DEBUG
@@ -62,6 +65,7 @@ final class ArtiTor: Sendable {
             }
         }
         await bootstrap.reset()
+        clientKeys.withLock { $0.removeAll() } // given again to the next client (its key store may have been erased)
     }
 
     /// Progress of the running client; nil when Tor is stopped. Does not block.
@@ -88,6 +92,20 @@ final class ArtiTor: Sendable {
             }
         }
         return Response(status: reply.status, body: Data(reply.body.utf8))
+    }
+
+    /// Gives Arti the client key of a restricted onion service (Tor client authorization), once per address and key.
+    func setOnionAuth(host: String, key: Data) async throws {
+        if clientKeys.withLock({ $0[host] == key }) { return }
+        try await ready()
+        let _: Empty = try await call {
+            host.withCString { host in
+                key.withUnsafeBytes { raw in
+                    arti_bridge_set_onion_auth(host, raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
+                }
+            }
+        }
+        clientKeys.withLock { $0[host] = key }
     }
 
     /// Suspends Arti's background work while the app is in the background.

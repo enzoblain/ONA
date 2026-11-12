@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::engine::ChatEngine;
-use crate::pairing::PairingAuthority;
+use crate::pairing::{PairingAuthority, SecretStore, SystemStore};
 use crate::server::{self, Exposure, PhoneServer};
+use crate::real::{ModelSettings, PoolSettings, SharedSetup};
 use crate::tor::{TorService, TorState};
 use crate::{http, router};
 
@@ -59,6 +60,13 @@ pub struct App {
     /// QR code of the current payload, as SVG, rebuilt when the payload changes.
     qr: Option<(String, String)>,
     jobs: Sender<Job>,
+    /// What new cores are made with: `model.json`, and tor's port for the core once tor is ready.
+    setup: SharedSetup,
+    /// The client key tor was started with: when pairing replaces it (a phone forgotten), tor starts again.
+    tor_auth: Option<String>,
+    name: String,
+    /// The secret store being read on its own thread; None once the pairing is loaded.
+    secrets: Option<Receiver<Result<(SystemStore, Option<Vec<u8>>), String>>>,
 }
 
 type Job = Box<dyn FnOnce(&mut App) + Send>;
@@ -77,9 +85,22 @@ impl Worker {
         let sender = jobs.clone();
         thread::spawn(move || {
             let mode = stored_mode(&data_dir, LOCAL_MODE_ALLOWED);
+            let setup = SharedSetup::default();
+            if let Ok(mut setup) = setup.lock() {
+                setup.model = ModelSettings::load(&data_dir);
+                setup.pool = PoolSettings::load(&data_dir);
+            }
+            // The secret store is read on a thread of its own: macOS may ask the person first (a Keychain dialog), and
+            // this thread serves the window meanwhile. Nothing is served to the phone until the pairing is loaded.
+            let (loaded, secrets) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = loaded.send(read_secret_store());
+            });
             let mut app = App {
-                pairing: PairingAuthority::new(&name, Some(data_dir.join("pairing.json"))),
-                engine: ChatEngine::with_ona_core(),
+                pairing: PairingAuthority::waiting(&name),
+                name,
+                secrets: Some(secrets),
+                engine: ChatEngine::with_ona_core(setup.clone()),
                 tor: TorService::new(data_dir.join("tor")),
                 server: None,
                 server_error: None,
@@ -89,8 +110,10 @@ impl Worker {
                 last_request: None,
                 qr: None,
                 jobs: sender,
+                setup,
+                tor_auth: None,
             };
-            app.serve();
+            app.load_pairing();
             run(app, inbox);
         });
         Self { jobs }
@@ -104,6 +127,20 @@ impl Worker {
         })).ok()?;
         answer.recv().ok()
     }
+}
+
+/// The system's credential store. Development builds skip it with `ONA_NO_KEYCHAIN=1`: macOS asks again for the
+/// Keychain item after every rebuild, and the app waits for that answer.
+fn read_secret_store() -> Result<(SystemStore, Option<Vec<u8>>), String> {
+    if cfg!(test) {
+        return Err("tests: no system credential store".into());
+    }
+    if cfg!(debug_assertions) && std::env::var("ONA_NO_KEYCHAIN").as_deref() == Ok("1") {
+        return Err("désactivé pour le développement (ONA_NO_KEYCHAIN)".into());
+    }
+    let store = SystemStore::new()?;
+    let got = store.get()?;
+    Ok((store, got))
 }
 
 fn run(mut app: App, inbox: Receiver<Job>) {
@@ -120,7 +157,16 @@ fn run(mut app: App, inbox: Receiver<Job>) {
                     app.engine.tick();
                     app.pairing.tick();
                     app.tor.poll();
-                    if app.server.is_none() {
+                    if app.mode == Mode::Tor && app.server.is_some() && app.pairing.onion_client_auth() != app.tor_auth {
+                        app.serve(); // published again for the new phone's key only
+                    }
+                    let socks = app.tor.core_socks();
+                    let changed = app.setup.lock().map(|mut setup| std::mem::replace(&mut setup.core_socks, socks) != socks);
+                    if changed.unwrap_or(false) {
+                        app.engine.reset_pool(); // made again through the new port (or refusing without tor)
+                    }
+                    app.load_pairing();
+                    if app.server.is_none() && app.secrets.is_none() {
                         app.serve(); // listening failed: try again
                     }
                 }));
@@ -132,6 +178,19 @@ fn run(mut app: App, inbox: Receiver<Job>) {
 }
 
 impl App {
+    /// Once the secret store was read: the real pairing replaces the waiting one, and serving starts.
+    fn load_pairing(&mut self) {
+        let Some(secrets) = &self.secrets else { return };
+        let loaded = match secrets.try_recv() {
+            Ok(result) => result.map(|(store, got)| (Box::new(store) as Box<dyn SecretStore>, got)),
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("la lecture du trousseau s'est arrêtée".into()),
+        };
+        self.secrets = None;
+        self.pairing = PairingAuthority::with_loaded_secrets(&self.name, self.data_dir.join("pairing.json"), loaded);
+        self.serve();
+    }
+
     /// (Re)starts the phone server, and the onion service in Tor mode once the server listens. If listening fails,
     /// tor stays stopped: nothing else can receive the phone's traffic through the onion address.
     fn serve(&mut self) {
@@ -150,7 +209,8 @@ impl App {
             Ok(server) => {
                 self.server_error = None;
                 if self.mode == Mode::Tor {
-                    self.tor.start(server.port);
+                    self.tor_auth = self.pairing.onion_client_auth();
+                    self.tor.start(server.port, self.tor_auth.as_deref());
                 }
                 self.server = Some(server);
             }
@@ -315,8 +375,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("mode"), "local").unwrap();
         let port = 18791;
+        // While the secret store is read, the window is served and the phone is not.
+        let waiting = PairingAuthority::waiting("PC");
+        assert!(waiting.payload(Some("http://x"), None).is_none() && waiting.storage_error.is_some());
         let worker = Worker::start("PC".into(), dir.clone(), port);
-        let (code, key) = worker.call(|app| (app.pairing.pairing_code.clone().unwrap().value, app.pairing.computer_public_key())).unwrap();
+        // The pairing loads once the secret store was read, on its own thread.
+        let mut loaded = None;
+        for _ in 0..100 {
+            loaded = worker.call(|app| app.pairing.pairing_code.clone().map(|c| (c.value, app.pairing.computer_public_key()))).unwrap();
+            if loaded.is_some() { break }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let (code, key) = loaded.expect("pairing loaded");
 
         let phone = Phone::new();
         let nonce = protocol::random_hex16();

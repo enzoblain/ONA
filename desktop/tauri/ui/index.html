@@ -14,6 +14,10 @@
     </header>
     <ul id="chat-list"></ul>
     <p id="no-chats" class="empty" hidden>Aucune conversation</p>
+    <button id="pool-button" class="phone-button">
+      <span class="dot ok"></span>
+      <span>Pool</span>
+    </button>
     <button id="phone-button" class="phone-button">
       <span id="phone-dot" class="dot"></span>
       <span id="phone-label">Aucun téléphone</span>
@@ -60,6 +64,15 @@
       <p id="server-error" class="error" hidden></p>
       <p id="last-request" class="help"></p>
     </section>
+  </dialog>
+
+  <dialog id="pool-dialog" class="pool">
+    <header>
+      <h2>Pool</h2>
+      <button id="close-pool" class="ghost">Fermer</button>
+    </header>
+    <div id="pool-body"></div>
+    <p class="help pool-note">Les opérations du pool se confirment ici, jamais sur le téléphone.</p>
   </dialog>
 
   <dialog id="ask-dialog" class="ask">

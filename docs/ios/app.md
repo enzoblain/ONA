@@ -201,3 +201,15 @@ sur l'ordinateur, comme le prévoit `docs/desktop/pool-commands.md`.
   partage de connexion de l'iPhone ; ce sera aussi le premier essai du Secure Enclave et de Face ID.
 - Côté ordinateur réel : afficher le QR, montrer le code à 6 chiffres, garder la clé du téléphone (questions pour Hugo).
 - Étape 4 (Tor) : `onion` dans le QR, autorisation client Tor.
+
+## Tor client authorization (2026-11-12)
+
+A QR code with an onion address carries `onion_auth`, the 32-byte x25519 key of the phone's Tor client authorization
+(docs/ios/protocol-draft.md). The app keeps it with the pairing in the Keychain and gives it to Arti
+(`arti_bridge_set_onion_auth`, Arti's key store under its state folder) before the first request to that address.
+
+Checked on a Mac, with the bridge built for the Mac and a desktop app's restricted onion service: with the key, Arti
+reached the service (25 s to connect, a signed reply); without it, Arti refused with "Onion service required
+authentication". Not confirmed in the app on the simulator: two pairing attempts there ended with "Impossible de joindre
+l'ordinateur par Tor" and the detail could not be read; the simulator's input then stopped responding. To do again,
+then on a real iPhone.

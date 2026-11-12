@@ -194,7 +194,7 @@ mod tests {
             let phone = Phone::new();
             let paired = phone.pair(&mut pairing);
             pairing.confirm_code().unwrap();
-            Self { pairing, engine: ChatEngine::with_ona_core(), phone, paired }
+            Self { pairing, engine: ChatEngine::with_ona_core(Default::default()), phone, paired }
         }
 
         fn send(&mut self, request: &Request) -> Response {
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn pairs_over_the_routes_and_signs_every_reply() {
         let mut pairing = PairingAuthority::new("PC", None);
-        let mut engine = ChatEngine::with_ona_core();
+        let mut engine = ChatEngine::with_ona_core(Default::default());
         let phone = Phone::new();
         let code = pairing.pairing_code.clone().unwrap().value;
         let nonce = protocol::random_hex16();

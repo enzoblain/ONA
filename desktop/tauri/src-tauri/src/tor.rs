@@ -10,9 +10,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// How long tor may take to publish the onion service before the app gives up.
-const PUBLISH_LIMIT: Duration = Duration::from_secs(300);
+const PUBLISH_LIMIT: Duration = Duration::from_secs(600);
+/// No attempt before this: the service needs its introduction circuits before it uploads its descriptor. Each attempt
+/// that finds no descriptor uses up one of the directories that hold it, and tor does not ask that directory again
+/// for 15 minutes: attempts made too early, or too often, leave tor answering "not found" (0xF0) long after the
+/// descriptor is there (seen on 2026-11-12: 5 s apart from the start, still "not found" after 15 minutes).
+const PROBE_START: Duration = Duration::from_secs(45);
 /// Pause between two attempts to reach our own onion address.
-const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const PROBE_INTERVAL: Duration = Duration::from_secs(30);
 /// One attempt: Tor may need a while to find the descriptor and build the circuits.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -35,6 +40,8 @@ pub struct TorService {
     started: Option<Instant>,
     /// tor's SOCKS port on 127.0.0.1, used only to check that our own onion address answers.
     socks_port: u16,
+    /// A second SOCKS port on 127.0.0.1, for everything ona-core sends (the relay, the pool agent, NEAR RPC nodes).
+    core_socks_port: u16,
     /// An attempt to reach the onion address, running on its own thread.
     probe: Option<Receiver<Result<(), String>>>,
     last_probe: Option<Instant>,
@@ -63,7 +70,7 @@ fn find_binary(candidates: impl Iterator<Item = PathBuf>, path: &[PathBuf], name
 
 impl TorService {
     pub fn new(root: PathBuf) -> Self {
-        Self { state: TorState::Off, root, child: None, started: None, socks_port: 0, probe: None, last_probe: None }
+        Self { state: TorState::Off, root, child: None, started: None, socks_port: 0, core_socks_port: 0, probe: None, last_probe: None }
     }
 
     pub fn onion(&self) -> Option<&str> {
@@ -73,21 +80,28 @@ impl TorService {
         }
     }
 
-    /// Starts tor with an onion service whose port 80 goes to 127.0.0.1:`port`.
-    pub fn start(&mut self, port: u16) {
+    /// Starts tor with an onion service whose port 80 goes to 127.0.0.1:`port`. With `client_auth` (a line
+    /// `descriptor:x25519:<key>`), the service is published for that client key only (restricted discovery): a Tor
+    /// client without the key cannot even find it.
+    pub fn start(&mut self, port: u16, client_auth: Option<&str>) {
         self.stop();
         let Some(binary) = binary() else {
             self.state = TorState::Missing;
             return;
         };
-        self.socks_port = match free_local_port() {
-            Ok(p) => p,
+        let ports = free_local_port().and_then(|probe| Ok((probe, free_local_port()?)));
+        (self.socks_port, self.core_socks_port) = match ports {
+            Ok((probe, core)) if probe != core => (probe, core),
+            Ok(_) => {
+                self.state = TorState::Failed("no two free local ports".into());
+                return;
+            }
             Err(e) => {
                 self.state = TorState::Failed(e.to_string());
                 return;
             }
         };
-        match self.spawn(&binary, port) {
+        match self.spawn(&binary, port, client_auth) {
             Ok(child) => {
                 self.child = Some(child);
                 self.started = Some(Instant::now());
@@ -97,20 +111,29 @@ impl TorService {
         }
     }
 
-    fn spawn(&self, binary: &Path, port: u16) -> std::io::Result<Child> {
+    fn spawn(&self, binary: &Path, port: u16, client_auth: Option<&str>) -> std::io::Result<Child> {
         let (hs, data) = (self.root.join("hs"), self.root.join("data"));
         for dir in [&hs, &data] {
             private_dir(dir)?;
+        }
+        // tor reads the authorized clients when it starts: the folder holds the current phone's key only.
+        let clients = hs.join("authorized_clients");
+        let _ = std::fs::remove_dir_all(&clients);
+        if let Some(line) = client_auth {
+            private_dir(&clients)?;
+            crate::pairing::write_private(&clients.join("phone.auth"), format!("{line}\n").as_bytes())?;
         }
         let torrc = self.root.join("torrc");
         // Paths quoted: they may contain spaces (Windows user folders). __OwningControllerProcess makes tor exit when
         // this app exits, even after a crash, so no orphan keeps the data folder locked. The SOCKS port listens on
         // 127.0.0.1 only: the app uses it to check that its onion address answers before showing the QR code.
-        // OnionTrafficOnly keeps other local programs from using it as a general anonymous proxy.
+        // OnionTrafficOnly keeps other local programs from using it as a general anonymous proxy; ExtendedErrors makes
+        // tor say "missing client authorization" for a restricted service it found (see `reach_through_socks`). The second port is
+        // ona-core's: the relay and the NEAR RPC nodes are ordinary host names, so it cannot be onion-only.
         std::fs::write(&torrc, format!(
-            "SocksPort 127.0.0.1:{} OnionTrafficOnly\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
+            "SocksPort 127.0.0.1:{} OnionTrafficOnly ExtendedErrors\nSocksPort 127.0.0.1:{}\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
              __OwningControllerProcess {}\nLog notice stdout\n",
-            self.socks_port, escape(&data), escape(&hs), std::process::id()
+            self.socks_port, self.core_socks_port, escape(&data), escape(&hs), std::process::id()
         ))?;
         let mut command = Command::new(binary);
         command.arg("-f").arg(&torrc).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -138,7 +161,12 @@ impl TorService {
         // The `hostname` file stays from one launch to the next: it does not mean the service is published. The QR code
         // waits until the onion address answers through Tor.
         if let Some(probe) = &self.probe {
-            match probe.try_recv() {
+            let result = probe.try_recv();
+            #[cfg(debug_assertions)]
+            if let Ok(outcome) = &result {
+                println!("ONA_TOR_PROBE {:?} after {:?}", outcome, self.started.map(|t| t.elapsed()));
+            }
+            match result {
                 Ok(Ok(())) => {
                     self.probe = None;
                     if let Some(host) = self.hostname() {
@@ -154,7 +182,8 @@ impl TorService {
             self.state = TorState::Failed("le service .onion ne répond pas par Tor".into());
             return;
         }
-        let due = self.last_probe.is_none_or(|t| t.elapsed() >= PROBE_INTERVAL);
+        let started_long_enough = self.started.is_some_and(|t| t.elapsed() >= PROBE_START);
+        let due = started_long_enough && self.last_probe.is_none_or(|t| t.elapsed() >= PROBE_INTERVAL);
         if self.probe.is_none() && due {
             if let Some(host) = self.hostname() {
                 let (send, receive) = mpsc::channel();
@@ -174,6 +203,11 @@ impl TorService {
         host.ends_with(".onion").then(|| host.to_owned())
     }
 
+    /// The SOCKS port for ona-core's traffic, once the onion service answers (so tor is connected to the network).
+    pub fn core_socks(&self) -> Option<u16> {
+        matches!(self.state, TorState::Published(_)).then_some(self.core_socks_port)
+    }
+
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -190,6 +224,8 @@ impl TorService {
 fn free_local_port() -> std::io::Result<u16> {
     Ok(TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?.local_addr()?.port())
 }
+
+const MISSING_CLIENT_AUTH: u8 = 0xF4;
 
 /// Opens a stream to `host:port` through the SOCKS5 proxy at `socks` (RFC 1928, no authentication, name resolved by
 /// the proxy), then closes it. Ok once the proxy reports the stream as connected: for an onion address, the service is
@@ -214,7 +250,9 @@ fn reach_through_socks(socks: SocketAddr, host: &str, port: u16, timeout: Durati
     stream.write_all(&request).map_err(|e| e.to_string())?;
     let mut reply = [0u8; 4];
     stream.read_exact(&mut reply).map_err(|e| e.to_string())?;
-    if reply[0] != 5 || reply[1] != 0 {
+    // 0xF4 (ExtendedErrors): "onion service missing client authorization". tor fetched the descriptor and found it
+    // restricted to client keys this app does not hold: the service is published, and the phone's key opens it.
+    if reply[0] != 5 || !matches!(reply[1], 0 | MISSING_CLIENT_AUTH) {
         return Err(format!("SOCKS reply {}", reply[1]));
     }
     Ok(())
@@ -291,6 +329,9 @@ mod tests {
         assert_eq!(reach_through_socks(proxy, &onion, 80, Duration::from_secs(5)), Ok(()));
         assert_eq!(asked.join().unwrap(), onion);
         // Tor answers 4 (host unreachable) while the descriptor is not published.
+        // A restricted onion service tor found: published, only for client keys this app does not hold.
+        let (proxy, _) = fake_socks(MISSING_CLIENT_AUTH);
+        assert_eq!(reach_through_socks(proxy, &onion, 80, Duration::from_secs(5)), Ok(()));
         let (proxy, _) = fake_socks(4);
         assert_eq!(reach_through_socks(proxy, &onion, 80, Duration::from_secs(5)), Err("SOCKS reply 4".into()));
     }

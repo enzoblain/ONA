@@ -24,6 +24,8 @@ sha2 = "=0.10.9"
 base64 = "=0.22.1"
 rand = "=0.8.8"
 qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
+keyring = "=4.2.0"
+x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }
 
 [profile.release]
 lto = true

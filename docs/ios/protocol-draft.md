@@ -68,6 +68,13 @@ erreurs comprises (y compris un 400 « body is not a JSON object »), sont sign�
 
    Le code ne sert qu'une fois et expire au bout de 10 minutes (un nouveau QR s'affiche). Après 5 codes faux, il est
    remplacé. Le téléphone refuse un QR dont `v` n'est pas 1.
+
+   Avec une adresse `.onion`, le QR porte aussi `"onion_auth"` : la clé x25519 (32 octets, base32 RFC 4648 sans
+   `=`) de l'**autorisation client Tor** du téléphone. L'ordinateur publie son service onion pour cette seule clé
+   (« restricted discovery », fichier `authorized_clients/phone.auth` de `tor`) : un client Tor sans la clé ne trouve
+   même pas le service, et ne peut donc pas tenter d'appairage ni de requête. Une nouvelle clé à chaque nouvel
+   appairage (téléphone oublié), et l'ordinateur republie son service. Le téléphone la donne à Arti avant sa première
+   requête et la garde avec l'appairage. Un QR sans `onion_auth` reste lisible (ordinateur d'une version précédente).
 2. Le téléphone crée sa clé P-256 (Secure Enclave) et un aléa `phone_nonce`, puis **s'engage** :
 
    ```json

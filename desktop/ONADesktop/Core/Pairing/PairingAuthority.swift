@@ -8,6 +8,9 @@ public struct PairingRecord: Codable, Equatable, Sendable {
     /// The computer's P-256 private key (raw). Signs every reply to the phone, which knows the public key (QR).
     public var computerKey: Data
     public var phone: PairedPhone?
+    /// The x25519 secret of the phone's Tor client authorization (32 bytes): the onion service is published for this
+    /// key only, and the QR code gives it to the phone. A new one with every new pairing.
+    public var onionAuth: Data? = nil
 
     public struct PairedPhone: Codable, Equatable, Sendable {
         public let pairingID: String
@@ -183,6 +186,13 @@ public final class PairingAuthority {
             storageError = unreadable
             return
         }
+        if record.onionAuth?.count != 32 {
+            // No client key yet (an earlier version): a new one. A phone paired without it pairs again, since the onion
+            // service is now published for this key only.
+            record.onionAuth = Self.newOnionAuth()
+            record.phone = nil
+            created = true
+        }
         // A phone from an earlier version (not verified, or without token) must pair again.
         if let phone = record.phone, !phone.verified || phone.token.isEmpty || phone.phoneKey.count != 65 {
             record.phone = nil
@@ -190,6 +200,17 @@ public final class PairingAuthority {
         }
         if created { _ = save() }
         if record.phone == nil { newCode() }
+    }
+
+    static func newOnionAuth() -> Data {
+        Curve25519.KeyAgreement.PrivateKey().rawRepresentation
+    }
+
+    /// The line tor reads in `authorized_clients/` for the phone's key: `descriptor:x25519:<base32 public key>`.
+    public var onionClientAuth: String? {
+        guard let secret = record.onionAuth,
+              let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: secret) else { return nil }
+        return "descriptor:x25519:" + ProtocolBytes.base32(key.publicKey.rawRepresentation)
     }
 
     private var signingKey: P256.Signing.PrivateKey? {
@@ -210,7 +231,8 @@ public final class PairingAuthority {
     /// The QR text for a given address (local network) or onion address (Tor), while the code is valid.
     public func payload(address: String?, onion: String?) -> String? {
         guard let pairingCode, Date.now < pairingCode.issuedAt + Self.codeLifetime else { return nil }
-        return ProtocolBytes.pairingPayload(name: name, address: address, onion: onion, computerKey: computerPublicKey,
+        return ProtocolBytes.pairingPayload(name: name, address: address, onion: onion,
+                                            onionAuth: record.onionAuth.map(ProtocolBytes.base32), computerKey: computerPublicKey,
                                             code: pairingCode.value,
                                             expiresAt: Int((pairingCode.issuedAt + Self.codeLifetime).timeIntervalSince1970))
     }
@@ -304,6 +326,8 @@ public final class PairingAuthority {
     @discardableResult
     public func forgetPhone() -> Bool {
         record.phone = nil
+        // The forgotten phone keeps its copy of the client key: a new one, and the onion service is published again.
+        record.onionAuth = Self.newOnionAuth()
         awaiting = nil
         commit = nil
         newCode()

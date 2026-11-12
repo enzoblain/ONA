@@ -16,6 +16,8 @@ extern "C" {
 void arti_bridge_init_logging(const char *filter);
 char *arti_bridge_version(void);
 char *arti_bridge_bootstrap(const char *state_dir, const char *cache_dir);
+/// The 32-byte x25519 client key of a restricted onion service (from the pairing QR code).
+char *arti_bridge_set_onion_auth(const char *host, const uint8_t *secret, size_t secret_len);
 char *arti_bridge_status(void);
 char *arti_bridge_http_get(const char *host, uint16_t port, const char *path, uint64_t timeout_ms);
 char *arti_bridge_http_request(const char *host, uint16_t port, const char *method, const char *path,

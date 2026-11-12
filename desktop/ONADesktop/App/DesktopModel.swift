@@ -22,6 +22,8 @@ final class DesktopModel {
     let engine: ChatEngine
     let tor = TorService()
     private(set) var serverError: String?
+    /// Set when the app's folder could not be kept out of Time Machine.
+    private(set) var backupError: String?
     private(set) var lastPhoneRequest: String?
     private(set) var lastPhoneContact: Date?
     /// The port the server got (chosen by the system in Tor mode).
@@ -42,10 +44,18 @@ final class DesktopModel {
     private var server: PhoneServer?
     private var router: PhoneRouter?
     private var ticker: Task<Void, Never>?
+    /// The client key tor was started with.
+    private var torAuth: String?
 
     init() {
+        // Kept out of Time Machine: the onion key and tor's state. Shown in the window if it fails.
+        do { try BackupExclusion.exclude() } catch { backupError = "Exclusion des sauvegardes impossible : \(error.localizedDescription)" }
         pairing = PairingAuthority(name: Host.current().localizedName ?? "Mon Mac", store: KeychainPairingStore())
-        engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let tor = self.tor
+        // Read when each core is made: a change to model.json, or tor becoming ready, applies to the next conversation.
+        // The pool's core (pool.json): one for the app, made again when tor's port for the core changes.
+        engine = ChatEngine(makeCore: { OnaCoreMission(setup: RealModel.setup(coreSocks: tor.coreSocks)) },
+                            makePoolCore: { OnaCoreMission(setup: RealModel.poolSetup(coreSocks: tor.coreSocks)) })
         mode = ConnectionMode(rawValue: LocalModePolicy.resolve(stored: UserDefaults.standard.string(forKey: "connectionMode"))) ?? .tor
         let router = PhoneRouter(pairing: pairing, engine: engine)
         router.onRequest = { [weak self] line in
@@ -56,10 +66,22 @@ final class DesktopModel {
         self.router = router
         startServing()
         ticker = Task { [weak self] in
+            var poolSocks: UInt16?
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(1500))
-                self?.engine.tick()
-                self?.pairing.tick()
+                guard let self else { return }
+                self.engine.tick()
+                self.pairing.tick()
+                // A phone forgotten: a new client key, and the onion service published again for it only.
+                if self.mode == .tor, self.port != nil, self.pairing.onionClientAuth != self.torAuth {
+                    self.startServing()
+                }
+                // The pool core goes through tor's port only: made again through the new one (or refusing without tor).
+                let socks = self.tor.coreSocks
+                if socks != poolSocks {
+                    poolSocks = socks
+                    self.engine.resetPool()
+                }
             }
         }
     }
@@ -79,7 +101,10 @@ final class DesktopModel {
                 guard let self else { return }
                 self.serverError = message
                 self.port = port
-                if let port, self.mode == .tor { self.tor.start(port: port) } else if port == nil { self.tor.stop() }
+                if let port, self.mode == .tor {
+                    self.torAuth = self.pairing.onionClientAuth
+                    self.tor.start(port: port, clientAuth: self.torAuth)
+                } else if port == nil { self.tor.stop() }
             }
         }
         do {

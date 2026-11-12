@@ -106,7 +106,7 @@ final class RemoteModel {
             actionError = Self.describe(failure)
             return
         }
-        guard let endpoint = Endpoint(onion: payload.onion, address: payload.address) else {
+        guard let endpoint = Endpoint(onion: payload.onion, address: payload.address, onionAuth: payload.onionAuth) else {
             actionError = Self.describe(.noAddress)
             return
         }
@@ -137,7 +137,7 @@ final class RemoteModel {
             // 3. The person compares the codes; the pairing is saved only then.
             unconfirmed = StoredPairing(
                 pairingID: committed.pairingId, name: payload.name, address: payload.address, onion: payload.onion,
-                computerKey: payload.computerKey, keyKind: key.kind, keyRepresentation: key.storedRepresentation,
+                onionAuth: payload.onionAuth, computerKey: payload.computerKey, keyKind: key.kind, keyRepresentation: key.storedRepresentation,
                 pairedAt: .now, token: revealed.token, counter: 0
             )
             unconfirmedKey = key
@@ -443,7 +443,7 @@ final class RemoteModel {
     }
 
     private func use(_ stored: StoredPairing, key: (any DeviceKey)? = nil) throws {
-        guard let endpoint = Endpoint(onion: stored.onion, address: stored.address) else {
+        guard let endpoint = Endpoint(onion: stored.onion, address: stored.address, onionAuth: stored.onionAuth) else {
             throw LinkError.unreachable("L'appairage enregistré est incomplet : refaites-le.")
         }
         self.key = try key ?? DeviceKeys.load(kind: stored.keyKind, representation: stored.keyRepresentation)
