@@ -80,6 +80,13 @@ fn post(rest: &[&str], body: &Map<String, Value>, pairing: &mut PairingAuthority
             Ok(_) => Response::new(200, engine.list_json()),
             Err(failure) => error(engine, 403, failure.code()),
         },
+        ["pool", "portfolio"] => match pairing.authorize(token) {
+            Ok(_) => match engine.pool_portfolio() {
+                Ok(view) => Response::new(200, view),
+                Err(failure) => error(engine, 409, &failure),
+            },
+            Err(failure) => error(engine, 403, failure.code()),
+        },
         ["chats", id, "view"] => match pairing.authorize(token) {
             Ok(_) => match engine.chat_json(id) {
                 Some(view) => Response::new(200, view),
@@ -387,5 +394,16 @@ mod tests {
         assert_eq!(setup.post(&format!("/v1/chats/{chat}/delete"), body).status, 200);
         let gone = setup.post(&format!("/v1/chats/{chat}/view"), json!({"token": setup.paired.token}));
         assert_eq!(gone.status, 404);
+    }
+
+    #[test]
+    fn the_pool_portfolio_needs_the_token() {
+        let mut setup = Setup::new();
+        assert_eq!(setup.post("/v1/pool/portfolio", json!({"token": "x"})).status, 403);
+        let token = json!({"token": setup.paired.token});
+        let reply = setup.post("/v1/pool/portfolio", token);
+        // The real ona-core has no pool wallet here: a signed refusal that names the reason.
+        assert_eq!(reply.status, 409);
+        assert_eq!(reply.json["error"], "no pool wallet configured");
     }
 }

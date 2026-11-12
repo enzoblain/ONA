@@ -187,6 +187,16 @@ class HTTPFlow(unittest.TestCase):
         connection.request("GET", "/v1/chats/list")
         self.assertEqual(connection.getresponse().status, 404)
 
+    def test_the_pool_portfolio_is_a_signed_read(self):
+        self.assertEqual(self.client.post("/v1/pool/portfolio", {"token": "x"})[0], 403)
+        self.pair_over_http()
+        status, reply = self.client.post("/v1/pool/portfolio", {"token": self.phone.token})
+        self.assertEqual(status, 200)
+        self.assertEqual(reply["mode"], "mock")
+        portfolio = reply["portfolio"]
+        values = [int(portfolio["cash"]["value"])] + [int(v["value"]) for v in portfolio["vaults"]]
+        self.assertEqual(int(portfolio["total"]), sum(values))
+
     def test_long_titles_are_cut(self):
         self.assertEqual(len(title_from("x" * 100)), 48)
 

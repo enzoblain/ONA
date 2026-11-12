@@ -113,3 +113,22 @@ struct MessageTests {
                 .map(\.isSimulation) == [true, false, true])
     }
 }
+
+@Suite("Pool")
+struct PoolTests {
+    @Test func amountsAreShownInNEAR() {
+        #expect(NEARAmount.text("1000000000000000000000000") == "1")
+        #expect(NEARAmount.text("995000000000000000000000") == "0.995")
+        #expect(NEARAmount.text("") == nil)
+        #expect(NEARAmount.text("-1") == nil)
+        #expect(NEARAmount.text("1e24") == nil)
+    }
+
+    @Test func aPortfolioWithoutVaultsDecodes() throws {
+        let json = Data(#"{"mode":"real","portfolio":{"cash":{"tiers":[],"value":"0","spending_value":"0","awaiting_signature":0},"vaults":[],"vault_count":0,"total":"0"}}"#.utf8)
+        let reply = try ProtocolCoding.decoder.decode(PoolReply.self, from: json)
+        #expect(!reply.mode.isSimulation)
+        #expect(reply.portfolio.vaults.isEmpty)
+        #expect(reply.portfolio.total == "0")
+    }
+}

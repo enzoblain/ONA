@@ -179,6 +179,21 @@ Vérifié le 2026-11-11 (macOS, Xcode 27.0 bêta, simulateur iPhone 17 iOS 27.0)
 - **Limites (F-15)** dans Réglages : ordinateur compromis, téléphone volé déverrouillé.
 - Pas vérifié : sur un vrai iPhone (Secure Enclave, Face ID).
 
+## Onglet Pool (lecture seule), 2026-11-12
+
+Onglet « Pool » à côté d'Accueil, présenté comme un portefeuille : la valeur totale en haut, puis une ligne pour le cash
+et une par vault, avec sa valeur (flocon pour un vault gelé, petite horloge quand une opération est en cours). Données lues par
+`POST /v1/pool/portfolio` (réponse signée, jeton). Aucune action sur le téléphone : les opérations du pool se confirment
+sur l'ordinateur, comme le prévoit `docs/desktop/pool-commands.md`.
+
+- Apps bureau : la route renvoie le `pool_portfolio` d'un `ona-core` dédié au pool. Tant que le pont n'a pas de
+  portefeuille de pool (pas encore fait côté bureau), elle répond `no pool wallet configured`, que l'app affiche
+  « Le pool n'est pas encore configuré sur l'ordinateur ».
+- Faux ordinateur : un portefeuille inventé (étiqueté `mock`) pour essayer l'écran.
+- Vérifié : tests Swift (lecture, décodage, montants, refus), Rust et Swift côté bureau (jeton exigé, refus signé sans
+  portefeuille), Python ; à l'écran dans le simulateur contre le faux ordinateur. Pas vérifié avec un vrai pool (aucun
+  ne tourne encore sur une chaîne).
+
 ## Pas encore fait
 
 - iPhone réel : app installée et lancée le 2026-11-10 (étape 2), mais aucune requête n'est arrivée au faux ordinateur.

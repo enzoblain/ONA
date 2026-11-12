@@ -77,6 +77,12 @@ public final class PhoneRouter {
             case .success(let (id, token)): return ok(["pairing_id": id, "token": token])
             case .failure(let failure): return error(403, failure)
             }
+        case (2, "pool") where rest[1] == "portfolio":
+            if let failure = pairing.authorize(token: token) { return error(403, failure) }
+            switch engine.poolPortfolio() {
+            case .success(let view): return HTTPResponse(status: 200, json: view)
+            case .failure(let failure): return error(409, failure.code)
+            }
         case (2, "chats") where rest[1] == "list":
             if let failure = pairing.authorize(token: token) { return error(403, failure) }
             return HTTPResponse(status: 200, json: engine.listJSON())

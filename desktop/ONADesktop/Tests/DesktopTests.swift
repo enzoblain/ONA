@@ -462,6 +462,15 @@ struct RouterTests {
         }
     }
 
+    /// The pool portfolio is a read: token only. Without a pool wallet, ona-core says so in a signed refusal.
+    @Test func poolPortfolioNeedsTheToken() {
+        let setup = Setup()
+        #expect(setup.post("/v1/pool/portfolio", ["token": "x"]).status == 403)
+        let reply = setup.post("/v1/pool/portfolio", ["token": setup.token])
+        #expect(reply.status == 409)
+        #expect(reply.json["error"] as? String == "no pool wallet configured")
+    }
+
     /// Every reply is signed with the computer's key, bound to the request nonce.
     @Test func signsEveryReply() throws {
         let setup = Setup(pair: false)

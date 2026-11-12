@@ -110,6 +110,16 @@ erreurs comprises (y compris un 400 « body is not a JSON object »), sont sign�
 
 Sans le bon jeton : 403 `missing or wrong token`. Le jeton ne voyage que dans le flux Tor chiffré.
 
+## Pool (lecture seule)
+
+- `POST /v1/pool/portfolio` `{"token", "nonce"}` → `{"mode", "portfolio": {…}}`, où `portfolio` est la réponse de la
+  commande `pool_portfolio` d'`ona-core` sans `ok` ni `mode` (`cash`, `vaults`, `vault_count`, `total` ; montants en
+  yoctoNEAR, voir `docs/desktop/pool-commands.md`). Réponse signée comme les autres lectures.
+- Sans le bon jeton : 403 `missing or wrong token`. Si l'ordinateur n'a pas de pool configuré, 409 avec l'erreur
+  d'`ona-core` (par exemple `no pool wallet configured`).
+- Lecture seule : dépôts, placements, changements de vault et sorties se préparent et se confirment sur l'ordinateur
+  (`pool_prepare`, `pool_execute`), jamais sur le téléphone.
+
 ## Écritures (jeton + signature du téléphone + compteur)
 
 Chaque écriture porte `token`, `pairing_id`, `counter` (entier JSON sans partie décimale, de 1 à 2^53 − 1 =

@@ -249,9 +249,30 @@ public final class ChatEngine {
 
     private let makeCore: () -> any MissionCore
     private var count = 0
+    /// A core of its own for the pool, created on first use (its wallet is configured by ona-core, not here).
+    private var poolCore: (any MissionCore)?
 
     public init(makeCore: @escaping () -> any MissionCore) {
         self.makeCore = makeCore
+    }
+
+    /// The pool portfolio for the phone, read only: ona-core's `pool_portfolio` (cash, shares per vault, total). On
+    /// failure, ona-core's error, for instance `no pool wallet configured`. Pool operations are confirmed on the Mac.
+    public func poolPortfolio() -> Result<[String: Any], PoolError> {
+        let core = poolCore ?? makeCore()
+        poolCore = core
+        var reply = core.dispatch(["cmd": "pool_portfolio"])
+        guard reply["ok"] as? Bool == true else {
+            return .failure(PoolError(code: reply["error"] as? String ?? "pool unavailable"))
+        }
+        let mode = reply["mode"] as? String ?? "mock"
+        reply.removeValue(forKey: "ok")
+        reply.removeValue(forKey: "mode")
+        return .success(["mode": mode, "portfolio": reply])
+    }
+
+    public struct PoolError: Error, Equatable {
+        public let code: String
     }
 
     /// Most recent first.
