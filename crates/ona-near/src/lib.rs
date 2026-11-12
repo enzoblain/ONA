@@ -9,6 +9,7 @@
 use std::fmt;
 use std::fs;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::Duration;
@@ -208,6 +209,7 @@ pub fn check_network(rpc: &Client, expected_chain_id: &str) -> Result<String> {
     Ok(reported.to_string())
 }
 
+#[cfg(unix)]
 #[allow(unsafe_code)]
 fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no argument, cannot fail and touches no memory of ours.
@@ -216,6 +218,7 @@ fn effective_uid() -> u32 {
 
 /// Reads a NEAR account key (`ed25519:<base58>`). The file is opened once, without following a symbolic
 /// link, and must be a regular file that belongs to the current user and that only they can read.
+#[cfg(unix)]
 pub fn load_account_key(path: &Path) -> Result<SigningKey> {
     let mut file = fs::OpenOptions::new()
         .read(true)
@@ -238,6 +241,13 @@ pub fn load_account_key(path: &Path) -> Result<SigningKey> {
     let mut text = Zeroizing::new(String::new());
     file.by_ref().take(MAX_KEY_FILE).read_to_string(&mut text).context("cannot read account key")?;
     parse_account_key(text.trim())
+}
+
+/// Not on this system: the owner and permission checks above have no equivalent here yet, so no key file is
+/// read rather than one read without them.
+#[cfg(not(unix))]
+pub fn load_account_key(_path: &Path) -> Result<SigningKey> {
+    bail!("reading a NEAR account key file is only supported on macOS and Linux")
 }
 
 /// Accepts the 64-byte form NEAR tools write, and refuses one whose public half does not match.
@@ -830,6 +840,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_account_key_readable_by_others_is_refused() {
         let path = temp_path("account-key");
         let key = SigningKey::from_bytes(&[6u8; 32]);
@@ -842,6 +853,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_account_key_behind_a_link_or_not_a_file_is_refused() {
         let target = temp_path("link-target");
         let link = temp_path("link");

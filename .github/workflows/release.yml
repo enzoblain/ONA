@@ -178,7 +178,7 @@ jobs:
 
       - name: Rust ${{ env.RUST_VERSION }} with the iOS targets
         run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal --target aarch64-apple-ios aarch64-apple-ios-sim
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target aarch64-apple-ios,aarch64-apple-ios-sim
           rustup default "$RUST_VERSION"
 
       - name: Arti (Tor) for the app
