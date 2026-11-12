@@ -259,11 +259,13 @@ pub struct ChatEngine {
     pub mode: String,
     make_core: Box<dyn Fn() -> Box<dyn MissionCore>>,
     count: u64,
+    /// A core of its own for the pool, created on first use (its wallet is configured by ona-core, not here).
+    pool: Option<Box<dyn MissionCore>>,
 }
 
 impl ChatEngine {
     pub fn new(make_core: impl Fn() -> Box<dyn MissionCore> + 'static) -> Self {
-        Self { chats: Vec::new(), mode: "mock".into(), make_core: Box::new(make_core), count: 0 }
+        Self { chats: Vec::new(), mode: "mock".into(), make_core: Box::new(make_core), count: 0, pool: None }
     }
 
     pub fn with_ona_core() -> Self {
@@ -385,6 +387,23 @@ impl ChatEngine {
     }
 
     // JSON views for the phone (protocol-draft.md, "Conversations")
+
+    /// The pool portfolio for the phone, read only: ona-core's `pool_portfolio` (cash, shares per vault, total). Err
+    /// with ona-core's error, for instance `no pool wallet configured`. Pool operations are confirmed on the computer.
+    pub fn pool_portfolio(&mut self) -> Result<Value, String> {
+        let make_core = &self.make_core;
+        let core = self.pool.get_or_insert_with(|| make_core());
+        let mut reply = core.dispatch(json!({"cmd": "pool_portfolio"}));
+        if reply["ok"] != true {
+            return Err(reply["error"].as_str().unwrap_or("pool unavailable").to_owned());
+        }
+        let mode = reply["mode"].as_str().unwrap_or("mock").to_owned();
+        if let Some(object) = reply.as_object_mut() {
+            object.remove("ok");
+            object.remove("mode");
+        }
+        Ok(json!({"mode": mode, "portfolio": reply}))
+    }
 
     pub fn list_json(&self) -> Value {
         let chats: Vec<Value> = self.sorted().iter().map(|c| json!({
@@ -734,6 +753,28 @@ mod tests {
         // The old digest (account and amount only), even for a mock payment: refused.
         let unbound = json!({"ok": true, "screen": screen, "digest": digest, "mode": "mock"});
         assert!(read_prepared_payment(&unbound).is_err());
+    }
+
+    /// Answers `pool_portfolio` with a fixed portfolio, like ona-core with a pool wallet.
+    struct FakePool;
+    impl MissionCore for FakePool {
+        fn dispatch(&mut self, request: Value) -> Value {
+            assert_eq!(request["cmd"], "pool_portfolio");
+            json!({"ok": true, "mode": "mock", "cash": {"tiers": [], "value": "0", "spending_value": "0",
+                   "awaiting_signature": 0}, "vaults": [], "vault_count": 2, "total": "0"})
+        }
+    }
+
+    #[test]
+    fn serves_the_pool_portfolio_read_only() {
+        let mut engine = ChatEngine::new(|| Box::new(FakePool));
+        let view = engine.pool_portfolio().unwrap();
+        assert_eq!(view["mode"], "mock");
+        assert_eq!(view["portfolio"]["vault_count"], 2);
+        assert!(view["portfolio"].get("ok").is_none());
+        // ona-core without a pool wallet says so.
+        let mut real = ChatEngine::with_ona_core();
+        assert_eq!(real.pool_portfolio(), Err("no pool wallet configured".to_owned()));
     }
 
     #[test]

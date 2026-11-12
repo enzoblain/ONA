@@ -36,6 +36,12 @@ final class RemoteModel {
     private(set) var verification: PendingVerification?
     /// Set once any reply said `mode: mock`, so the simulation label never disappears in a session.
     private(set) var sawSimulation = false
+    /// The pool portfolio, read only. Refreshed when the Pool tab is shown.
+    private(set) var pool: PoolPortfolio?
+    /// Why the portfolio could not be read (a sentence for the person), if it could not.
+    private(set) var poolError: String?
+    private(set) var poolLoading = false
+
     /// The computer no longer knows this phone (codes not confirmed in time, phone forgotten, new pairing elsewhere):
     /// the only way out is to scan a new code.
     private(set) var pairingLost = false
@@ -187,6 +193,8 @@ final class RemoteModel {
         client = nil
         cancelPairing()
         pairingLost = false
+        pool = nil
+        poolError = nil
         chats = []
         chatsLoaded = false
         openChat = nil
@@ -243,6 +251,27 @@ final class RemoteModel {
     func rescan() {
         unpair()
         pairingLost = false
+    }
+
+    // MARK: - Pool (read only: operations are confirmed on the computer)
+
+    func refreshPool() async {
+        guard let client, let pairing else { return }
+        poolLoading = true
+        defer { poolLoading = false }
+        do {
+            let reply = try await client.call(Paths.poolPortfolio, ["token": pairing.token], as: PoolReply.self)
+            pool = reply.portfolio
+            poolError = nil
+            if reply.mode.isSimulation { sawSimulation = true }
+        } catch let error as LinkError {
+            pool = nil
+            poolError = error.code.map(ComputerMessages.french) ?? error.localizedDescription
+            if let code = error.code, Self.lostPairingCodes.contains(code) { pairingLost = true }
+        } catch {
+            pool = nil
+            poolError = error.localizedDescription
+        }
     }
 
     // MARK: - Conversations

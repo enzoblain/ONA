@@ -48,6 +48,27 @@ DEMO_AMOUNT = 1_000_000_000_000_000_000_000_000  # 1 NEAR in yoctoNEAR, as in on
 
 CONFIRM_STEPS = {"confirm_recipient": "recipient", "confirm_payment": "payment"}
 
+# A simulated pool portfolio, shaped like ona-core's `pool_portfolio` reply (docs/desktop/pool-commands.md). Amounts in
+# yoctoNEAR (1 NEAR = 10**24). Made up for the phone's Pool tab: no pool runs behind the mock.
+NEAR = 10**24
+# A share is a small unit: about 10**-6 NEAR when a vault starts, then its price follows the vault's gains or losses.
+PRICE_0, PRICE_2 = 1_020_000 * 10**12, 995_000 * 10**12  # 0.00000102 and 0.000000995 NEAR per share
+DEMO_PORTFOLIO = {
+    "cash": {"tiers": [{"tier": 0, "note_value": str(NEAR), "held": 2, "spending": 0},
+                       {"tier": 1, "note_value": str(NEAR // 10), "held": 3, "spending": 1}],
+             "value": str(2 * NEAR + 3 * NEAR // 10), "spending_value": str(NEAR // 10), "awaiting_signature": 0},
+    "vaults": [
+        {"vault": 0, "share_price": str(PRICE_0), "frozen": False,
+         "tiers": [{"tier": 0, "note_value": str(5_000_000 * PRICE_0), "held": 1, "spending": 0}],
+         "value": str(5_000_000 * PRICE_0), "spending_value": "0", "awaiting_signature": 0},
+        {"vault": 2, "share_price": str(PRICE_2), "frozen": True,
+         "tiers": [{"tier": 0, "note_value": str(1_000_000 * PRICE_2), "held": 2, "spending": 0}],
+         "value": str(2 * 1_000_000 * PRICE_2), "spending_value": "0", "awaiting_signature": 1},
+    ],
+    "vault_count": 3,
+}
+DEMO_PORTFOLIO["total"] = str(int(DEMO_PORTFOLIO["cash"]["value"]) + sum(int(v["value"]) for v in DEMO_PORTFOLIO["vaults"]))
+
 
 NETWORK = "testnet"
 CONTRACT = "mock-pay.ona.testnet"
@@ -337,6 +358,12 @@ def make_handler(computer: Computer):
                 print(f"==> Phone paired ({reply['pairing_id']}). Verification code: {code[:3]} {code[3:]} "
                       "(confirmed by the mock itself)", flush=True)
                 return self._ok(nonce, **reply)
+            if path == "/v1/pool/portfolio":
+                # Read only, like the chats: the pool is operated and confirmed on the computer.
+                error = computer.pairing.authorize(body)
+                if error:
+                    return self._error(403, error, nonce)
+                return self._send(200, {"mode": MODE, "portfolio": DEMO_PORTFOLIO}, nonce)
             if path == "/v1/chats/list":
                 error = computer.pairing.authorize(body)
                 return self._error(403, error, nonce) if error else self._send(200, computer.chat_list(), nonce)

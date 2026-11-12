@@ -18,6 +18,8 @@ final class FakeComputer: ComputerLink, @unchecked Sendable {
     var confirmedOnComputer = true
     var forgeReplies = false
     var refuseAll: (Int, String)?
+    /// The portfolio the computer serves; nil answers like ona-core without a pool wallet.
+    var portfolio: [String: Any]?
 
     // What the phone sent.
     private(set) var commitment: String?
@@ -75,6 +77,10 @@ final class FakeComputer: ComputerLink, @unchecked Sendable {
         }
         guard confirmedOnComputer else { return refuse(403, "not paired") }
         guard body["token"] as? String == token else { return refuse(403, "missing or wrong token") }
+        if path == Paths.poolPortfolio {
+            guard let portfolio else { return refuse(409, "no pool wallet configured") }
+            return (200, ["mode": "mock", "portfolio": portfolio])
+        }
         if path == Paths.list {
             let chats: [[String: Any]] = deleted ? [] : [
                 ["id": "chat-1", "title": "Trouver un avocat", "updated_at": 1762790000,
@@ -370,6 +376,26 @@ struct ChatModelTests {
         #expect(!model.pairingLost)
     }
 
+    @Test func readsThePoolPortfolio() async throws {
+        let model = await paired()
+        computer.lock.withLock { computer.portfolio = PoolFixtures.portfolio }
+        await model.refreshPool()
+        let pool = try #require(model.pool)
+        #expect(model.poolError == nil)
+        #expect(pool.vaults.map(\.vault) == [0, 2])
+        #expect(pool.vaults[1].frozen)
+        #expect(NEARAmount.text(pool.total) == "8.395")
+        #expect(NEARAmount.text(pool.cash.value) == "2.3")
+    }
+
+    @Test func aComputerWithoutPoolSaysSo() async {
+        let model = await paired()
+        await model.refreshPool()
+        #expect(model.pool == nil)
+        #expect(model.poolError == ComputerMessages.french("no pool wallet configured"))
+        #expect(!model.pairingLost)
+    }
+
     @Test func unpairForgetsEverything() async throws {
         let model = await paired()
         model.unpair()
@@ -377,4 +403,25 @@ struct ChatModelTests {
         #expect(model.connection == .notPaired)
         #expect(try store.load() == nil)
     }
+}
+
+
+/// Shaped like ona-core's `pool_portfolio` (and the mock computer's DEMO_PORTFOLIO).
+enum PoolFixtures {
+    nonisolated(unsafe) static let portfolio: [String: Any] = [
+        "cash": ["tiers": [["tier": 0, "note_value": "1000000000000000000000000", "held": 2, "spending": 0],
+                           ["tier": 1, "note_value": "100000000000000000000000", "held": 3, "spending": 1]],
+                 "value": "2300000000000000000000000", "spending_value": "100000000000000000000000",
+                 "awaiting_signature": 0],
+        "vaults": [
+            ["vault": 0, "share_price": "1020000000000000000", "frozen": false,
+             "tiers": [["tier": 0, "note_value": "5100000000000000000000000", "held": 1, "spending": 0]],
+             "value": "5100000000000000000000000", "spending_value": "0", "awaiting_signature": 0],
+            ["vault": 2, "share_price": "995000000000000000", "frozen": true,
+             "tiers": [["tier": 0, "note_value": "995000000000000000000000", "held": 1, "spending": 0]],
+             "value": "995000000000000000000000", "spending_value": "0", "awaiting_signature": 1],
+        ],
+        "vault_count": 3,
+        "total": "8395000000000000000000000",
+    ]
 }

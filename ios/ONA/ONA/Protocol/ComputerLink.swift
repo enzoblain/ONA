@@ -19,6 +19,7 @@ enum Paths {
     static let confirm = "/v1/confirm"
     static let chats = "/v1/chats"
     static let list = "/v1/chats/list"
+    static let poolPortfolio = "/v1/pool/portfolio"
 
     static func view(_ id: String) -> String { "/v1/chats/\(safe(id))/view" }
     static func messages(_ id: String) -> String { "/v1/chats/\(safe(id))/messages" }
@@ -74,6 +75,8 @@ enum ComputerMessages {
         case "replayed request": "Cette action a déjà été faite."
         case "could not save on the computer": "L'ordinateur n'a pas pu enregistrer : réessayez."
         case "unknown chat": "Cette conversation n'existe plus."
+        case "no pool wallet configured": "Le pool n'est pas encore configuré sur l'ordinateur."
+        case "no connection to the pool agent yet": "L'ordinateur n'est pas encore relié à l'agent du pool."
         case "empty or too long message": "Message vide ou trop long."
         case "payment digest does not match", "digest does not match the payment screen":
             "Le paiement a changé : vérifiez-le à nouveau."
