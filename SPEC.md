@@ -205,11 +205,31 @@ Tested on the mocked NEAR VM only; the wasm build of this version is not verifie
 - Proposals that have expired no longer count against the limit of 4. No client reads `active` or `incident_level` yet.
 
 ## `ona-pool` (`crates/ona-pool`)
-The account that holds the funds the agent places. Never deployed, tested on the mocked NEAR VM only, with notes made by
-`ona-token`. No staking pool has been called for real. Gas is not measured. `ona-sandbox-pool` (docs/INSTALL.md, "The pool and its
-agent on a local node") is written to run the pool, the agent and `ona-core`'s pool commands on a local node against
-`ona-test-staking` and print the gas of each call; it has not been run to the end yet, and a stand-in proves nothing about the standard staking
-pool.
+The account that holds the funds the agent places. Never deployed on testnet or mainnet, tested on the mocked NEAR VM with notes made
+by `ona-token`, and once on a local node. No real staking pool has been called. `ona-sandbox-pool` (docs/INSTALL.md, "The pool and its
+agent on a local node") runs the pool's test build, the agent and `ona-core`'s pool commands on a local node against `ona-test-staking`.
+**Run on 12/11/2026** (near-sandbox 2.13.4, Apple Silicon Mac): 25 checks passed, from deployment through deposit, cash issue, entry,
+placement, reward and sync, leave to cash (unstake and withdraw by the planner) and payment to the depositor, up to the agent being
+stopped and `pool_recover` finding the note unspent; it then stopped while fast-forwarding one day for the escape (the node answered
+HTTP 500 to a fast-forward of 200,000 blocks), so the escape exits did not run on a node. A stand-in proves nothing about the standard
+staking pool. Gas burnt per transaction, receipts included, measured in that run (one call each unless stated):
+
+| Operation | Calls | Tgas |
+|---|---|---|
+| deploy + new (ona-pool, 3 cash tiers) | 1 | 67.6 |
+| add_vault | 1 | 16.0 |
+| agent `sync` | 2 | 6.7 |
+| deposit | 1 | 2.4 |
+| agent `issue_cash` | 2 | 2.4 |
+| agent `enter` | 1 | 10.6 |
+| agent `place` | 1 | 6.9 |
+| agent `unstake` | 1 | 7.0 |
+| agent `withdraw` | 1 | 7.7 |
+| agent `leave` | 1 | 10.6 |
+| agent `pay_exit` | 1 | 13.5 |
+
+The test staking pool's own calls (deploy 24.9, `add_reward` 1.9) are left out. Each figure is per call; a row with two calls shows one figure
+because both burnt the same within 0.05 Tgas.
 
 - **Roles.** Created by `ona-deploy pool` with no access key. The `guardian` lists vaults, freezes them, sets the agent account and the
   fee. The `agent` is an account set by the guardian. Checking that the agent's key lives in an attested enclave is done outside the
@@ -727,7 +747,8 @@ transport (`remote::http_model`), the pool agent's (`HttpAgent::through`) and th
   arrive through one front, so limits are per route for all together; cash issues are limited per account), wiping the disk's free
   blocks, an enclave. Requests are served one at a time, chain calls included. The NEP-413 layout is written from the standard as
   recalled, not verified against a wallet; the RPC formats, `tx_status` included, are from the NEAR documentation, not verified
-  against a node; gas budgets are not measured (`ona-sandbox-pool` prints them once run on a local node; not run yet).
+  against a node; gas burnt by each agent call was measured once on a local node on 12/11/2026 (see the `ona-pool` table); `tx_status` was read
+  there from a real node.
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit

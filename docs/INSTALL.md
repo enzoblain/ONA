@@ -221,7 +221,8 @@ after the last `unstake`. The program then, on one local node:
    `withdraw` with amounts fixed by the contract) and pays a share note.
 
 It stops at the first step that fails, names it, and prints what was verified before, then the gas burnt by every transaction,
-the agent's included, as a table ready for SPEC. It has not been run to the end yet: SPEC still says "not measured" for the pool and the agent.
+the agent's included, as a table ready for SPEC. Run once on 12/11/2026 up to the escape step, where the node answered HTTP 500 to a fast-forward of 200,000 blocks; the gas measured
+before that is in SPEC.
 The deposit's wallet signature is made with the agent's own NEP-413 layout, so the run does not check that layout against a real
 wallet. Run it from a normal terminal, as above.
 
