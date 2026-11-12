@@ -6,9 +6,8 @@
 //! real or it is not made: a wrong setting, or tor not running yet, gives a core that refuses every command with the
 //! reason, never a silent fake. The NEAR AI key is not here: the relay holds it. The app only spends request tokens.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -70,7 +69,7 @@ impl Default for CoreSetup {
     }
 }
 
-pub type SharedSetup = Rc<RefCell<CoreSetup>>;
+pub type SharedSetup = Arc<Mutex<CoreSetup>>;
 
 /// Makes one ona-core as `setup` says: the fake model, or the real one through tor.
 pub fn make_core(setup: &CoreSetup) -> Box<dyn MissionCore> {

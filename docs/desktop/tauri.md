@@ -73,8 +73,11 @@ le téléphone : à réserver aux tests. La fenêtre ne reçoit que l'image du Q
 - Le téléphone joignant l'app par Tor (seule la publication de l'adresse a été vue).
 - Les clics dans la vraie fenêtre Tauri (pas de clic automatisé possible ici) ; le QR affiché dans la fenêtre.
 - Les installeurs.
-- Les appels à `ona-core` se font sur le fil unique qui sert aussi la fenêtre et le téléphone : avec un vrai modèle,
-  tout attendrait la fin de chaque appel.
+- Chaque conversation a son `ona-core` sur un fil à elle. Le fil qui sert la fenêtre et le téléphone lui envoie une
+  commande à la fois et n'attend pas plus de 200 ms : un appel au vrai modèle continue pendant que la fenêtre et le
+  téléphone sont servis, et la réponse est reprise au tour suivant. Les confirmations (plan, destinataire, paiement)
+  et la fin de mission attendent la réponse : elles ne passent pas par le modèle. La lecture du pool pour le téléphone
+  attend encore la sienne.
 - La **clé privée de l'ordinateur** (qui signe les réponses au téléphone) et le **jeton** du téléphone (qui ouvre les
   lectures) sont dans le coffre du système (bibliothèque `keyring` : Trousseau sur Mac, Gestionnaire d'identification
   sous Windows, Secret Service sous Linux), pas dans `pairing.json`, qui ne garde que la clé publique du téléphone, le

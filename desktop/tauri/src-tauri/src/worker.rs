@@ -81,7 +81,9 @@ impl Worker {
         thread::spawn(move || {
             let mode = stored_mode(&data_dir, LOCAL_MODE_ALLOWED);
             let setup = SharedSetup::default();
-            setup.borrow_mut().model = ModelSettings::load(&data_dir);
+            if let Ok(mut setup) = setup.lock() {
+                setup.model = ModelSettings::load(&data_dir);
+            }
             let mut app = App {
                 pairing: PairingAuthority::with_secret_store(
                     &name,
@@ -130,7 +132,9 @@ fn run(mut app: App, inbox: Receiver<Job>) {
                     app.engine.tick();
                     app.pairing.tick();
                     app.tor.poll();
-                    app.setup.borrow_mut().core_socks = app.tor.core_socks();
+                    if let Ok(mut setup) = app.setup.lock() {
+                        setup.core_socks = app.tor.core_socks();
+                    }
                     if app.server.is_none() {
                         app.serve(); // listening failed: try again
                     }

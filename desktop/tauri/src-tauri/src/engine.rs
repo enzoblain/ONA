@@ -1,7 +1,10 @@
 //! The agent's conversations: one ona-core per chat, driven step by step and stopped at each human confirmation.
 //! Same behaviour and same JSON views as the macOS app's ChatEngine (desktop/ONADesktop/Core/Missions).
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -47,6 +50,83 @@ impl<C: MissionCore> MissionCore for Guarded<C> {
             }
         }
     }
+}
+
+/// Makes the cores, on the thread that will own each one.
+pub type CoreFactory = Arc<dyn Fn() -> Box<dyn MissionCore> + Send + Sync>;
+
+/// How long a tick waits for ona-core before going on: the fake model answers within it, a real call (the model
+/// through Tor) does not, and the tick then leaves it running and looks again at the next one.
+const QUICK_REPLY: Duration = Duration::from_millis(200);
+
+/// One conversation's ona-core, on a thread of its own. The worker thread, which also serves the window and the phone,
+/// sends one command at a time and never waits for a slow one (`poll`). The core is dropped with the thread, once its
+/// last command is done (its request tokens file is then free again).
+struct CoreThread {
+    requests: Sender<(Value, Sender<Value>)>,
+    /// The command sent and not answered yet.
+    inflight: Option<(Value, Receiver<Value>)>,
+}
+
+impl CoreThread {
+    fn spawn(factory: &CoreFactory) -> Self {
+        let (requests, inbox) = mpsc::channel::<(Value, Sender<Value>)>();
+        let factory = factory.clone();
+        thread::spawn(move || {
+            let mut core = factory();
+            for (request, reply) in inbox {
+                let _ = reply.send(core.dispatch(request));
+            }
+        });
+        Self { requests, inflight: None }
+    }
+
+    /// ona-core's reply to `request` once it is there; None while ona-core works on it, and the same request is
+    /// asked again at the next tick. A different request while one is in flight waits for the first one.
+    fn poll(&mut self, request: Value) -> Option<Value> {
+        if self.inflight.as_ref().is_some_and(|(sent, _)| *sent != request) {
+            self.wait();
+        }
+        if self.inflight.is_none() {
+            let (reply, answer) = mpsc::channel();
+            if self.requests.send((request.clone(), reply)).is_err() {
+                return Some(stopped());
+            }
+            self.inflight = Some((request, answer));
+        }
+        let (_, answer) = self.inflight.as_ref()?;
+        match answer.recv_timeout(QUICK_REPLY) {
+            Ok(reply) => {
+                self.inflight = None;
+                Some(reply)
+            }
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => {
+                self.inflight = None;
+                Some(stopped())
+            }
+        }
+    }
+
+    /// Waits for the reply: for the quick commands the person is waiting on (a confirmation, closing the mission).
+    fn call(&mut self, request: Value) -> Value {
+        self.wait();
+        let (reply, answer) = mpsc::channel();
+        if self.requests.send((request, reply)).is_err() {
+            return stopped();
+        }
+        answer.recv().unwrap_or_else(|_| stopped())
+    }
+
+    fn wait(&mut self) {
+        if let Some((_, answer)) = self.inflight.take() {
+            let _ = answer.recv();
+        }
+    }
+}
+
+fn stopped() -> Value {
+    json!({"ok": false, "error": "ona-core stopped"})
 }
 
 pub const MAX_TEXT: usize = 2000;
@@ -180,7 +260,10 @@ enum Phase {
 }
 
 struct Run {
-    core: Box<dyn MissionCore>,
+    core: CoreThread,
+    /// The person's request, sent to ona-core with `open`.
+    mission: String,
+    opened: bool,
     plan: Vec<String>,
     cursor: usize,
     phase: Phase,
@@ -230,6 +313,9 @@ impl Chat {
         if !matches!(run.phase, Phase::Running) {
             return None;
         }
+        if run.plan.is_empty() {
+            return Some(("think".into(), "Préparation d'un plan…"));
+        }
         let tool = run.plan.get(run.cursor)?;
         running_label(tool).map(|text| (tool.clone(), text))
     }
@@ -257,20 +343,23 @@ pub struct ChatEngine {
     chats: Vec<Chat>,
     /// Mode of the model behind ona-core: "mock" while the model is the fake.
     pub mode: String,
-    make_core: Box<dyn Fn() -> Box<dyn MissionCore>>,
+    make_core: CoreFactory,
     count: u64,
     /// A core of its own for the pool, created on first use (its wallet is configured by ona-core, not here).
     pool: Option<Box<dyn MissionCore>>,
 }
 
 impl ChatEngine {
-    pub fn new(make_core: impl Fn() -> Box<dyn MissionCore> + 'static) -> Self {
-        Self { chats: Vec::new(), mode: "mock".into(), make_core: Box::new(make_core), count: 0, pool: None }
+    pub fn new(make_core: impl Fn() -> Box<dyn MissionCore> + Send + Sync + 'static) -> Self {
+        Self { chats: Vec::new(), mode: "mock".into(), make_core: Arc::new(make_core), count: 0, pool: None }
     }
 
     /// ona-core cores, with the fake model or the real one as `setup` says when each core is made.
     pub fn with_ona_core(setup: crate::real::SharedSetup) -> Self {
-        Self::new(move || crate::real::make_core(&setup.borrow()))
+        Self::new(move || match setup.lock() {
+            Ok(setup) => crate::real::make_core(&setup),
+            Err(_) => crate::real::make_core(&crate::real::CoreSetup::default()),
+        })
     }
 
     fn sorted(&self) -> Vec<&Chat> {
@@ -335,10 +424,10 @@ impl ChatEngine {
         }
         let run = chat.run.as_mut().ok_or_else(stale)?;
         let reply = match &pending.request {
-            Request::Plan(_) => run.core.dispatch(json!({"cmd": "accept_plan"})),
+            Request::Plan(_) => run.core.call(json!({"cmd": "accept_plan"})),
             Request::Recipient(_) => {
                 let firm = firm.ok_or_else(bad)?;
-                let reply = run.core.dispatch(json!({"cmd": "confirm_recipient", "firm": firm}));
+                let reply = run.core.call(json!({"cmd": "confirm_recipient", "firm": firm}));
                 if ok(&reply) {
                     run.chosen = Some(firm.to_owned());
                 }
@@ -347,7 +436,7 @@ impl ChatEngine {
             // ona-core's gate checks the digest against the payment it prepared.
             Request::Payment { .. } => {
                 let digest = digest.ok_or_else(bad)?;
-                run.core.dispatch(json!({"cmd": "confirm_payment", "digest": digest}))
+                run.core.call(json!({"cmd": "confirm_payment", "digest": digest}))
             }
         };
         if !ok(&reply) {
@@ -367,7 +456,9 @@ impl ChatEngine {
     pub fn tick(&mut self) {
         for chat in &mut self.chats {
             if chat.run.as_ref().is_some_and(|r| matches!(r.phase, Phase::Running)) {
-                step(chat);
+                if let Some(mode) = step(chat) {
+                    self.mode = mode;
+                }
             }
         }
     }
@@ -381,9 +472,23 @@ impl ChatEngine {
             return;
         }
         // A new core for every mission: the previous one (closed, or stopped by an error or a panic) is dropped.
-        chat.run = None;
-        if let Some(mode) = start(chat, make_core(), text) {
+        chat.run = Some(Run {
+            core: CoreThread::spawn(make_core), mission: text.to_owned(), opened: false, plan: Vec::new(), cursor: 0,
+            phase: Phase::Running, handles: Vec::new(), read_count: 0, ranked: Vec::new(), chosen: None,
+        });
+        // The first step at once: with the fake model, the plan is there before this request returns.
+        if let Some(mode) = step(chat) {
             self.mode = mode;
+        }
+        self.tick_chat(chat_id);
+    }
+
+    fn tick_chat(&mut self, chat_id: &str) {
+        let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else { return };
+        if chat.run.as_ref().is_some_and(|r| matches!(r.phase, Phase::Running)) {
+            if let Some(mode) = step(chat) {
+                self.mode = mode;
+            }
         }
     }
 
@@ -437,42 +542,45 @@ impl ChatEngine {
     }
 }
 
-/// Opens the mission and waits for the plan's approval. Returns ona-core's mode.
-fn start(chat: &mut Chat, core: Box<dyn MissionCore>, text: &str) -> Option<String> {
-    chat.run = Some(Run {
-        core, plan: Vec::new(), cursor: 0, phase: Phase::Running, handles: Vec::new(), read_count: 0,
-        ranked: Vec::new(), chosen: None,
-    });
+/// Moves a working mission on by one command, when ona-core has answered the previous one. Returns ona-core's mode once
+/// the mission is open.
+fn step(chat: &mut Chat) -> Option<String> {
     let run = chat.run.as_mut()?;
-    let opened = run.core.dispatch(json!({"cmd": "open", "mission": text}));
-    if !ok(&opened) {
-        fail(chat, &error_of(&opened));
+    if !run.opened {
+        let opened = run.core.poll(json!({"cmd": "open", "mission": run.mission}))?;
+        if !ok(&opened) {
+            fail(chat, &error_of(&opened));
+            return None;
+        }
+        run.opened = true;
+        chat.add(Content::Activity { tool: "think".into(), text: "Lecture de votre demande et préparation d'un plan".into() });
+        return opened["mode"].as_str().map(String::from);
+    }
+    if run.plan.is_empty() {
+        let proposal = run.core.poll(json!({"cmd": "propose_plan"}))?;
+        let plan: Option<Vec<String>> = proposal["plan"].as_array()
+            .map(|steps| steps.iter().filter_map(|s| s.as_str().map(String::from)).collect());
+        match plan {
+            Some(plan) if ok(&proposal) && !plan.is_empty() => {
+                run.plan = plan.clone();
+                chat.add(Content::Agent(PLAN_MESSAGE.replace("{}", &plan.len().to_string())));
+                wait(chat, Request::Plan(plan));
+            }
+            _ => fail(chat, &error_of(&proposal)),
+        }
         return None;
     }
-    let mode = opened["mode"].as_str().map(String::from);
-    chat.add(Content::Activity { tool: "think".into(), text: "Lecture de votre demande et préparation d'un plan".into() });
-    let run = chat.run.as_mut()?;
-    let proposal = run.core.dispatch(json!({"cmd": "propose_plan"}));
-    let plan: Option<Vec<String>> = proposal["plan"].as_array()
-        .map(|steps| steps.iter().filter_map(|s| s.as_str().map(String::from)).collect());
-    match plan {
-        Some(plan) if ok(&proposal) => {
-            run.plan = plan.clone();
-            chat.add(Content::Agent(PLAN_MESSAGE.replace("{}", &plan.len().to_string())));
-            wait(chat, Request::Plan(plan));
-        }
-        _ => fail(chat, &error_of(&proposal)),
-    }
-    mode
+    advance(chat);
+    None
 }
 
-fn step(chat: &mut Chat) {
+fn advance(chat: &mut Chat) {
     let Some(run) = chat.run.as_mut() else { return };
     let Some(tool) = run.plan.get(run.cursor).cloned() else { return finish(chat, false) };
     let activity = |text: String| Content::Activity { tool: tool.clone(), text };
     let content = match tool.as_str() {
         "search" => {
-            let reply = run.core.dispatch(json!({"cmd": "search", "template": "lawyer", "value": "paris"}));
+            let Some(reply) = run.core.poll(json!({"cmd": "search", "template": "lawyer", "value": "paris"})) else { return };
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
             run.handles = reply["handles"].as_array().map(|h| h.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                 .unwrap_or_default();
@@ -480,7 +588,7 @@ fn step(chat: &mut Chat) {
         }
         "read" => {
             let Some(handle) = run.handles.get(run.read_count).cloned() else { return fail(chat, "no page left to read") };
-            let reply = run.core.dispatch(json!({"cmd": "read", "handle": handle}));
+            let Some(reply) = run.core.poll(json!({"cmd": "read", "handle": handle})) else { return };
             run.read_count += 1;
             let offer = &reply["offer"];
             let (Some(firm), Some(price), Some(delay)) = (offer["firm_id"].as_str(), offer["price_cents"].as_i64(), offer["delay_days"].as_i64())
@@ -489,7 +597,7 @@ fn step(chat: &mut Chat) {
             activity(format!("Lecture d'une page : {firm}, {} €, sous {delay} jours", price / 100))
         }
         "compare" => {
-            let reply = run.core.dispatch(json!({"cmd": "compare"}));
+            let Some(reply) = run.core.poll(json!({"cmd": "compare"})) else { return };
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
             run.ranked = reply["ranked"].as_array().cloned().unwrap_or_default();
             activity(format!("Comparaison : {} offres classées", run.ranked.len()))
@@ -500,13 +608,13 @@ fn step(chat: &mut Chat) {
             return wait(chat, Request::Recipient(ranked));
         }
         "contact" => {
-            let reply = run.core.dispatch(json!({"cmd": "contact", "message": CONTACT_MESSAGE}));
+            let Some(reply) = run.core.poll(json!({"cmd": "contact", "message": CONTACT_MESSAGE})) else { return };
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
             activity(format!("Message générique envoyé à {}", run.chosen.as_deref().unwrap_or("?")))
         }
         "prepare_payment" => {
             // No amount: ona-core computes it from the chosen offer's price and the policy's rate.
-            let reply = run.core.dispatch(json!({"cmd": "prepare_payment"}));
+            let Some(reply) = run.core.poll(json!({"cmd": "prepare_payment"})) else { return };
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
             let request = match read_prepared_payment(&reply) {
                 Ok(request) => request,
@@ -523,7 +631,7 @@ fn step(chat: &mut Chat) {
         }
         "confirm_payment" => return fail(chat, "payment confirmation without a prepared payment"),
         "pay" => {
-            let reply = run.core.dispatch(json!({"cmd": "pay"}));
+            let Some(reply) = run.core.poll(json!({"cmd": "pay"})) else { return };
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
             activity(format!("Paiement envoyé : {}", reply["tx"].as_str().unwrap_or("?")))
         }
@@ -543,8 +651,8 @@ fn wait(chat: &mut Chat, request: Request) {
 
 fn finish(chat: &mut Chat, cancelled: bool) {
     let Some(run) = chat.run.as_mut() else { return };
-    run.core.dispatch(json!({"cmd": "close"}));
-    let mut exposure = run.core.dispatch(json!({"cmd": "exposure"}));
+    run.core.call(json!({"cmd": "close"}));
+    let mut exposure = run.core.call(json!({"cmd": "exposure"}));
     if let Some(object) = exposure.as_object_mut() {
         object.remove("ok");
     }
@@ -591,6 +699,33 @@ mod tests {
             }
             engine.tick();
         }
+    }
+
+    /// A slow model (the real one through Tor) does not hold the worker thread: the request returns at once, the chat
+    /// says it is working, and the plan arrives at a later tick.
+    #[test]
+    fn a_slow_core_does_not_block_the_engine() {
+        struct Slow(ona_core::Core);
+        impl MissionCore for Slow {
+            fn dispatch(&mut self, request: Value) -> Value {
+                if request["cmd"] == "propose_plan" {
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                }
+                MissionCore::dispatch(&mut self.0, request)
+            }
+        }
+        let mut engine = ChatEngine::new(|| Box::new(Slow(ona_core::Core::new())));
+        let started = std::time::Instant::now();
+        let chat = engine.create("Trouve-moi un avocat en droit du travail à Paris").unwrap();
+        engine.tick();
+        assert!(started.elapsed() < std::time::Duration::from_millis(1200), "{:?}", started.elapsed());
+        assert_eq!(engine.chat_json(&chat).unwrap()["chat"]["status"], "working");
+        assert_eq!(engine.chat_json(&chat).unwrap()["chat"]["working"]["tool"], "think");
+        let deadline = started + std::time::Duration::from_secs(10);
+        while engine.chat_json(&chat).unwrap()["chat"]["status"] == "working" && std::time::Instant::now() < deadline {
+            engine.tick();
+        }
+        assert_eq!(engine.chat_json(&chat).unwrap()["chat"]["status"], "waiting");
     }
 
     #[test]
@@ -705,10 +840,11 @@ mod tests {
                 json!({"ok": true, "mode": "mock"})
             }
         }
-        let made = std::rc::Rc::new(std::cell::Cell::new(0));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let made = Arc::new(AtomicUsize::new(0));
         let counter = made.clone();
         let mut engine = ChatEngine::new(move || {
-            counter.set(counter.get() + 1);
+            counter.fetch_add(1, Ordering::SeqCst);
             Box::new(Guarded::new(Exploding)) as Box<dyn MissionCore>
         });
         let chat = engine.create("Trouve un avocat").unwrap();
@@ -716,7 +852,7 @@ mod tests {
         let last = view["chat"]["items"].as_array().unwrap().last().unwrap().clone();
         assert!(last["text"].as_str().unwrap().contains("panic inside ona-core"), "{last}");
         engine.post("Recommence", &chat).unwrap();
-        assert_eq!(made.get(), 2);
+        assert_eq!(made.load(Ordering::SeqCst), 2);
 
         let mut guarded = Guarded::new(Exploding);
         assert_eq!(guarded.dispatch(json!({"cmd": "propose_plan"}))["error"], "panic inside ona-core");
