@@ -523,6 +523,8 @@ pub struct PoolClient {
     clock: Box<dyn Fn() -> u64>,
     recommended: Vec<u128>,
     prepared: BTreeMap<String, Prepared>,
+    /// How long an owner signature stays valid, `SIGNATURE_LIFE_NS` unless a test shortens it.
+    signature_life_ns: u64,
 }
 
 /// Reads a 32-byte key written as 64 hex characters, in a file only its owner can read.
@@ -568,7 +570,16 @@ impl PoolClient {
             clock: Box::new(system_clock),
             recommended: DEFAULT_RECOMMENDED_NEAR.iter().map(|n| n * NEAR).collect(),
             prepared: BTreeMap::new(),
+            signature_life_ns: SIGNATURE_LIFE_NS,
         }
+    }
+
+    /// Replaces how long an owner signature stays valid (nanoseconds), for tests that move a node's clock: a note
+    /// whose signature was never used is held again only once it expired. Between 15 minutes and `SIGNATURE_LIFE_NS`:
+    /// the agent drops a queued operation whose signature expires within 10 minutes.
+    pub fn with_signature_life(mut self, ns: u64) -> Self {
+        self.signature_life_ns = ns.clamp(15 * 60_000_000_000, SIGNATURE_LIFE_NS);
+        self
     }
 
     /// Replaces the clock (nanoseconds since 1970), for tests.
@@ -1271,7 +1282,7 @@ impl PoolClient {
         call: impl FnOnce(&mut Self, &SignedNote) -> Result<T, AgentError>,
         new: Option<(Option<u32>, &[[u8; G1_LEN]])>,
     ) -> Result<T, String> {
-        let expires_at = self.now().saturating_add(SIGNATURE_LIFE_NS);
+        let expires_at = self.now().saturating_add(self.signature_life_ns);
         let owner_sig = n.owner.sign(&digest(expires_at)).to_bytes();
         let note = signed_note(&n.token, owner_sig, expires_at);
         self.wallet.set_note_spending(&n.nf, expires_at)?;
@@ -1338,7 +1349,7 @@ impl PoolClient {
         } else {
             self.note(nf)?
         };
-        let expires_at = now.saturating_add(if escape { SIGNATURE_LIFE_NS } else { REQUEST_LIFE_NS });
+        let expires_at = now.saturating_add(if escape { self.signature_life_ns } else { REQUEST_LIFE_NS });
         let digest = match vault {
             None => pool::cash_exit_digest(&self.contract, &n.nf, to, expires_at),
             Some(v) => pool::share_exit_digest(&self.contract, v, &n.nf, to, min_amount, expires_at),

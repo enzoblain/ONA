@@ -205,7 +205,7 @@ NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox cargo run -p ona-sandbox --bin ona-s
 pool's tests: no `unstake` above what is staked, no `withdraw` above what is unstaked nor before a lock of 120 seconds of block time
 after the last `unstake`. The program then, on one local node:
 
-1. deploys `ona-pool` with the plan of `ona-deploy pool` (three cash tiers, escape delay one day) and the test staking pool, lists it
+1. deploys `ona-pool` with the plan of `ona-deploy pool` (three cash tiers, escape delay two hours, owner signatures valid one hour instead of the client's 24, so the escape step is reached in one short fast-forward) and the test staking pool, lists it
    as vault 0, and moves the node's clock past the admin delay (`sandbox_fast_forward`). It deploys the pool's test build
    (`ona_pool_short_admin_delay.wasm`, built by `verify.sh`) with an admin delay of two minutes: with the normal build's 7 days,
    the wait would take about 3 h 30 (estimated on 12/11/2026 from about 50 blocks per second, each adding about one second of

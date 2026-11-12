@@ -8,3 +8,7 @@ SocksPort 0
 HiddenServiceDir /opt/homebrew/var/lib/tor/ona-relay
 HiddenServiceVersion 3
 HiddenServicePort 80 127.0.0.1:8787
+
+# Proof-of-work defence against floods of introductions (Tor 0.4.8 and later, from the Tor manual, not tested here).
+# Uncomment once your tor accepts it (`tor -f <this file> --verify-config`).
+#HiddenServicePoWDefensesEnabled 1

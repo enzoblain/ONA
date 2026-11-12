@@ -60,7 +60,10 @@ const DAY_NS: u64 = 24 * HOUR_NS;
 const ADMIN_DELAY_SECS: u64 = 120;
 const ADMIN_DELAY_NS: u64 = ADMIN_DELAY_SECS * SECOND_NS;
 /// The escape opens after the agent has been silent this long.
-const ESCAPE_DELAY_SECS: u64 = 86_400;
+const ESCAPE_DELAY_SECS: u64 = 7_200;
+/// How long the client's owner signatures stay valid in this run, shorter than the escape delay so that a note whose
+/// signature was never used is held again by the time the escape opens (the client's default is 24 hours).
+const SIGNATURE_LIFE_NS: u64 = HOUR_NS;
 /// How long the test staking pool keeps unstaked funds locked.
 const LOCK_SECS: u64 = 120;
 /// Price of one share in an empty vault, as in the contract.
@@ -77,9 +80,9 @@ const USER_TGAS: u64 = 300;
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Blocks of the first fast-forward, which measures how much block time one block adds.
 const PROBE_BLOCKS: u64 = 1_000;
-/// Most blocks one fast-forward asks for; a longer wait takes several.
-const MAX_FAST_FORWARD: u64 = 200_000;
-const MAX_FAST_FORWARDS: usize = 16;
+/// Most blocks one fast-forward asks for; a longer wait takes several. A node answered HTTP 500 to 200,000 at once.
+const MAX_FAST_FORWARD: u64 = 50_000;
+const MAX_FAST_FORWARDS: usize = 32;
 const NETWORK: &str = "sandbox";
 /// The pool's test build, which `verify.sh` writes next to the normal one.
 const POOL_WASM: &str =
@@ -516,7 +519,8 @@ async fn run_all(report: &mut Report) -> Result<()> {
     let mut client = PoolClient::new(wallet, Box::new(NearPool::new(&rpc, &pool)), Box::new(HttpAgent::to_url(&url)), &pool)
         .with_second_chain(Box::new(NearPool::new(&rpc, &pool)))
         .with_clock(Box::new(move || system_ns().saturating_add(clock_offset.load(Ordering::SeqCst))))
-        .with_recommended(vec![DEPOSIT]);
+        .with_recommended(vec![DEPOSIT])
+        .with_signature_life(SIGNATURE_LIFE_NS);
     let result = walk(report, &mut client, &chain, &agent, &mut time, &stop, &key(), &Accounts { alice, bob, staking, pool }).await;
     drop(client);
     let _ = std::fs::remove_file(&wallet_path);

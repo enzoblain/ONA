@@ -5,8 +5,12 @@
 request on its own circuit, and nothing goes directly (docs/INSTALL.md, "Go through Tor"). Without it `ona` says at start that it
 connects directly; `ONA_REQUIRE_TOR=1` makes it refuse to start. The desktop and phone apps do not set it yet.
 
-**Do not publish the relay as an onion service yet.** It handles one connection at a time, so an anonymous client can stall it. Never
-run `ona-mock-relay` with the onion service active: it hands out free test credits. The `/opt/homebrew` paths below are for Apple
+**Publishing the relay as an onion service.** `ona-relay` serves 32 connections at a time and keeps 256 waiting (docs/INSTALL.md,
+"Run the relay"), so 32 slow clients can still keep it busy: give the address only to the people who need it, and turn on the onion
+service's own denial-of-service defences (`HiddenServicePoWDefensesEnabled 1` in the torrc, from the Tor manual, not tested here). A
+test proxy that only adds the NEAR AI key to what it forwards (none ships in this repository) is not `ona-relay`: it enforces no request token, size or rate limit and spends its
+operator's key for anyone who reaches it, so publish one only behind onion client authorization (below) and only for a short test.
+**Never publish `ona-mock-relay`**: it hands out free test credits. The `/opt/homebrew` paths below are for Apple
 Silicon Macs.
 
 ## Choice: SOCKS5 to a local `tor`
@@ -56,6 +60,14 @@ cat /opt/homebrew/var/lib/tor/ona-relay/hostname
 ```
 
 The same directory holds the service's private key, which is the address's identity. Keep it private and never commit it.
+
+### Only the people you name (onion client authorization)
+
+From the Tor manual, not tested here: each authorized person makes an x25519 key pair and gives you the public half. You put it in
+`<HiddenServiceDir>/authorized_clients/<name>.auth`, one line `descriptor:x25519:<public key in base32>`, and restart tor. Once that
+directory holds at least one file, a client without a matching private key cannot even read the service's descriptor. The person puts
+`<address without .onion>:descriptor:x25519:<private key in base32>` in a `<name>.auth_private` file of the directory their tor names
+with `ClientOnionAuthDir`. The private half never leaves their machine.
 
 ## Run the client side
 
