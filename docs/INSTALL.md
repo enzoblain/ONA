@@ -61,7 +61,8 @@ the digest to send back with `confirm_payment`.
 
 ### The pool commands
 
-With these variables set, `ona` also answers `pool_portfolio`, `pool_prepare`, `pool_execute` and `pool_recover` (inputs,
+With these variables set, `ona` also answers `pool_portfolio`, `pool_prepare`, `pool_execute`, `pool_recover`,
+`pool_request_exit` and `pool_escape_exit` (inputs,
 outputs and the confirmation flow: [docs/desktop/pool-commands.md](desktop/pool-commands.md)). They read the pool contract, views
 only, and never contact the relay. Agent calls go to `ona-agent` (see "Run the pool agent") when `ONA_POOL_AGENT_URL` is set;
 without it `pool_execute` answers `no connection to the pool agent yet` and no agent call is made. The commands have run only

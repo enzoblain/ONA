@@ -53,8 +53,15 @@ pub const PREPARATION_LIFE_NS: u64 = 5 * 60_000_000_000;
 /// Deposit amounts the app recommends unless configured otherwise, in NEAR: common amounts hide better.
 pub const DEFAULT_RECOMMENDED_NEAR: [u128; 3] = [100, 500, 2_000];
 
-/// The commands this module answers.
-pub const COMMANDS: [&str; 4] = ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover"];
+/// How long the owner's signature of an exit request stays valid: the contract accepts at most 30 days from filing;
+/// a day less leaves room for this computer's clock and the time the wallet takes to send it.
+pub const REQUEST_LIFE_NS: u64 = 29 * 24 * 3_600_000_000_000;
+/// Attached to `request_exit`: the contract's 336 bytes of a request (its estimate) at 10^19 yoctoNEAR per byte, the
+/// NEAR storage price as documented (not verified here). Given back when the request leaves the list, less 80 bytes.
+pub const REQUEST_FEE: u128 = 336 * 10_000_000_000_000_000_000;
+
+/// The commands this module answers. `pool_request_exit` and `pool_escape_exit` are `pool_prepare` with that `op`.
+pub const COMMANDS: [&str; 6] = ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover", "pool_request_exit", "pool_escape_exit"];
 
 /// Read-only access to the pool contract.
 pub trait PoolChain {
@@ -466,6 +473,9 @@ enum Step {
     Leave { nf: [u8; 32], vault: u32, outputs: Vec<(u8, u64)>, then_enter: Option<(u32, Vec<Vec<(u8, u64)>>)> },
     /// A held cash note paid to `to`.
     Pay { nf: [u8; 32], to: String },
+    /// A held note (cash, or share of `vault`) the user's own wallet asks to exit to `to`, with `request_exit` or,
+    /// once the contract has opened it, `escape_exit`: signed here, sent by the wallet.
+    Exit { nf: [u8; 32], vault: Option<u32>, to: String, min_amount: u128, escape: bool },
 }
 
 struct Prepared {
@@ -641,15 +651,34 @@ impl PoolClient {
         }
     }
 
-    /// Held notes of `vault` (cash when `None`) not reserved by a live preparation, with their value.
+    /// Held notes of `vault` (cash when `None`) not reserved by a live preparation, with their value. A note ever named
+    /// in an exit request is left out: the contract lets it leave only by an exit.
     fn available(&self, state: &State, vault: Option<u32>) -> Result<Vec<(PoolNote, u128)>, String> {
+        self.candidates(state, vault, |me, n| n.status == NoteStatus::Held && me.wallet.requested(&n.nf).is_none())
+    }
+
+    /// The notes an exit request or an escape can take: held notes (a request whose signature expired can be filed
+    /// again) and, for the escape, notes whose request is still live, which the contract pays first.
+    fn exit_candidates(&self, state: &State, vault: Option<u32>, escape: bool) -> Result<Vec<(PoolNote, u128)>, String> {
+        let now = self.now();
+        self.candidates(state, vault, |me, n| {
+            n.status == NoteStatus::Held || (escape && n.status == NoteStatus::Spending && me.live_request(&n.nf, now).is_some())
+        })
+    }
+
+    fn candidates(&self, state: &State, vault: Option<u32>, keep: impl Fn(&Self, &PoolNote) -> bool) -> Result<Vec<(PoolNote, u128)>, String> {
         let reserved: BTreeSet<[u8; 32]> = self.prepared.values().flat_map(|p| p.reserved.iter().copied()).collect();
         self.wallet
             .notes()
             .into_iter()
-            .filter(|n| n.vault == vault && n.status == NoteStatus::Held && !reserved.contains(&n.nf))
+            .filter(|n| n.vault == vault && !reserved.contains(&n.nf) && keep(self, n))
             .map(|n| state.note_value(&n).map(|v| (n, v)))
             .collect()
+    }
+
+    /// The account a note's request pays, while its signature is valid.
+    fn live_request(&self, nf: &[u8; 32], now: u64) -> Option<String> {
+        self.wallet.requested(nf).filter(|(_, until)| now <= *until).map(|(to, _)| to)
     }
 
     pub fn run(&mut self, cmd: &str, request: &Value) -> Result<Value, String> {
@@ -657,6 +686,11 @@ impl PoolClient {
         let mut reply = match cmd {
             "pool_portfolio" => self.portfolio(),
             "pool_prepare" => self.prepare(request),
+            "pool_request_exit" | "pool_escape_exit" => {
+                let mut request = request.clone();
+                request["op"] = json!(if cmd == "pool_request_exit" { "request_exit" } else { "escape_exit" });
+                self.prepare(&request)
+            }
             "pool_execute" => self.execute(request),
             "pool_recover" => self.recover(),
             other => Err(format!("unknown command {other}")),
@@ -849,6 +883,70 @@ impl PoolClient {
                 reserved = chosen.iter().map(|(n, _)| n.nf).collect();
                 (None, chosen.iter().map(|(n, _)| Step::Pay { nf: n.nf, to: to.clone() }).collect())
             }
+            "request_exit" | "escape_exit" => {
+                let escape = op == "escape_exit";
+                let to = account("to")?;
+                let vault = if request.get("from").is_some_and(|v| !v.is_null()) { Some(vault_arg("from")?) } else { None };
+                let min_amount: u128 = match request.get("min_amount").and_then(Value::as_str) {
+                    Some(m) => m.parse().map_err(|_| "min_amount must be yoctoNEAR digits".to_string())?,
+                    None => 0,
+                };
+                if vault.is_none() && min_amount != 0 {
+                    return Err("min_amount applies to share notes only: a cash note is worth its value".into());
+                }
+                if escape {
+                    let open = match vault {
+                        Some(id) => self.chain.view("get_vault", json!({"vault_id": id}))?["open"].as_bool(),
+                        None => self.chain.view("get_cash", json!({}))?["open"].as_bool(),
+                    };
+                    if open != Some(true) {
+                        return Err("the escape is not open for these notes: file an exit request first (pool_request_exit)".into());
+                    }
+                }
+                let chosen = select(self.exit_candidates(&state, vault, escape)?, &amount)?;
+                let now = self.now();
+                if let Some(other) = chosen.iter().filter_map(|(n, _)| self.live_request(&n.nf, now)).find(|r| *r != to) {
+                    return Err(format!("a chosen note's request pays {other}: the escape pays the same account"));
+                }
+                let (mut paid, mut received) = (0u128, 0u128);
+                for (_, value) in &chosen {
+                    let payout = value.checked_sub(EXIT_STORAGE_FEE).ok_or("a note is worth less than its exit fee")?;
+                    if payout < min_amount {
+                        return Err("a note would pay less than min_amount at the current price".into());
+                    }
+                    plus(&mut paid, *value)?;
+                    plus(&mut received, payout)?;
+                }
+                let holder = self.chain.view("get_holder", json!({"account": to}))?;
+                let limit = u128_field(&holder, "exit_limit")?;
+                if paid > limit {
+                    return Err(format!("over this account's exit limit ({limit} yoctoNEAR)"));
+                }
+                summary["to"] = json!(to);
+                summary["received"] = json!(received.to_string());
+                summary["exit_limit"] = json!(limit.to_string());
+                let mut fees = json!({"storage": times(EXIT_STORAGE_FEE, chosen.len())?.to_string()});
+                if !escape {
+                    fees["request_deposit"] = json!(times(REQUEST_FEE, chosen.len())?.to_string());
+                    fees["request_deposit_back"] = json!("when the request leaves the list, less 80 bytes per note");
+                }
+                summary["fees"] = fees;
+                let mut warnings = vec!["the account named here is shown with the exit".to_string()];
+                if let Some(id) = vault {
+                    summary["from"] = json!(id);
+                    summary["min_amount"] = json!(min_amount.to_string());
+                    warnings.push("a share note's exit shows its vault".into());
+                }
+                if escape {
+                    warnings.push("while the agent is active, only notes with a listed exit request leave by the escape".into());
+                } else {
+                    warnings.push("a note named in a request can afterwards only leave by an exit".into());
+                }
+                summary["warnings"] = json!(warnings);
+                reserved = chosen.iter().map(|(n, _)| n.nf).collect();
+                let steps = chosen.iter().map(|(n, _)| Step::Exit { nf: n.nf, vault, to: to.clone(), min_amount, escape }).collect();
+                (vault, steps)
+            }
             other => return Err(format!("unknown operation {other}")),
         };
         let mut nonce = [0u8; 32];
@@ -972,6 +1070,10 @@ impl PoolClient {
                 Step::Pay { nf, to } => {
                     self.pay(nf, to)?;
                     done.push(json!({"paid": 1, "to": to}));
+                }
+                Step::Exit { nf, vault, to, min_amount, escape } => {
+                    let call = self.exit_call(nf, *vault, to, *min_amount, *escape)?;
+                    done.push(json!({"wallet_call": call}));
                 }
             }
         }
@@ -1185,6 +1287,44 @@ impl PoolClient {
         let n = self.note(nf)?;
         let contract = self.contract.clone();
         self.spend(&n, |exp| pool::cash_exit_digest(&contract, &n.nf, to, exp), |me, note| me.agent.pay_exit(note, to), None)
+    }
+}
+
+impl PoolClient {
+    /// Signs one note's exit as the contract checks it (CASH-EXIT-V1 for a cash note, EXIT-V2 for a share note) and
+    /// marks the note spending until the signature's deadline, before the call leaves. The call is for the user's own
+    /// wallet to send; `pool_recover` then finds the note spent once paid, or holds it again after the deadline.
+    fn exit_call(&mut self, nf: &[u8; 32], vault: Option<u32>, to: &str, min_amount: u128, escape: bool) -> Result<Value, String> {
+        let now = self.now();
+        // A note whose request is live is already spending, until that request's deadline: the escape leaves it so.
+        let requested = escape && self.live_request(nf, now).is_some();
+        let n = if requested {
+            self.wallet.notes().into_iter().find(|n| &n.nf == nf && n.status == NoteStatus::Spending).ok_or("a planned note is no longer spending")?
+        } else {
+            self.note(nf)?
+        };
+        let expires_at = now.saturating_add(if escape { SIGNATURE_LIFE_NS } else { REQUEST_LIFE_NS });
+        let digest = match vault {
+            None => pool::cash_exit_digest(&self.contract, &n.nf, to, expires_at),
+            Some(v) => pool::share_exit_digest(&self.contract, v, &n.nf, to, min_amount, expires_at),
+        };
+        let note = signed_note(&n.token, n.owner.sign(&digest).to_bytes(), expires_at);
+        let mut args = note.contract_args();
+        args["vault_id"] = json!(vault);
+        args["to"] = json!(to);
+        args["min_amount"] = json!(min_amount.to_string());
+        if !requested {
+            self.wallet.set_note_spending(&n.nf, expires_at)?;
+        }
+        if !escape {
+            self.wallet.set_note_requested(&n.nf, to, expires_at)?;
+        }
+        Ok(json!({
+            "receiver": self.contract,
+            "method": if escape { "escape_exit" } else { "request_exit" },
+            "args": args,
+            "attached": if escape { "0".to_string() } else { REQUEST_FEE.to_string() },
+        }))
     }
 }
 

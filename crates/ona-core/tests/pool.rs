@@ -11,7 +11,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ona_core::pool::{
     AgentError, DepositorProof, PoolAgent, PoolChain, PoolClient, SignedNote, CLOCK_MARGIN_NS, EXIT_STORAGE_FEE,
-    NOTE_STORAGE_FEE, PREPARATION_LIFE_NS, SIGNATURE_LIFE_NS,
+    NOTE_STORAGE_FEE, PREPARATION_LIFE_NS, REQUEST_FEE, REQUEST_LIFE_NS, SIGNATURE_LIFE_NS,
 };
 use ona_core::Core;
 use ona_token::{g2_to_raw, keygen, sign_blinded, verify_digest, verify_token, SecretKey, Token, G1_LEN};
@@ -94,6 +94,8 @@ struct FakePool {
     refuse_after_first: bool,
     /// `signatures` cannot reach the agent.
     signatures_down: bool,
+    /// The escape is open on the cash and on every vault.
+    escape_open: bool,
 }
 
 type Shared = Rc<RefCell<FakePool>>;
@@ -129,7 +131,7 @@ impl PoolChain for Chain {
             "get_config" => Ok(json!({"network": NETWORK, "vault_count": f.vaults.len()})),
             "get_cash" => Ok(json!({"tiers": f.cash_keys.iter().zip(CASH).map(|(k, v)| json!({
                 "value": f.shown_cash.unwrap_or(v).to_string(), "pk_raw": raw(k)})).collect::<Vec<_>>(),
-                "liquid": f.cash_liquid.to_string()})),
+                "liquid": f.cash_liquid.to_string(), "open": f.escape_open})),
             "get_vault" => {
                 let v = &f.vaults[args["vault_id"].as_u64().unwrap() as usize];
                 Ok(json!({
@@ -137,6 +139,7 @@ impl PoolChain for Chain {
                     "liquid": v.liquid.to_string(), "placed": "0", "fee_owed": "0", "orphan": v.orphan.to_string(),
                     "total_shares": v.total_shares.to_string(),
                     "share_price": v.shown_price.unwrap_or_else(|| price(v)).to_string(), "frozen": false,
+                    "open": f.escape_open,
                 }))
             }
             "get_holder" => {
@@ -385,6 +388,7 @@ impl World {
             shown_cash: None,
             refuse_after_first: false,
             signatures_down: false,
+            escape_open: false,
         }));
         let mut w = Self { core: Core::new(), fake, now: Rc::new(Cell::new(1_000_000_000_000_000_000)), path };
         w.restart();
@@ -1001,4 +1005,95 @@ fn examples_for_the_docs() {
     let p = show(&mut w, json!({"cmd": "pool_prepare", "op": "exit_cash", "to": "alice.test", "amount": (19 * NEAR / 10).to_string()}));
     show(&mut w, json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
     show(&mut w, json!({"cmd": "pool_recover"}));
+}
+
+fn b64_32(v: &Value) -> [u8; 32] {
+    B64.decode(v.as_str().unwrap()).unwrap().try_into().unwrap()
+}
+
+#[test]
+fn an_exit_request_is_signed_for_the_wallet_and_recovery_follows_it() {
+    let mut w = World::new("request-exit");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (10 * NEAR).to_string()}));
+    let p = w.ok(json!({"cmd": "pool_request_exit", "to": "alice.test", "amount": (10 * NEAR).to_string()}));
+    assert_eq!(p["summary"]["op"], "request_exit");
+    assert_eq!(p["summary"]["fees"]["request_deposit"], REQUEST_FEE.to_string());
+    let done = w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    let call = &done["steps"][0]["wallet_call"];
+    assert_eq!((call["receiver"].clone(), call["method"].clone()), (json!(POOL), json!("request_exit")));
+    assert_eq!(call["attached"], REQUEST_FEE.to_string(), "the request's storage, given back later");
+    let args = &call["args"];
+    assert_eq!((args["vault_id"].clone(), args["to"].clone(), args["min_amount"].clone()), (json!(null), json!("alice.test"), json!("0")));
+    let expires_at = args["expires_at"].as_u64().unwrap();
+    assert_eq!(expires_at, w.now.get() + REQUEST_LIFE_NS, "within the contract's 30 days");
+    // The owner's signature as the contract checks a cash exit (CASH-EXIT-V1).
+    let (pk, nonce) = (b64_32(&args["note"]["pk"]), b64_32(&args["note"]["nonce"]));
+    let tier = args["note"]["tier"].as_u64().unwrap() as u8;
+    let nf = sha(&[b"ONA-POOL-CASH-NF-V1", &[tier], &pk, &nonce]);
+    let digest = sha(&[b"ONA-POOL-CASH-EXIT-V1", &sha(&[POOL.as_bytes()]), &nf, &sha(&[b"alice.test"]), &expires_at.to_le_bytes()]);
+    let sig: [u8; 64] = B64.decode(args["owner_sig"].as_str().unwrap()).unwrap().try_into().unwrap();
+    assert!(verify_digest(&pk, &digest, &sig));
+    assert_eq!(w.portfolio()["cash"]["tiers"][0]["spending"], 1, "marked spending before the call leaves");
+    // Paid later (a listed request, or the escape): recovery sees the note spent.
+    w.fake.borrow_mut().nullifiers.insert(nf);
+    assert_eq!(w.ok(json!({"cmd": "pool_recover"}))["spent"], 1);
+}
+
+#[test]
+fn an_escape_exit_needs_the_escape_open_and_signs_a_share_note_as_the_contract_does() {
+    let mut w = World::new("escape-exit");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (10 * NEAR).to_string()}));
+    w.run(json!({"op": "enter", "vault": 0, "amount": (10 * NEAR).to_string()}));
+    let request = json!({"cmd": "pool_escape_exit", "to": "alice.test", "from": 0, "amount": "all", "min_amount": "1"});
+    assert!(w.error(request.clone()).contains("escape is not open"));
+    w.fake.borrow_mut().escape_open = true;
+    let p = w.ok(request);
+    assert!(p["summary"]["warnings"].to_string().contains("shows its vault"));
+    let done = w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    let steps = done["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 27, "one call per share note");
+    let call = &steps[0]["wallet_call"];
+    assert_eq!((call["method"].clone(), call["attached"].clone()), (json!("escape_exit"), json!("0")));
+    let args = &call["args"];
+    assert_eq!(args["vault_id"], 0);
+    let expires_at = args["expires_at"].as_u64().unwrap();
+    let (pk, nonce) = (b64_32(&args["note"]["pk"]), b64_32(&args["note"]["nonce"]));
+    let tier = args["note"]["tier"].as_u64().unwrap() as u8;
+    let nf = sha(&[b"ONA-POOL-NF-V1", &0u32.to_le_bytes(), &[tier], &pk, &nonce]);
+    let digest = sha(&[
+        b"ONA-POOL-EXIT-V2", &sha(&[POOL.as_bytes()]), &0u32.to_le_bytes(), &nf, &sha(&[b"alice.test"]), &1u128.to_le_bytes(),
+        &expires_at.to_le_bytes(),
+    ]);
+    let sig: [u8; 64] = B64.decode(args["owner_sig"].as_str().unwrap()).unwrap().try_into().unwrap();
+    assert!(verify_digest(&pk, &digest, &sig), "EXIT-V2 with the vault and the owner's minimum");
+    // Never sent by the wallet: past its deadline, recovery holds the notes again.
+    w.now.set(expires_at + CLOCK_MARGIN_NS + 1);
+    assert_eq!(w.ok(json!({"cmd": "pool_recover"}))["held_again"], 27);
+}
+
+#[test]
+fn a_requested_note_takes_the_escape_once_its_request_is_overdue() {
+    let mut w = World::new("request-then-escape");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (11 * NEAR).to_string()}));
+    let p = w.ok(json!({"cmd": "pool_request_exit", "to": "alice.test", "amount": NEAR.to_string()}));
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    // Nobody pays the request; after the escape delay the contract opens the escape for listed notes. The app restarted.
+    w.restart();
+    w.now.set(w.now.get() + 8 * 24 * 3_600_000_000_000);
+    w.fake.borrow_mut().escape_open = true;
+    let other = w.error(json!({"cmd": "pool_escape_exit", "to": "bob.test", "amount": NEAR.to_string()}));
+    assert!(other.contains("pays alice.test"), "{other}");
+    let p = w.ok(json!({"cmd": "pool_escape_exit", "to": "alice.test", "amount": NEAR.to_string()}));
+    let done = w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    let call = &done["steps"][0]["wallet_call"];
+    assert_eq!(call["method"], "escape_exit", "the listed note, the one the contract pays while the agent is active");
+    assert_eq!(w.portfolio()["cash"]["tiers"][0]["spending"], 1, "still spending, until the request's deadline");
+    // Not paid in the end: once its request expired the note is held again, and offered to no entry or leave.
+    let expires_at = call["args"]["expires_at"].as_u64().unwrap();
+    w.now.set(w.now.get() + 30 * 24 * 3_600_000_000_000);
+    assert!(w.now.get() > expires_at);
+    assert_eq!(w.ok(json!({"cmd": "pool_recover"}))["held_again"], 1);
+    w.fake.borrow_mut().escape_open = false;
+    let e = w.error(json!({"cmd": "pool_prepare", "op": "exit_cash", "to": "alice.test", "amount": (11 * NEAR).to_string()}));
+    assert!(e.contains("not a sum of whole notes"), "the requested note can only exit by a request or the escape: {e}");
 }

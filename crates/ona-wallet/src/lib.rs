@@ -45,6 +45,7 @@ const NOTE_PENDING: u8 = 4;
 const NOTE_HELD: u8 = 5;
 const NOTE_STATUS: u8 = 6;
 const NOTE_DROPPED: u8 = 7;
+const NOTE_REQUESTED: u8 = 8;
 /// Stands for "no vault" in a note record: a cash note.
 const CASH: u32 = u32::MAX;
 
@@ -160,6 +161,8 @@ pub struct Wallet {
     notes: Vec<(Option<u32>, Token, [u8; 32])>,
     note_status: BTreeMap<[u8; 32], NoteStatus>,
     spending_until: BTreeMap<[u8; 32], u64>,
+    /// Notes named in an exit request filed on chain: the account paid and when the request's signature expires.
+    requested: BTreeMap<[u8; 32], (String, u64)>,
     /// A write failed: nothing more is written until the wallet is opened again.
     broken: bool,
     dropped_torn_line: bool,
@@ -241,6 +244,7 @@ impl Wallet {
             notes: Vec::new(),
             note_status: BTreeMap::new(),
             spending_until: BTreeMap::new(),
+            requested: BTreeMap::new(),
             broken: false,
             dropped_torn_line: false,
         };
@@ -445,6 +449,15 @@ impl Wallet {
                     }
                 }
             }
+            NOTE_REQUESTED => {
+                if data.len() < 41 {
+                    return Err("bad note request record".into());
+                }
+                let nf: [u8; 32] = data[..32].try_into().map_err(|_| "bad note request record")?;
+                let until = u64::from_le_bytes(data[32..40].try_into().map_err(|_| "bad note request record")?);
+                let to = String::from_utf8(data[40..].to_vec()).map_err(|_| "bad note request record")?;
+                self.requested.insert(nf, (to, until));
+            }
             _ => return Err("unknown wallet record".into()),
         }
         Ok(())
@@ -647,6 +660,25 @@ impl Wallet {
     /// When the signature of a spending note expires, if it was recorded.
     pub fn spending_until(&self, nf: &[u8; 32]) -> Option<u64> {
         self.spending_until.get(nf).copied()
+    }
+
+    /// Records that an exit request names this note, paying `to`, signed until `until` (nanoseconds). The contract
+    /// then lets the note leave only by an exit, and by the escape once the request is overdue. A later request
+    /// replaces the record.
+    pub fn set_note_requested(&mut self, nf: &[u8; 32], to: &str, until: u64) -> Result<(), String> {
+        if !self.note_status.contains_key(nf) {
+            return Err("unknown pool note".into());
+        }
+        let mut record = vec![NOTE_REQUESTED];
+        record.extend_from_slice(nf);
+        record.extend_from_slice(&until.to_le_bytes());
+        record.extend_from_slice(to.as_bytes());
+        self.append(record)
+    }
+
+    /// The last exit request recorded for this note: the account paid and the signature's deadline.
+    pub fn requested(&self, nf: &[u8; 32]) -> Option<(String, u64)> {
+        self.requested.get(nf).cloned()
     }
 }
 

@@ -83,6 +83,13 @@ struct State {
     /// The second read endpoint does not know any transaction.
     second_unsure: bool,
     cash_open: bool,
+    /// The contract's record of the agent's last sync, placement or paid exit.
+    last_agent_call: u64,
+    escape_delay: u64,
+    /// The staking pool refuses the next `withdraw`; the contract's callback catches it.
+    withdraw_fails: bool,
+    /// Rewards a sync finds on the staking pool and adds to the vault's placed funds.
+    sync_reward: u128,
     /// Times at which `enter`, `leave` and `pay_exit` reached the chain.
     sent_at: Vec<(String, u64)>,
 }
@@ -108,8 +115,16 @@ fn world(keys: &AgentKeys) -> Shared {
         crash_after_send: false,
         second_unsure: false,
         cash_open: false,
+        last_agent_call: NOW,
+        escape_delay: 7 * 24 * HOUR,
+        withdraw_fails: false,
+        sync_reward: 0,
         sent_at: vec![],
     }))
+}
+
+fn escape_open(s: &State) -> bool {
+    s.now >= s.last_agent_call + s.escape_delay
 }
 
 fn price(v: &FakeVault) -> u128 {
@@ -170,6 +185,7 @@ impl FakeChain {
                 let nf = digests::cash_nullifier(note.tier, &note.pk, &note.nonce);
                 ("pay_exit", Box::new(move |s: &mut State| {
                     spend(s, nf)?;
+                    s.last_agent_call = s.now;
                     let h = s.holders.get_mut(&to).ok_or("exits go only to an account that deposited")?;
                     h.2 += CASH[usize::from(note.tier)];
                     s.cash_liquid -= CASH[usize::from(note.tier)];
@@ -180,15 +196,27 @@ impl FakeChain {
                 let v = &mut s.vaults[vault as usize];
                 v.liquid -= amount;
                 v.placed += amount;
+                s.last_agent_call = s.now;
                 Ok(())
             })),
             Call::Sync(vault) => ("sync", Box::new(move |s: &mut State| {
                 let now = s.now;
-                s.vaults[vault as usize].synced_at = now;
+                let reward = s.sync_reward;
+                let v = &mut s.vaults[vault as usize];
+                v.synced_at = now;
+                v.placed += reward;
+                s.last_agent_call = now;
                 Ok(())
             })),
             Call::Unstake(..) => ("unstake", Box::new(|_: &mut State| Ok(()))),
-            Call::Withdraw(..) => ("withdraw", Box::new(|_: &mut State| Ok(()))),
+            Call::Withdraw(vault, amount) => ("withdraw", Box::new(move |s: &mut State| {
+                if !std::mem::take(&mut s.withdraw_fails) {
+                    let v = &mut s.vaults[vault as usize];
+                    v.placed -= amount;
+                    v.liquid += amount;
+                }
+                Ok(())
+            })),
         }
     }
 }
@@ -210,9 +238,10 @@ impl PoolChain for FakeChain {
             agent: AGENT.into(),
             network: NETWORK.into(),
             vault_count: s.vaults.len() as u32,
-            escape_open: false,
-            last_agent_call: 0,
+            escape_open: escape_open(&s),
+            last_agent_call: s.last_agent_call,
             admin_pending_until: 0,
+            escape_delay_ns: s.escape_delay,
         })
     }
     fn cash(&mut self) -> Result<CashInfo, String> {
@@ -223,7 +252,7 @@ impl PoolChain for FakeChain {
             outstanding: 0,
             hourly_cap: 1_000 * NEAR,
             requests: 0,
-            open: s.cash_open,
+            open: s.cash_open || escape_open(&s),
         })
     }
     fn vault(&mut self, id: u32) -> Result<VaultInfo, String> {
@@ -242,7 +271,8 @@ impl PoolChain for FakeChain {
             frozen: false,
             busy: false,
             requests: v.requests,
-            open: v.open,
+            open: v.open || escape_open(&s),
+            staking: true,
         })
     }
     fn holder(&mut self, account: &str) -> Result<HolderInfo, String> {
@@ -1048,6 +1078,84 @@ fn an_open_issue_is_served_after_the_wallet_key_was_removed() {
     let other: Vec<(u8, [u8; G1_LEN])> = vec![(0, cash_pending(0).blinded)];
     let fresh = agent.issue(&IssueRequest { account: "alice.test".into(), notes: other.clone(), proof: proof(&alice, "alice.test", &other) });
     assert!(matches!(fresh, Reply::Refused(401, _)), "a new issue still needs a key of the account: {fresh:?}");
+}
+
+#[test]
+fn the_agent_keeps_the_escape_shut_with_nothing_placed() {
+    let k = keys();
+    let shared = world(&k);
+    let mut agent = agent_on(k, &shared);
+    // Thirty days with no deposit, nothing placed, a tick every three days.
+    for _ in 0..10 {
+        shared.lock().unwrap().now += 3 * 24 * HOUR;
+        agent.tick().unwrap();
+        assert!(!agent.chain.config().unwrap().escape_open, "the agent's own silence never opens the escape");
+    }
+    assert!(calls_of(&shared, "sync") >= 4, "a sync at least every half escape delay");
+}
+
+#[test]
+fn a_request_closes_an_escape_the_agents_silence_opened() {
+    let k = keys();
+    let shared = world(&k);
+    let mut agent = agent_on(k, &shared);
+    let alice = depositor(&shared, "alice.test", 10 * NEAR);
+    let (token, owner) = issue_notes(&mut agent, &alice, "alice.test", 1, 1).pop().unwrap();
+    // The agent was down past the escape delay: the escape is open because of it alone.
+    shared.lock().unwrap().last_agent_call = NOW - 8 * 24 * HOUR;
+    assert!(agent.chain.config().unwrap().escape_open);
+    let (entry, _) = enter_request(&token, &owner, 0, vec![(1, 9)]);
+    assert!(matches!(agent.note_request(&entry), Reply::Pending(_)), "the agent syncs, the escape closes, the entry is queued");
+    assert!(!agent.chain.config().unwrap().escape_open);
+}
+
+#[test]
+fn a_withdraw_the_staking_pool_refused_is_kept_and_tried_again() {
+    use ona_agent::planner::{Memory, VaultMemory};
+    let k = keys();
+    let shared = world(&k);
+    let mut agent = agent_on(k, &shared);
+    shared.lock().unwrap().vaults[0].placed = 50 * NEAR;
+    let unstaked_at = NOW - 5 * 24 * HOUR;
+    let memory = Memory { vaults: vec![VaultMemory { unstaked: 10 * NEAR, unstaked_at, last_unstake: unstaked_at, last_steady: 0 }], ..Memory::default() };
+    agent.store.put("p:memory", memory.to_json()).unwrap();
+    let unstaked = |agent: &Agent<FakeChain, MemoryStore>| Memory::from_json(&agent.store.get("p:memory").unwrap()).vaults[0].unstaked;
+
+    shared.lock().unwrap().withdraw_fails = true;
+    agent.tick().unwrap();
+    assert_eq!(calls_of(&shared, "withdraw"), 1);
+    assert_eq!(unstaked(&agent), 10 * NEAR, "the transaction succeeded, the funds did not come back: still owed");
+    assert_eq!(shared.lock().unwrap().vaults[0].liquid, 0);
+
+    agent.tick().unwrap();
+    assert_eq!(calls_of(&shared, "withdraw"), 2, "tried again");
+    assert_eq!(unstaked(&agent), 0);
+    assert_eq!(shared.lock().unwrap().vaults[0].liquid, 10 * NEAR);
+}
+
+#[test]
+fn a_withdraw_after_a_sync_that_found_rewards_is_counted_once() {
+    use ona_agent::planner::{Memory, VaultMemory};
+    let k = keys();
+    let shared = world(&k);
+    let mut agent = agent_on(k, &shared);
+    {
+        let mut s = shared.lock().unwrap();
+        s.vaults[0].placed = 50 * NEAR;
+        s.vaults[0].total_shares = 1;
+        // Read more than 45 minutes ago: this tick syncs the vault, then withdraws.
+        s.vaults[0].synced_at = NOW - HOUR;
+        s.sync_reward = NEAR;
+    }
+    let unstaked_at = NOW - 5 * 24 * HOUR;
+    let memory = Memory { vaults: vec![VaultMemory { unstaked: 10 * NEAR, unstaked_at, last_unstake: unstaked_at, last_steady: 0 }], ..Memory::default() };
+    agent.store.put("p:memory", memory.to_json()).unwrap();
+    agent.tick().unwrap();
+    let calls = shared.lock().unwrap().calls.clone();
+    assert_eq!(calls, vec!["sync", "withdraw"], "{calls:?}");
+    assert_eq!(Memory::from_json(&agent.store.get("p:memory").unwrap()).vaults[0].unstaked, 0, "the withdrawal is seen done");
+    agent.tick().unwrap();
+    assert_eq!(calls_of(&shared, "withdraw"), 1, "and not sent again");
 }
 
 #[test]

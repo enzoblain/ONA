@@ -31,6 +31,8 @@ pub struct ConfigInfo {
     pub escape_open: bool,
     pub last_agent_call: u64,
     pub admin_pending_until: u64,
+    /// How long the agent may stay silent before the escape opens.
+    pub escape_delay_ns: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +66,8 @@ pub struct VaultInfo {
     /// Exit requests listed on this vault: their value must stay liquid.
     pub requests: u32,
     pub open: bool,
+    /// A staking vault, the only adapter the contract has built: the others refuse `sync`.
+    pub staking: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,6 +184,7 @@ pub fn parse_config(v: &Value) -> Result<ConfigInfo, String> {
         escape_open: bool_of(v, "escape_open")?,
         last_agent_call: u64_of(v, "last_agent_call")?,
         admin_pending_until: u64_of(v, "admin_pending_until")?,
+        escape_delay_ns: u64_of(v, "escape_delay_ns")?,
     })
 }
 
@@ -221,6 +226,7 @@ pub fn parse_vault(v: &Value) -> Result<VaultInfo, String> {
         busy: bool_of(v, "busy")?,
         requests: u32::try_from(u64_of(v, "requests")?).map_err(|_| "too many requests")?,
         open: bool_of(v, "open")?,
+        staking: v["adapter"].as_str().ok_or("pool view without adapter")? == "staking",
     })
 }
 
@@ -378,9 +384,13 @@ mod tests {
             "tiers": [{"shares": "10000", "pk_raw": raw_key(), "issued": 0, "paid": 0}],
             "liquid": "5", "placed": "6", "withdrawing": "0", "fee_owed": "0", "total_shares": "7", "orphan": "0",
             "share_price": "8", "synced_at": 9, "max_assets": "10", "hourly_cap": "11", "frozen": false, "busy": false,
-            "busy_op": 0, "requests": 0, "open": false,
+            "busy_op": 0, "requests": 0, "open": false, "adapter": "staking",
         });
         let v = parse_vault(&vault).unwrap();
+        assert!(v.staking);
+        let mut lending = vault.clone();
+        lending["adapter"] = json!("lending");
+        assert!(!parse_vault(&lending).unwrap().staking);
         assert_eq!((v.liquid, v.placed, v.synced_at, v.tiers[0].0), (5, 6, 9, 10_000));
         let mut bad = vault.clone();
         bad["liquid"] = json!(5);

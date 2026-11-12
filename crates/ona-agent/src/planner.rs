@@ -250,6 +250,15 @@ pub fn plan(params: &Params, now: u64, config: &ConfigInfo, vaults: &[VaultInfo]
             }
         }
     }
+    // The contract counts only the agent's syncs, placements and paid exits as activity, never an issue, entry or
+    // leave. Once half the escape delay has passed without one, a sync of any free vault, even an empty one, tells the
+    // contract the agent is there; it also closes an escape the agent's own silence opened.
+    let active = actions.iter().any(|a| matches!(a, Action::Sync(_) | Action::Place(..)));
+    if !active && now >= config.last_agent_call.saturating_add(config.escape_delay_ns / 2) {
+        if let Some(id) = vaults.iter().position(|v| !v.busy && v.staking) {
+            actions.push(Action::Sync(id as u32));
+        }
+    }
     Plan { actions, settled: settled || (settle_now && params.settlement_period_ns > 0), steady }
 }
 
@@ -266,8 +275,10 @@ mod tests {
             network: "sandbox".into(),
             vault_count: 1,
             escape_open: false,
-            last_agent_call: 0,
+            // Recent activity: the keep-alive sync stays out of the tests that are not about it.
+            last_agent_call: u64::MAX / 2,
             admin_pending_until: 0,
+            escape_delay_ns: 7 * 24 * HOUR,
         }
     }
 
@@ -286,6 +297,7 @@ mod tests {
             busy: false,
             requests: 0,
             open: false,
+            staking: true,
         }
     }
 
@@ -414,6 +426,23 @@ mod tests {
         let m = Memory { vaults: vec![VaultMemory { last_steady: 10 * D, last_unstake: 0, ..Default::default() }], ..Default::default() };
         assert!(plan(&p, 10 * D + 5 * HOUR, &config(), &[v.clone()], &m, &[]).actions.is_empty(), "between two lines");
         assert_eq!(plan(&p, 11 * D, &config(), &[v], &m, &[]).actions, vec![Action::Unstake(0, 2 * NEAR)], "on the line");
+    }
+
+    #[test]
+    fn the_agent_tells_the_contract_it_is_there_even_with_nothing_placed() {
+        let empty = VaultInfo { total_shares: 0, ..vault(0, 0) };
+        let delay = config().escape_delay_ns;
+        let quiet = Memory { last_slot: u64::MAX, ..Memory::default() };
+        let at = |now: u64, last: u64| plan(&params(), now, &ConfigInfo { last_agent_call: last, ..config() }, &[empty.clone()], &quiet, &[]).actions;
+        assert!(at(1_000 * HOUR, 1_000 * HOUR - HOUR).is_empty(), "nothing to do yet");
+        assert_eq!(at(1_000 * HOUR, 1_000 * HOUR - delay / 2), vec![Action::Sync(0)], "half the escape delay without activity");
+        // Silent past the delay: the escape is open, and the agent's sync closes it.
+        let open = ConfigInfo { last_agent_call: 0, escape_open: true, ..config() };
+        assert_eq!(plan(&params(), 1_000 * HOUR, &open, &[empty.clone()], &quiet, &[]).actions, vec![Action::Sync(0)]);
+        let busy = VaultInfo { busy: true, ..empty.clone() };
+        assert!(plan(&params(), 1_000 * HOUR, &open, &[busy], &quiet, &[]).actions.is_empty(), "a busy vault cannot be synced");
+        let lending = VaultInfo { staking: false, ..empty.clone() };
+        assert_eq!(plan(&params(), 1_000 * HOUR, &open, &[lending, empty], &quiet, &[]).actions, vec![Action::Sync(1)], "only a staking vault syncs");
     }
 
     #[test]

@@ -541,7 +541,9 @@ note kept by the wallet is paid by the contract.
   (`message`, `recipient` = the pool, `nonce`); the depositing account's own wallet signs it (NEP-413), and the second call carries
   `depositor_signature` (`public_key`, `signature`). The message is
   `"ONA pool cash issue v1\npool: <pool>\naccount: <account>\nnotes: " || hex(SHA-256((tier || blinded point)*))`, so the agent
-  issues cash only for those points and only for that account; the contract refuses more cash than the account deposited. Both calls,
+  issues cash only for those points and only for that account; the contract refuses more cash than the account deposited. The
+  NEP-413 payload the wallet signs is laid out as `ona-agent` checks it (`crates/ona-agent/src/nep413.rs`), written from the
+  standard as recalled: it has not been checked against a real wallet's `signMessage`. Both calls,
   and the wallet's signature between them, must come within the preparation's 5 minutes. When the second call is refused, the client
   asks the agent for the signatures it already made (tiers issued before the refusal), keeps those notes and forgets the others; if
   that question gets no answer (network, Tor), nothing is forgotten and `pool_recover` asks again later. A deposit abandoned between
@@ -559,6 +561,19 @@ note kept by the wallet is paid by the contract.
   a leave from vault V points to V; it checks the account's `exit_limit` (`get_holder`) first, and the account is checked as a NEAR
   account id before anything is signed. What a step leaves over, less than one of the smallest notes, stays in the pool's cash and is
   shown as `left_in_cash`. Values read from the contract are combined with checked arithmetic.
+- **Exit requests and the escape** (`request_exit`, `escape_exit`, also as the commands `pool_request_exit` and
+  `pool_escape_exit`), for when the agent does not serve a holder. No agent is involved: `pool_execute` signs each chosen note's
+  exit as the contract checks it (CASH-EXIT-V1 for a cash note, EXIT-V2 with the vault and the owner's `min_amount` for a share
+  note, chosen with `from`), marks the note spending until the signature's deadline (29 days for a request, the contract's
+  limit being 30; 24 hours for an escape), and returns one `wallet_call` per note for the user's own wallet to send. A request
+  attaches the contract's storage fee for 336 bytes at 10^19 yoctoNEAR per byte (the documented NEAR price, not verified here),
+  given back when the request leaves the list less 80 bytes. An escape exit is prepared only while the contract shows the escape
+  open for those notes (`open` in `get_cash` or `get_vault`); while the agent is active the contract still pays only notes with
+  a listed request. Both check the paid account's exit limit first. The wallet records each request (note, paid account,
+  deadline): while it is live the note stays spending, and `escape_exit` takes it once the contract opens the escape for listed
+  notes (only to the account the request names); once it has expired the note can be requested again. A note ever named in a
+  request is never offered to an entry, leave or cash exit, which the contract would refuse. `pool_recover` marks a paid note
+  spent, or holds it again once its deadline has passed.
 - **Notes and signatures.** Every note has a fresh owner key. Owner signatures follow ENTER-V1, LEAVE-V1 and CASH-EXIT-V1 and
   expire 24 hours after they are made, so the agent can batch them. A note is marked spending, with that deadline, before its
   signature leaves. The agent's answer is one of: success (the note is spent, its new notes kept); a certain refusal (nothing sent,
@@ -619,7 +634,8 @@ note kept by the wallet is paid by the contract.
   counting what the agent already took out that hour; a refused call is public and names the vault. Exits made by others in the
   same hour (`escape_exit`) are not seen and can still use up the cap. Queued leaves are added to the reserve the planner keeps
   liquid. Nothing is queued while the escape is open on the cash (for an entry or a cash exit) or on the vault (for an entry or a
-  leave), since anyone could then spend the note. A request sent with an unknown outcome is sent again only in a window of its
+  leave), since anyone could then spend the note; when it is open only because the agent was silent (no announcement pending),
+  the agent first syncs a free staking vault (the next one if a sync fails), which closes it, and queues the request. A request sent with an unknown outcome is sent again only in a window of its
   kind, once per window. A request is not sent within 10 minutes of its owner's deadline; one whose deadline passes while
   it waits is refused and its note freed. Owner signatures last 24 hours, so a request can wait for a batch. With few users a request
   waits until enough others arrive; a batch of k requests hides each among k, not among all users (tested with a fake chain only).
@@ -658,8 +674,13 @@ note kept by the wallet is paid by the contract.
   (notes, owner signatures, outputs, accounts paid), the last 7 days of signatures and the blind-signing keys: the keys alone let them
   sign notes, and the signatures let them match a wallet's notes to their blinded points. Logs print no signature.
 - **Planner** (`crates/ona-agent/src/planner.rs`), every tick, from the vaults' figures and what the agent remembers: syncs every vault
-  holding shares or placed funds before its reading is 45 minutes old (which also keeps the agent active, so the escape stays shut);
-  withdraws unstaked funds after `ONA_AGENT_UNBOND_WAIT_SECS`; at a settlement (a new multiple of `ONA_AGENT_SETTLEMENT_SECS`, after
+  holding shares or placed funds before its reading is 45 minutes old; once half the escape delay has passed with no sync,
+  placement or paid exit (the only calls the contract counts as the agent's activity, never an issue, entry or leave), syncs a
+  free staking vault (the only adapter that answers `sync`) even if it holds nothing, so the escape never opens through the
+  agent's silence; withdraws unstaked funds after `ONA_AGENT_UNBOND_WAIT_SECS`, and counts them as back only when the chain
+  shows the vault free and its placed funds lower by the amount than right before the call (a sync earlier in the same tick may
+  have raised them with rewards; the contract's callback catches a refusal by the staking pool: the transaction succeeds and nothing comes back), so a
+  withdrawal not seen is tried again at a later tick; at a settlement (a new multiple of `ONA_AGENT_SETTLEMENT_SECS`, after
   `ONA_AGENT_MIN_ACTIVE` entries and leaves) places what exceeds the reserve (`ONA_AGENT_RESERVE_PERCENT` of the vault's assets), within
   the hourly cap, or unstakes what the reserve lacks. Defaults are not zero: 20 % reserve, a settlement every 30 minutes, after 10
   entries and leaves. Regular withdrawals (`ONA_AGENT_STEADY_YOCTO` every `ONA_AGENT_STEADY_SECS`, off by default; the period must

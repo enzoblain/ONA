@@ -655,6 +655,8 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
     /// Refuses while the escape is open on the cash (when `scope.0`) or on the vault: anyone may then spend the note
     /// with `escape_exit`, and a request waiting in the queue would be overtaken.
     fn escape_closed(&mut self, scope: (bool, Option<u32>)) -> Result<(), Reply> {
+        // Failing to wake changes nothing: the checks below read the escape again and refuse while it is open.
+        let _ = self.wake();
         if scope.0 && self.chain.cash().map_err(Self::chain_err)?.open {
             return Err(refused(409, "the cash's escape is open: no request is queued until it closes"));
         }
@@ -664,6 +666,48 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
             }
         }
         Ok(())
+    }
+
+    /// Whether a `withdraw` of `amount` from vault `v` reached the pool: the vault is free again (its callback ran)
+    /// and its placed funds went down by the amount since `before`.
+    fn withdrawn(&mut self, v: u32, amount: u128, before: Option<&VaultInfo>) -> Result<(), String> {
+        let before = before.ok_or("the vault could not be read before the withdraw: checked again at the next tick")?;
+        self.chain.begin()?;
+        let after = self.chain.vault(v)?;
+        if after.busy || after.withdrawing > 0 {
+            return Err("withdraw still running: checked again at the next tick".into());
+        }
+        if after.placed.saturating_add(amount) > before.placed {
+            return Err("withdraw not done: the staking pool returned nothing, tried again later".into());
+        }
+        Ok(())
+    }
+
+    /// When the escape is open only because the agent was silent (no announcement pending), a sync of a free vault,
+    /// which the contract counts as the agent's activity, closes it. Reads again at a new final block afterwards.
+    fn wake(&mut self) -> Result<(), String> {
+        let config = self.chain.config()?;
+        let now = self.chain.begin()?;
+        let silent = now >= config.last_agent_call.saturating_add(config.escape_delay_ns);
+        if !config.escape_open || !silent || now < config.admin_pending_until {
+            return Ok(());
+        }
+        let mut last = String::from("no free staking vault to sync");
+        for id in 0..config.vault_count {
+            let v = self.chain.vault(id)?;
+            if v.busy || !v.staking {
+                continue;
+            }
+            match self.chain.run(&Call::Sync(id)) {
+                Ok(()) => {
+                    self.chain.begin()?;
+                    return Ok(());
+                }
+                // Another vault may still answer.
+                Err(e) => last = e.message().to_string(),
+            }
+        }
+        Err(format!("cannot sync to close the escape: {last}"))
     }
 
     /// Records a checked note request and queues it. The record is written first; its note binding and its owner
@@ -1190,16 +1234,29 @@ impl<C: PoolChain, S: Store> Agent<C, S> {
         let mut memory = self.memory();
         let plan = planner::plan(&self.params, now, &config, &vaults, &memory, &demand);
         for action in &plan.actions {
+            // A withdrawal is judged against the vault as it stands right before it: an earlier sync of this tick may
+            // have raised its placed funds with the rewards.
+            let before = match action {
+                Action::Withdraw(v, _) => self.chain.begin().and_then(|_| self.chain.vault(*v)).ok(),
+                _ => None,
+            };
             let result = match *action {
                 Action::Sync(v) => self.chain.run(&Call::Sync(v)),
                 Action::Place(v, amount) => self.chain.run(&Call::Place(v, amount)),
                 Action::Unstake(v, amount) => self.chain.run(&Call::Unstake(v, amount)),
                 Action::Withdraw(v, amount) => self.chain.run(&Call::Withdraw(v, amount)),
             };
-            if result.is_ok() {
+            // A `withdraw` the staking pool refused is caught by the contract's callback: the transaction succeeds,
+            // nothing comes back. What the chain shows decides, and a withdrawal not seen is tried again later.
+            let done = match (action, &result) {
+                (Action::Withdraw(v, amount), Ok(())) => self.withdrawn(*v, *amount, before.as_ref()),
+                (_, Ok(())) => Ok(()),
+                (_, Err(e)) => Err(e.message().to_string()),
+            };
+            if done.is_ok() {
                 memory.apply(action, now);
             }
-            log.push(format!("{action:?}: {}", result.as_ref().map_or_else(|e| e.message().to_string(), |()| "ok".into())));
+            log.push(format!("{action:?}: {}", done.as_ref().map_or_else(|e| e.clone(), |()| "ok".into())));
         }
         for (v, line) in &plan.steady {
             memory.steady_line(*v, *line);

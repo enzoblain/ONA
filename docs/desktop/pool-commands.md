@@ -56,6 +56,8 @@ sends nothing to the relay. The values use the contract's public share prices.
 | `switch` | `from`, `to`, `amount` (shares of `from`, or `"all"`) | moving shares to another vault without an exit | `from`, `to`, `share_price`, `new_shares_value`, `left_in_cash`, `fees` |
 | `exit` | `from`, `amount` (shares of `from`, or `"all"`) | turning shares of `from` into cash notes, kept in the wallet | `from`, `cash_value`, `share_price`, `left_in_cash`, `fees` |
 | `exit_cash` | `to` (the account that deposited), `amount` (cash) | cash paid out to `to` | `to`, `received`, `exit_limit`, `fees` |
+| `request_exit` | `to`, `amount` (or `"all"`); `from` for share notes of that vault, then optional `min_amount` (yoctoNEAR per note) | filing exit requests from their own wallet, one per note, when the agent does not serve them | `to`, `received`, `exit_limit`, `fees` (`storage`, `request_deposit`, `request_deposit_back`), `warnings`, `from` and `min_amount` for share notes |
+| `escape_exit` | as `request_exit` | being paid directly by the contract once the escape is open, from their own wallet | as `request_exit`, without the request deposit |
 
 Every summary also has `op`, `amount`, `network`, `contract` and `expires_at`.
 
@@ -90,7 +92,24 @@ Every summary also has `op`, `amount`, `network`, `contract` and `expires_at`.
   separate operation the app can offer later: a payment right after a leave from a vault would point to that vault. A `switch` is
   prepared as leaves then entries, since no account is named, but stops after its leaves while the agent queues them: once
   `pool_recover` has the cash notes, the entries are a new `enter`.
-- **Exit limit.** `exit_cash` reads the paid account's limit from the contract (`get_holder`) and refuses more.
+- **Exit limit.** `exit_cash`, `request_exit` and `escape_exit` read the paid account's limit from the contract (`get_holder`)
+  and refuse more.
+- **When the agent does not serve.** `request_exit` and `escape_exit` (also sent directly as `{"cmd":"pool_request_exit",…}` and
+  `{"cmd":"pool_escape_exit",…}`, which prepare them) do not go through the agent. `pool_execute` signs each note's exit as the
+  contract checks it, marks the note `spending` until that signature's deadline, and replies one step per note, each with a
+  `wallet_call` (`receiver`, `method`, `args`, `attached`) that the app sends **with the user's own NEAR wallet, right away**:
+  - `request_exit` lists the note on the contract (the signature lasts 29 days, the contract's limit being 30), attaching a
+    storage deposit given back when the request leaves the list (less 80 bytes per note). If nobody pays it in time, the contract
+    opens its escape for listed notes after its escape delay;
+  - `escape_exit` is prepared only while the contract shows the escape open for these notes, and its signature lasts 24 hours.
+    While the agent is still active, the contract pays only notes that have a listed request: `escape_exit` therefore also
+    takes notes whose request is still live (they stay `spending` until the request's deadline), paid only to the account the
+    request names.
+
+  `pool_recover` follows these notes as the others: spent once paid, held again once the deadline is more than 10 minutes past.
+  The wallet remembers every request. A note named in a request can afterwards only leave by an exit, so it is never offered to
+  `enter`, `exit`, `switch` or `exit_cash`; once its request has expired it can be requested again. A share note's
+  request or escape shows its vault, and every exit names the paid account.
 
 `pool_execute` replies `executed` (the operation), `complete` and `steps` (what was done, in order). If a step fails after others
 succeeded (in a `switch` or with several notes), the reply has `complete: false`, the `error` and the steps already done. If the
