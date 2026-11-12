@@ -81,3 +81,12 @@ code » (presse-papiers général) n'existe qu'en Debug.
   serveur du téléphone seraient bloqués pendant chaque appel. À déplacer sur une file dédiée avant le vrai modèle.
 - Le plafond de connexions et le délai global du serveur Swift n'ont pas de test automatique (ceux de l'app Tauri en
   ont).
+
+## Real model
+
+Same settings and same rules as the Tauri app (docs/desktop/tauri.md, "Real model"), in
+`~/Library/Application Support/ONA/model.json`. The bridge takes them with `ona_core_new_with`, and the core's traffic
+goes through the app's tor, on a second SOCKS port. Tested with unit tests only, not against a relay yet.
+
+The bridge's release profile does not strip build-time dylibs (proc macros): the `strip` of Xcode 27 (beta) leaves them
+unloadable.

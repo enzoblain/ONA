@@ -35,6 +35,8 @@ pub struct TorService {
     started: Option<Instant>,
     /// tor's SOCKS port on 127.0.0.1, used only to check that our own onion address answers.
     socks_port: u16,
+    /// A second SOCKS port on 127.0.0.1, for everything ona-core sends (the relay, the pool agent, NEAR RPC nodes).
+    core_socks_port: u16,
     /// An attempt to reach the onion address, running on its own thread.
     probe: Option<Receiver<Result<(), String>>>,
     last_probe: Option<Instant>,
@@ -63,7 +65,7 @@ fn find_binary(candidates: impl Iterator<Item = PathBuf>, path: &[PathBuf], name
 
 impl TorService {
     pub fn new(root: PathBuf) -> Self {
-        Self { state: TorState::Off, root, child: None, started: None, socks_port: 0, probe: None, last_probe: None }
+        Self { state: TorState::Off, root, child: None, started: None, socks_port: 0, core_socks_port: 0, probe: None, last_probe: None }
     }
 
     pub fn onion(&self) -> Option<&str> {
@@ -80,8 +82,13 @@ impl TorService {
             self.state = TorState::Missing;
             return;
         };
-        self.socks_port = match free_local_port() {
-            Ok(p) => p,
+        let ports = free_local_port().and_then(|probe| Ok((probe, free_local_port()?)));
+        (self.socks_port, self.core_socks_port) = match ports {
+            Ok((probe, core)) if probe != core => (probe, core),
+            Ok(_) => {
+                self.state = TorState::Failed("no two free local ports".into());
+                return;
+            }
             Err(e) => {
                 self.state = TorState::Failed(e.to_string());
                 return;
@@ -106,11 +113,12 @@ impl TorService {
         // Paths quoted: they may contain spaces (Windows user folders). __OwningControllerProcess makes tor exit when
         // this app exits, even after a crash, so no orphan keeps the data folder locked. The SOCKS port listens on
         // 127.0.0.1 only: the app uses it to check that its onion address answers before showing the QR code.
-        // OnionTrafficOnly keeps other local programs from using it as a general anonymous proxy.
+        // OnionTrafficOnly keeps other local programs from using it as a general anonymous proxy. The second port is
+        // ona-core's: the relay and the NEAR RPC nodes are ordinary host names, so it cannot be onion-only.
         std::fs::write(&torrc, format!(
-            "SocksPort 127.0.0.1:{} OnionTrafficOnly\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
+            "SocksPort 127.0.0.1:{} OnionTrafficOnly\nSocksPort 127.0.0.1:{}\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
              __OwningControllerProcess {}\nLog notice stdout\n",
-            self.socks_port, escape(&data), escape(&hs), std::process::id()
+            self.socks_port, self.core_socks_port, escape(&data), escape(&hs), std::process::id()
         ))?;
         let mut command = Command::new(binary);
         command.arg("-f").arg(&torrc).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -172,6 +180,11 @@ impl TorService {
         let host = std::fs::read_to_string(self.root.join("hs").join("hostname")).ok()?;
         let host = host.trim();
         host.ends_with(".onion").then(|| host.to_owned())
+    }
+
+    /// The SOCKS port for ona-core's traffic, once the onion service answers (so tor is connected to the network).
+    pub fn core_socks(&self) -> Option<u16> {
+        matches!(self.state, TorState::Published(_)).then_some(self.core_socks_port)
     }
 
     pub fn stop(&mut self) {

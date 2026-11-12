@@ -595,9 +595,11 @@ struct SettingsTests {
     /// Tor exits with the app.
     @MainActor
     @Test func torExitsWithTheApp() {
-        let torrc = TorService.torrc(data: "/a b/data", hs: "/a\"b/hs", port: 49152, owner: 4242, socksPort: 50123)
+        let torrc = TorService.torrc(data: "/a b/data", hs: "/a\"b/hs", port: 49152, owner: 4242, socksPort: 50123,
+                                     coreSocksPort: 50124)
         #expect(torrc.contains("__OwningControllerProcess 4242"))
-        #expect(torrc.contains("SocksPort 127.0.0.1:50123"))
+        #expect(torrc.contains("SocksPort 127.0.0.1:50123 OnionTrafficOnly\n"))
+        #expect(torrc.contains("SocksPort 127.0.0.1:50124\n"))
         #expect(torrc.contains("HiddenServicePort 80 127.0.0.1:49152"))
         #expect(torrc.contains(#"HiddenServiceDir "/a\"b/hs""#))
     }
@@ -645,3 +647,35 @@ struct OnionPublishedTests {
     }
 }
 
+
+@Suite struct RealModelTests {
+    private func folder() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "ona-real-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test func noSettingsFileKeepsTheFakeModel() throws {
+        let setup = RealModel.setup(file: try folder().appending(path: "model.json"), coreSocks: nil)
+        let core = OnaCoreMission(setup: setup)
+        #expect(core.dispatch(["cmd": "exposure"])["mode"] as? String == "mock")
+    }
+
+    @Test func anUnreadableSettingsFileIsRefusedNotIgnored() throws {
+        let file = try folder().appending(path: "model.json")
+        try Data("not json".utf8).write(to: file)
+        let reply = OnaCoreMission(setup: RealModel.setup(file: file, coreSocks: 9050)).dispatch(["cmd": "exposure"])
+        #expect(reply["ok"] as? Bool == false)
+        #expect(reply["mode"] as? String == "real")
+        #expect((reply["error"] as? String)?.hasPrefix("model.json") == true)
+    }
+
+    @Test func theRealModelWaitsForTor() throws {
+        let file = try folder().appending(path: "model.json")
+        try Data(#"{"relay_url":"https://relay.example.org","model":"m","max_tokens":200,"token_budget":2000,"tokens_file":"/nonexistent"}"#.utf8)
+            .write(to: file)
+        let reply = OnaCoreMission(setup: RealModel.setup(file: file, coreSocks: nil)).dispatch(["cmd": "open", "mission": "x"])
+        #expect(reply["mode"] as? String == "real")
+        #expect((reply["error"] as? String)?.contains("Tor") == true)
+    }
+}

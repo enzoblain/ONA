@@ -22,3 +22,8 @@ serde_json = "=1.0.154"
 lto = true
 codegen-units = 1
 strip = "debuginfo"
+
+# Proc macros and build scripts run on this Mac while building: not stripped. The strip of Xcode 27 (beta) leaves
+# their dylibs unloadable ("mis-aligned LINKEDIT string pool").
+[profile.release.build-override]
+strip = "none"

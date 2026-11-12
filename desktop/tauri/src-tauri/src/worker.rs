@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::engine::ChatEngine;
 use crate::pairing::PairingAuthority;
 use crate::server::{self, Exposure, PhoneServer};
+use crate::real::{ModelSettings, SharedSetup};
 use crate::tor::{TorService, TorState};
 use crate::{http, router};
 
@@ -59,6 +60,8 @@ pub struct App {
     /// QR code of the current payload, as SVG, rebuilt when the payload changes.
     qr: Option<(String, String)>,
     jobs: Sender<Job>,
+    /// What new cores are made with: `model.json`, and tor's port for the core once tor is ready.
+    setup: SharedSetup,
 }
 
 type Job = Box<dyn FnOnce(&mut App) + Send>;
@@ -77,9 +80,11 @@ impl Worker {
         let sender = jobs.clone();
         thread::spawn(move || {
             let mode = stored_mode(&data_dir, LOCAL_MODE_ALLOWED);
+            let setup = SharedSetup::default();
+            setup.borrow_mut().model = ModelSettings::load(&data_dir);
             let mut app = App {
                 pairing: PairingAuthority::new(&name, Some(data_dir.join("pairing.json"))),
-                engine: ChatEngine::with_ona_core(),
+                engine: ChatEngine::with_ona_core(setup.clone()),
                 tor: TorService::new(data_dir.join("tor")),
                 server: None,
                 server_error: None,
@@ -89,6 +94,7 @@ impl Worker {
                 last_request: None,
                 qr: None,
                 jobs: sender,
+                setup,
             };
             app.serve();
             run(app, inbox);
@@ -120,6 +126,7 @@ fn run(mut app: App, inbox: Receiver<Job>) {
                     app.engine.tick();
                     app.pairing.tick();
                     app.tor.poll();
+                    app.setup.borrow_mut().core_socks = app.tor.core_socks();
                     if app.server.is_none() {
                         app.serve(); // listening failed: try again
                     }

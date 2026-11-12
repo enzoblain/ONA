@@ -83,3 +83,32 @@ le téléphone : à réserver aux tests. La fenêtre ne reçoit que l'image du Q
 - Le fichier d'appairage et la clé du service onion (`tor/hs`) sous Windows n'ont pas de droits restreints au-delà du
   dossier de l'utilisateur (pas d'ACL posée). Sous Linux, la clé onion est un fichier simple dans un dossier 0700 : qui
   la copie peut publier la même adresse ; les réponses signées par la clé de l'ordinateur limitent alors l'usurpation.
+
+## Real model
+
+Without settings, ona-core keeps its fake model (`mode: mock`) and the app and the phone show the simulation banner. To
+use the real one, write `model.json` in the app's data folder (next to `pairing.json`):
+
+```json
+{
+  "relay_url": "https://relay.example.org",
+  "model": "<a model the relay allows>",
+  "max_tokens": 512,
+  "token_budget": 20000,
+  "tokens_file": "/path/to/request-tokens"
+}
+```
+
+The names are those of `ona real` (docs/INSTALL.md, "Use the real model"); `token_budget` is for each conversation.
+`tokens_file` holds one request token per line, readable by its owner only.
+
+- Every connection ona-core opens goes through the app's own tor, on a second SOCKS port that is not onion-only
+  (`ONA_REQUIRE_TOR`). The real model is used only in Tor mode, once the QR code is shown; before that, or in the
+  local-network mode, a conversation is refused with the reason. Through Tor, the relay must be an `https` host name
+  or an `http` onion address: an IP address is refused by ona-core.
+- An unreadable `model.json`, or settings ona-core refuses, give a core that refuses every command with the reason: the
+  app never falls back to the fake model in silence.
+- The NEAR AI key is not in the app: the relay holds it (docs/INSTALL.md, "Run the relay").
+- Only one conversation at a time can use the tokens file (ona-core locks it).
+
+Tested with unit tests only (settings, refusals, a core set up through a SOCKS port). Not run against a relay yet.

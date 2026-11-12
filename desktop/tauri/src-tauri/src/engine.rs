@@ -268,8 +268,9 @@ impl ChatEngine {
         Self { chats: Vec::new(), mode: "mock".into(), make_core: Box::new(make_core), count: 0, pool: None }
     }
 
-    pub fn with_ona_core() -> Self {
-        Self::new(|| Box::new(Guarded::new(ona_core::Core::new())))
+    /// ona-core cores, with the fake model or the real one as `setup` says when each core is made.
+    pub fn with_ona_core(setup: crate::real::SharedSetup) -> Self {
+        Self::new(move || crate::real::make_core(&setup.borrow()))
     }
 
     fn sorted(&self) -> Vec<&Chat> {
@@ -594,7 +595,7 @@ mod tests {
 
     #[test]
     fn runs_the_full_mission_with_ona_core() {
-        let mut engine = ChatEngine::with_ona_core();
+        let mut engine = ChatEngine::with_ona_core(Default::default());
         let chat = engine.create("  Trouve-moi un avocat en droit du travail à Paris  ").unwrap();
         assert_eq!(engine.list_json()["chats"][0]["status"], "waiting");
         let plan = pending_of(&engine, &chat);
@@ -635,7 +636,7 @@ mod tests {
 
     #[test]
     fn rejecting_stops_the_mission() {
-        let mut engine = ChatEngine::with_ona_core();
+        let mut engine = ChatEngine::with_ona_core(Default::default());
         let chat = engine.create("Trouve un avocat").unwrap();
         let plan = pending_of(&engine, &chat);
         engine.confirm(plan["id"].as_str(), Some("reject"), None, None).unwrap();
@@ -648,7 +649,7 @@ mod tests {
 
     #[test]
     fn refuses_bad_text_and_unknown_chats() {
-        let mut engine = ChatEngine::with_ona_core();
+        let mut engine = ChatEngine::with_ona_core(Default::default());
         assert_eq!(engine.create("   "), Err(ProtocolError::BadText));
         assert_eq!(engine.create(&"a".repeat(MAX_TEXT + 1)), Err(ProtocolError::BadText));
         assert_eq!(engine.post("bonjour", "chat-9"), Err(ProtocolError::UnknownChat));
@@ -665,7 +666,7 @@ mod tests {
     /// Confirmation and chat ids never repeat (they used to restart at chat-1-c-1).
     #[test]
     fn ids_are_random_and_never_reused() {
-        let mut engine = ChatEngine::with_ona_core();
+        let mut engine = ChatEngine::with_ona_core(Default::default());
         let chat = engine.create("Trouve un avocat").unwrap();
         let other = engine.create("Trouve un avocat").unwrap();
         assert_ne!(chat, other);
@@ -682,7 +683,7 @@ mod tests {
     /// Each confirmation carries the digest of what it shows.
     #[test]
     fn confirmations_carry_the_digest_of_their_content() {
-        let mut engine = ChatEngine::with_ona_core();
+        let mut engine = ChatEngine::with_ona_core(Default::default());
         let chat = engine.create("Trouve un avocat").unwrap();
         let plan = pending_of(&engine, &chat);
         let steps: Vec<String> = plan["plan"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_owned()).collect();
@@ -773,7 +774,7 @@ mod tests {
         assert_eq!(view["portfolio"]["vault_count"], 2);
         assert!(view["portfolio"].get("ok").is_none());
         // ona-core without a pool wallet says so.
-        let mut real = ChatEngine::with_ona_core();
+        let mut real = ChatEngine::with_ona_core(Default::default());
         assert_eq!(real.pool_portfolio(), Err("no pool wallet configured".to_owned()));
     }
 

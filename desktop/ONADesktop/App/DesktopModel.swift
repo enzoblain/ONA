@@ -45,7 +45,9 @@ final class DesktopModel {
 
     init() {
         pairing = PairingAuthority(name: Host.current().localizedName ?? "Mon Mac", store: KeychainPairingStore())
-        engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let tor = self.tor
+        // Read when each core is made: a change to model.json, or tor becoming ready, applies to the next conversation.
+        engine = ChatEngine(makeCore: { OnaCoreMission(setup: RealModel.setup(coreSocks: tor.coreSocks)) })
         mode = ConnectionMode(rawValue: LocalModePolicy.resolve(stored: UserDefaults.standard.string(forKey: "connectionMode"))) ?? .tor
         let router = PhoneRouter(pairing: pairing, engine: engine)
         router.onRequest = { [weak self] line in

@@ -17,6 +17,8 @@ public final class TorService {
     }
 
     public private(set) var state: State = .off
+    /// tor's second SOCKS port, for everything ona-core sends (the relay, the pool agent, NEAR RPC nodes).
+    private var coreSocksPort: UInt16?
     private var process: Process?
     private var watch: Task<Void, Never>?
 
@@ -34,16 +36,24 @@ public final class TorService {
         return nil
     }
 
+    /// The SOCKS port for ona-core, once the onion service answers (so tor is connected to the network).
+    public var coreSocks: UInt16? {
+        if case .published = state { return coreSocksPort }
+        return nil
+    }
+
     /// The torrc. Paths quoted (escaped); `__OwningControllerProcess` makes tor exit when this app exits, even after a
     /// crash, so no orphan tor keeps publishing the onion address towards a port another program could take.
     /// The SOCKS port listens on 127.0.0.1 only: the app uses it to check that its onion address answers before
-    /// showing the QR code.
-    static func torrc(data: String, hs: String, port: UInt16, owner: Int32, socksPort: UInt16) -> String {
+    /// showing the QR code; OnionTrafficOnly keeps other local programs from using it as a general anonymous proxy. The
+    /// second port is ona-core's: the relay and the NEAR RPC nodes are ordinary host names, so it cannot be onion-only.
+    static func torrc(data: String, hs: String, port: UInt16, owner: Int32, socksPort: UInt16, coreSocksPort: UInt16) -> String {
         func quoted(_ path: String) -> String {
             "\"" + path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
         }
         return """
         SocksPort 127.0.0.1:\(socksPort) OnionTrafficOnly
+        SocksPort 127.0.0.1:\(coreSocksPort)
         DataDirectory \(quoted(data))
         HiddenServiceDir \(quoted(hs))
         HiddenServicePort 80 127.0.0.1:\(port)
@@ -68,12 +78,14 @@ public final class TorService {
                 try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
             }
             let torrc = Self.root.appending(path: "torrc")
-            guard let socksPort = SocksProbe.freeLocalPort() else {
+            guard let socksPort = SocksProbe.freeLocalPort(), let coreSocksPort = SocksProbe.freeLocalPort(),
+                  socksPort != coreSocksPort else {
                 state = .failed("aucun port local libre pour tor")
                 return
             }
+            self.coreSocksPort = coreSocksPort
             try Self.torrc(data: data.path, hs: hs.path, port: port, owner: ProcessInfo.processInfo.processIdentifier,
-                           socksPort: socksPort)
+                           socksPort: socksPort, coreSocksPort: coreSocksPort)
                 .write(to: torrc, atomically: true, encoding: .utf8)
 
             let process = Process()
@@ -120,6 +132,7 @@ public final class TorService {
         process?.terminationHandler = nil
         process?.terminate()
         process = nil
+        coreSocksPort = nil
         state = .off
     }
 }
