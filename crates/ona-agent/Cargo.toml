@@ -1,0 +1,27 @@
+[package]
+name = "ona-agent"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[[bin]]
+name = "ona-agent"
+path = "src/main.rs"
+
+[dependencies]
+ona-server = { path = "../ona-server" }
+ona-near = { path = "../ona-near" }
+ona-token = { path = "../ona-token" }
+ona-wallet = { path = "../ona-wallet" }
+serde_json = "=1.0.154"
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+bs58 = "=0.5.1"
+ed25519-dalek = "=2.2.0"
+rand = "=0.8.8"
+zeroize = "=1.9.1"
+
+[dev-dependencies]
+ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
+ona-core = { path = "../ona-core" }

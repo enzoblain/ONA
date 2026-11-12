@@ -8,6 +8,7 @@ pub mod e2ee;
 pub mod gate;
 pub mod journal;
 pub mod pool;
+pub mod pool_agent;
 pub mod pseudonym;
 pub mod quote;
 pub mod reader;

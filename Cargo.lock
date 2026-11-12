@@ -1960,6 +1960,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ona-agent"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "bs58 0.5.1",
+ "ed25519-dalek",
+ "ona-core",
+ "ona-near",
+ "ona-server",
+ "ona-token",
+ "ona-wallet",
+ "rand",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
 name = "ona-anchor"
 version = "0.0.1"
 dependencies = [

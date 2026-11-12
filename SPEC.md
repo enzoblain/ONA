@@ -6,7 +6,7 @@
 Under `crates/`: `ona-token` crypto and token format · `ona-mint` NEAR contract · `ona-registry` NEAR contract · `ona-signer` issuing
 loop · `ona-server` relay · `ona-wallet` encrypted wallet file · `ona-core` local mission core and CLI · `ona-sandbox` deployment and
 gas harness · `ona-anchor` journal anchoring aggregator · `ona-pool` NEAR contract holding the funds the agent places · `ona-near` NEAR
-RPC client · `ona-deploy` deployment tool · `ona-crowd` crowd simulator.
+RPC client · `ona-deploy` deployment tool · `ona-crowd` crowd simulator · `ona-agent` the pool's agent.
 
 ## Curve choice
 Message and signature in **G1**, public key in **G2**. 48-byte tokens. All points reach `pairing_check`, which rejects
@@ -532,11 +532,25 @@ note kept by the wallet is paid by the contract.
 - **Deposit.** A `deposit` call for the user's own wallet (ONA does not sign it), at least the contract's 0.1 NEAR minimum, with a
   0.01 NEAR storage margin (an estimate; the unused part stays refundable); then cash notes for the amount, largest tiers first,
   signed blind by the agent (`issue_cash`). The preparation lists the recommended amounts (100, 500 and 2,000 NEAR by default,
-  `ONA_POOL_RECOMMENDED_NEAR`) and warns about any other amount: an unusual amount is easier to link to its exit. The agent must
-  authenticate the depositor before issuing cash (not built); the contract refuses more cash than the account deposited.
+  `ONA_POOL_RECOMMENDED_NEAR`) and warns about any other amount: an unusual amount is easier to link to its exit. The deposit's
+  `pool_execute` runs twice: the first call makes the cash notes (saved before anything leaves) and returns `sign_message`
+  (`message`, `recipient` = the pool, `nonce`); the depositing account's own wallet signs it (NEP-413), and the second call carries
+  `depositor_signature` (`public_key`, `signature`). The message is
+  `"ONA pool cash issue v1\npool: <pool>\naccount: <account>\nnotes: " || hex(SHA-256((tier || blinded point)*))`, so the agent
+  issues cash only for those points and only for that account; the contract refuses more cash than the account deposited. Both calls,
+  and the wallet's signature between them, must come within the preparation's 5 minutes. When the second call is refused, the client
+  asks the agent for the signatures it already made (tiers issued before the refusal), keeps those notes and forgets the others; if
+  that question gets no answer (network, Tor), nothing is forgotten and `pool_recover` asks again later. A deposit abandoned between
+  its two calls has its notes forgotten when the preparation expires.
 - **Entries, leaves, exits.** An entry spends cash notes for share notes at the vault's price rounded up, computed from the public
   figures as the contract does (with `orphan`, the part of the vault no share owns); a leave spends share notes for cash notes at the
-  price rounded down; a switch is leaves then entries, run together since no account is named. `exit` is only the leaves: it names
+  price rounded down; a switch is leaves then entries, in one preparation since no account is named. The agent queues every entry,
+  leave and cash exit (see Pool agent), so its first answer is "outcome unknown": `pool_recover`, later, collects the new notes, and
+  a switch stops after its leaves, the entries following as a new operation once the cash notes are back. A request the agent
+  drops (its owner's deadline passed while it waited, the escape spent its note, the chain refused it) is never signed: the app
+  learns it from `pool_recover`, which holds the note again (`held_again`) once its deadline is more than 10 minutes past and the
+  note is still unspent, or marks it spent if the escape took it. The new notes prepared for that request stay listed in
+  `awaiting_signature`; forgetting them is not built. `exit` is only the leaves: it names
   no account and leaves the cash in the wallet. Paying an account is `exit_cash`, a separate operation, since a `pay_exit` right after
   a leave from vault V points to V; it checks the account's `exit_limit` (`get_holder`) first, and the account is checked as a NEAR
   account id before anything is signed. What a step leaves over, less than one of the smallest notes, stays in the pool's cash and is
@@ -560,11 +574,101 @@ note kept by the wallet is paid by the contract.
 - **What leaves the computer.** `pool_portfolio` and every preparation read `get_config`, `get_cash` and `get_vault` for every vault,
   on final blocks, whatever the user holds; nothing goes to the relay. `exit_cash` also reads `get_holder` for the paid account,
   `pool_recover` `is_spent` for its spending notes. The agent receives the signed notes it must submit.
-- **Not built.** The transport to the agent (`PoolAgent`): with a real wallet the agent is `NoAgent`, every execution answers
-  `no connection to the pool agent yet`, no agent call is made and the notes prepared for it are forgotten. A deposit sent from a wallet now could not become cash and would wait for a refund. Configuring a pool wallet through
-  the C bridge. Checking on chain that the user's deposit arrived before asking for cash. The contract's minimum of live notes per
-  tier and its waiting rules are not planned around: the agent may refuse, and the note is then held again. Tested against a fake
-  contract and a fake agent only.
+- **The agent.** `pool_agent::HttpAgent` speaks `ona-agent`'s HTTP API when `ONA_POOL_AGENT_URL` is set (`https`, or `http` to the
+  machine itself, a final `/` ignored; no redirect, no proxy from the environment; any `e2ee::Transport` can carry it, Tor included).
+  Each operation opens a new connection, so a cash issue and the entry that follows share none; through Tor a host passes
+  `ona-tor`'s transport, which draws new SOCKS credentials each time it is created, so Tor keeps each operation on its own circuit
+  (`IsolateSOCKSAuth`, Tor's default; not tested over the real Tor network). 200 is
+  done; 202, a 5xx or a transport failure is an unknown outcome; any other status is a certain refusal. Without the variable the agent is
+  `NoAgent`, which refuses every call before anything is sent; the notes prepared for a refused operation are forgotten.
+- **Not built.** Configuring a pool wallet through the C bridge. Checking on chain that the user's deposit arrived before asking for
+  cash (the agent checks it). The contract's minimum of live notes per tier and its waiting rules are not planned around: the agent
+  may refuse, and the note is then held again. Tested against a fake contract, with a fake agent and with the real agent over HTTP on
+  the machine itself.
+
+## Pool agent (`crates/ona-agent`)
+**Never run against a real chain, not in an enclave.** The program that acts on `ona-pool` for its users.
+- **Keys.** One blind-signing BLS key per cash tier and per tier of each vault, in one file readable by its owner only, after the type
+  line `ONA-POOL-AGENT-KEYS-V1`. The agent refuses to start unless they are the contract's keys and its account is the pool's agent.
+- **Store.** A key-value log built like the relay's: created once with the keys (`init-store`), a first line binding it to the keys and
+  the pool, readable by its owner only, held by one process through `<store>.lock` (stopped if that file is removed or replaced), every
+  write synced, a torn last line cut at opening, rewritten atomically. Requests, their state and every signature made live there.
+- **Requests** (HTTP on `127.0.0.1`, through the relay's strict HTTP front; routes in `crates/ona-agent/src/api.rs`). Checked off
+  chain first, with the keys held here and this machine's clock (5 minutes of margin), before any RPC read: the note's BLS signature
+  under its tier key and domain tag, its owner's signature for exactly this operation, the output tiers and counts against the
+  blinded points (at most 64), valid points and the deadline. Then, at a pinned final block: the deadline again and the note not
+  spent. A request is recorded before anything else and answered from the record when repeated: a done request returns the same
+  signatures, a queued or sent one answers 202. A note serves one request: another request naming it is refused until the first is
+  refused for good.
+- **One owner signature, one set of points.** The first request carrying a note's owner signature fixes its blinded points (or, for
+  a cash exit, its account) until that signature's deadline: a later request with the same signature and other points is refused,
+  even after the first was refused. A refused transaction is public (note, owner signature, outputs, deadline): without this binding
+  anyone could replay it with their own points and receive the new notes. The owner can sign again with another deadline.
+- **Queue and batches** (`ONA_AGENT_WINDOW_SECS`, `ONA_AGENT_MIN_BATCH`, `ONA_AGENT_MIN_DELAY_SECS`, `ONA_AGENT_JITTER_SECS`; defaults
+  15 minutes, 5, 10 minutes and 50 minutes). Entries, leaves and cash exits are queued, never sent on arrival. Each waits at least
+  the minimum delay plus a random part of the jitter, drawn for each request, then leaves only in a processing window holding at
+  least the minimum batch of requests of its class that can go now, in random order, once per window: the vault's price is made
+  fresh (synced first) and the funds checked before the batch is counted, so k requests leave together or none does. Windows
+  alternate between entries and leaves, and cash exits, so a payment never leaves in the window of a leave. A leave or a cash exit
+  waits while the batch's outflows together exceed the liquid funds, less what the vault's listed exit requests may claim (the
+  contract publishes how many there are, not their value: each counts as one of the vault's largest notes), or the hourly cap,
+  counting what the agent already took out that hour; a refused call is public and names the vault. Exits made by others in the
+  same hour (`escape_exit`) are not seen and can still use up the cap. Queued leaves are added to the reserve the planner keeps
+  liquid. Nothing is queued while the escape is open on the cash (for an entry or a cash exit) or on the vault (for an entry or a
+  leave), since anyone could then spend the note. A request sent with an unknown outcome is sent again only in a window of its
+  kind, once per window. A request is not sent within 10 minutes of its owner's deadline; one whose deadline passes while
+  it waits is refused and its note freed. Owner signatures last 24 hours, so a request can wait for a batch. With few users a request
+  waits until enough others arrive; a batch of k requests hides each among k, not among all users (tested with a fake chain only).
+- **Signing.** Only for work the agent itself did. A note request is signed only when one of its own transactions (the agent keeps
+  their hashes) has a final success on both read endpoints (`tx`, `wait_until: FINAL`); a note being spent is not enough, since
+  `escape_exit` or a listed request can spend it too. A request still queued whose note is found spent is refused; a sent one whose
+  transactions all failed is refused; one whose outcome stays unknown is refused two days after its deadline. A cash issue is signed
+  once a read through two RPC endpoints that agree on a final block shows the account's issued cash grew by the amount. The
+  endpoint that sent a transaction is never believed alone. A vault
+  read more than 50 minutes ago is synced before an entry or a leave, since the contract uses a price only within the hour.
+- **Cash issue.** Needs a NEP-413 signature of the request's message (see Pool commands) by a key the chain shows as a full-access key
+  of the account (`view_access_key`), and enough of the account's deposits not yet turned into cash, at most
+  `ONA_AGENT_ISSUES_PER_HOUR` issues per account per hour (6 by default, counted in memory). Cash issues are not queued: the client
+  waits for them. One `issue_cash` per tier; amounts are computed with checked arithmetic. An issue whose outcome is unknown is never
+  resent: it is confirmed later from the account's issued cash, and blocks further issues for that account until then, until both
+  read endpoints report a final failure of the transaction (`tx` by its hash; one endpoint alone decides nothing), or
+  until two days have passed (a NEAR transaction stops being valid about a day after the block it names, not verified), when it is
+  taken as never landed. Such an issue was sent, with no proof it failed: the account's deposits stay refundable on chain either way.
+  Tiers already issued keep their signatures, available through `/signatures`.
+- **Note operations.** An entry, leave or cash exit whose outcome is unknown is sent again, in later windows of its kind, until the
+  note is seen spent (then confirmed as above) or its owner's deadline has passed at a final block (then refused, and the note
+  freed): the contract spends a note once, so sending again cannot pay twice.
+- **Crash between two writes.** The record is written first, then the owner signature's binding, then the note's (for a cash issue,
+  the record, then the account's lock). Each tick restores a binding missing after its record, and removes a note binding or an
+  account lock left behind by a request that finished; a binding or lock pointing to a finished request holds nothing meanwhile.
+- **Kept only as long as needed** (`ONA_AGENT_RETENTION_SECS`, 7 days by default). A finished record keeps no account, vault, note or
+  deadline, only its state and signatures. Finished records and the signatures kept for `/signatures` are deleted once the retention
+  has passed; an owner signature's binding once its deadline has passed. After each purge the file is rewritten atomically without
+  them; the old blocks are not wiped from the disk. Someone who seizes the disk reads the queued requests
+  (notes, owner signatures, outputs, accounts paid), the last 7 days of signatures and the blind-signing keys: the keys alone let them
+  sign notes, and the signatures let them match a wallet's notes to their blinded points. Logs print no signature.
+- **Planner** (`crates/ona-agent/src/planner.rs`), every tick, from the vaults' figures and what the agent remembers: syncs every vault
+  holding shares or placed funds before its reading is 45 minutes old (which also keeps the agent active, so the escape stays shut);
+  withdraws unstaked funds after `ONA_AGENT_UNBOND_WAIT_SECS`; at a settlement (a new multiple of `ONA_AGENT_SETTLEMENT_SECS`, after
+  `ONA_AGENT_MIN_ACTIVE` entries and leaves) places what exceeds the reserve (`ONA_AGENT_RESERVE_PERCENT` of the vault's assets), within
+  the hourly cap, or unstakes what the reserve lacks. Defaults are not zero: 20 % reserve, a settlement every 30 minutes, after 10
+  entries and leaves. Regular withdrawals (`ONA_AGENT_STEADY_YOCTO` every `ONA_AGENT_STEADY_SECS`, off by default; the period must
+  be a multiple of 3 days) follow a fixed grid of multiples of the period, whatever the users do, so their timing says nothing
+  about a leave. Each runs within an hour of its grid line or not at all: a line missed while the agent was down, or blocked by a
+  settlement's unstake less than 3 days before, is skipped, never run late. Nothing is placed while an
+  announcement is pending, while the escape is open, or in a frozen, open or busy vault; the agent's own `unstake` runs at most once
+  per vault every 3 days, as the contract allows: the reserve refills slowly, and a leave larger than the liquid funds waits days.
+- **Known limits, not fixed.** The agent sees every request in clear (note, outputs, account paid) and their arrival times; batches,
+  delays and alternating windows only hide the link from people who watch the chain. The agent holds the blind-signing keys outside
+  any enclave. Batches are made of separate transactions sent one after another in one window, not one transaction. A crash after a
+  note request's transaction left and before its hash was written leaves the agent unable to confirm it: the request is refused
+  two days after its deadline even if the transaction succeeded, and its new notes are never signed.
+- **Not built.** Paying listed exit requests (`pay_request`: the contract has no view listing their nullifiers), noise moves, yield
+  credited in whole notes, batching several users' entries into one transaction, limits per client on note requests (all clients
+  arrive through one front, so limits are per route for all together; cash issues are limited per account), wiping the disk's free
+  blocks, an enclave. Requests are served one at a time, chain calls included. The NEP-413 layout is written from the standard as
+  recalled, not verified against a wallet; the RPC formats, `tx_status` included, are from the NEAR documentation, not verified
+  against a node; gas budgets are not measured.
 
 ## Relay (`crates/ona-server`)
 HTTP/1.1 front (`server/src/http.rs`) and a fake relay for front ends (`ona-mock-relay [port]`, localhost only, with a free-credit

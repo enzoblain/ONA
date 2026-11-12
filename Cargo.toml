@@ -15,6 +15,7 @@ members = [
     "crates/ona-anchor",
     "crates/ona-crowd",
     "crates/ona-pool",
+    "crates/ona-agent",
 ]
 
 # Used only to build the NEAR contracts to wasm.

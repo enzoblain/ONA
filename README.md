@@ -88,6 +88,7 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-mint` | NEAR contract: holds the reserve, verifies blind BLS12-381 tokens, pays recipients directly, returns blinded change | Rust |
 | `ona-registry` | NEAR contract: published measurements, journal anchors, incident level | Rust |
 | `ona-pool` | NEAR contract with no access key: holds the funds the agent places, only in listed vaults, and pays exits only to accounts that deposited | Rust |
+| `ona-agent` | The pool's agent: blind-signs cash and share notes after the contract has done what they stand for, calls the contract with the agent's key, and moves the vaults' money on a schedule | Rust |
 
 ## How paying works (planned)
 
@@ -111,7 +112,8 @@ with the content, but the account, the network address, the payment and the agen
 | `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done; the `ona-relay` program has not run yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
 | `ona-wallet` encrypted wallet file | done, keychain not wired in; a wallet without its seal file is refused by design (`open_adopting_unsealed` adopts one explicitly) | native tests |
 | `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
-| `ona-core` pool commands (deposit, enter, switch, exit to cash, cash payout, portfolio, recovery; prepare then execute once) and pool notes in `ona-wallet` | done; the transport to the pool agent and the bridge's wallet setup are not built ([commands](docs/desktop/pool-commands.md)) | fake pool contract and fake agent only |
+| `ona-core` pool commands (deposit, enter, switch, exit to cash, cash payout, portfolio, recovery; prepare then execute once) and pool notes in `ona-wallet` | done; the HTTP client of the agent is built (`ONA_POOL_AGENT_URL`); the bridge's wallet setup is not ([commands](docs/desktop/pool-commands.md)) | fake pool contract with a fake agent, and with the real agent over HTTP on this machine |
+| `ona-agent` pool agent: blind-signing keys, HTTP API, durable store with retention and purge, checks before any gas, depositor check by wallet signature (NEP-413), queue sending entries, leaves and cash exits in delayed batches, planner (reserve, net settlement, steady withdrawals on a fixed grid) | done, **never run against a real chain**, not in an enclave; the NEP-413 format is not verified against a wallet; the agent itself sees every request | fake pool contract only, and the client core against it over HTTP on this machine |
 | `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave. The same protocol passed one real call from a test script |
 | Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol v1 (commit-then-reveal pairing, signed replies, token for reads, counter against replays, signed content of each confirmation); local-network mode in debug builds only; no wallet yet | Core tests with the real `ona-core` (compiled with `swiftc`, not `swift test`); one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network ([notes](docs/desktop/app.md)) |
 | Desktop app (`desktop/tauri`, Windows and Linux) | same features and protocol v1 as the macOS app, in Rust with Tauri; no wallet yet | Rust tests of every module but `main.rs` with the real `ona-core`, run on macOS; one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network, on macOS. Never built or run on Windows or Linux ([notes](docs/desktop/tauri.md)) |
@@ -176,7 +178,8 @@ More in [SPEC.md](SPEC.md).
 Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`,
 `unicode-normalization`.
 The NEAR client, the deployment tool and the crowd simulator also use `ureq` (with `rustls`), `bs58`, `base64`, `anyhow`, `libc`,
-`zeroize`, `rand` and `rand_chacha`. The relay and the signer use `ureq` 3.5.1 and `zeroize` 1.9.1, pinned exactly. `Cargo.lock` fixes
+`zeroize`, `rand` and `rand_chacha`. The relay and the signer use `ureq` 3.5.1 and `zeroize` 1.9.1, pinned exactly; the pool agent
+(`ona-agent`) uses the same libraries, through the relay's HTTP front and two-endpoint reader. `Cargo.lock` fixes
 every version, and `verify.sh` builds with `--locked`.
 
 Client core (`crates/ona-core`), pinned exactly:

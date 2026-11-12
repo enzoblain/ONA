@@ -212,6 +212,21 @@ impl<A: Rpc, B: Rpc> CrossRpc<A, B> {
         Ok(a)
     }
 
+    /// Any other `query` (for example `view_access_key`), made on both endpoints at `block`. Any
+    /// difference is an error.
+    pub fn query_at(&self, block: &Block, mut params: Value) -> Result<Value, String> {
+        params["block_id"] = json!(block.hash);
+        let a = self.first.post("query", params.clone())?;
+        let b = self.second.post("query", params)?;
+        if a != b {
+            return Err("the two RPC endpoints disagree on a query".into());
+        }
+        if a["block_hash"].as_str() != Some(block.hash.as_str()) {
+            return Err("RPC answered a query for another block".into());
+        }
+        Ok(a)
+    }
+
     /// A contract view at a newly agreed final block.
     pub fn view(&self, account: &str, method: &str, args: Value) -> Result<Value, String> {
         let block = self.agreed_final_block()?;

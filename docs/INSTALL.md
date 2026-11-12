@@ -63,10 +63,12 @@ the digest to send back with `confirm_payment`.
 
 With these variables set, `ona` also answers `pool_portfolio`, `pool_prepare`, `pool_execute` and `pool_recover` (inputs,
 outputs and the confirmation flow: [docs/desktop/pool-commands.md](desktop/pool-commands.md)). They read the pool contract, views
-only, and never contact the relay. No transport to the pool agent exists yet, so `pool_execute` answers
-`no connection to the pool agent yet` and no agent call is made; the commands have only run against a fake pool in the tests.
-**Do not send a pool deposit from a wallet until the agent exists**: nobody could turn it into cash notes, and it would wait in the
-contract for a refund.
+only, and never contact the relay. Agent calls go to `ona-agent` (see "Run the pool agent") when `ONA_POOL_AGENT_URL` is set;
+without it `pool_execute` answers `no connection to the pool agent yet` and no agent call is made. The commands have run only
+against a fake pool, with a fake agent and with the real agent over HTTP on this machine. A deposit's `pool_execute` runs twice: the
+first call returns `sign_message`, which the depositing account's own wallet must sign (NEP-413 `signMessage`, recipient the pool),
+and the second carries `depositor_signature`. **Do not send a pool deposit from a wallet until an agent runs for that pool**: nobody
+could turn it into cash notes, and it would wait in the contract for a refund.
 
 | Variable | Value |
 |---|---|
@@ -76,6 +78,7 @@ contract for a refund.
 | `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only) |
 | `ONA_RPC_URL_2` | optional, a second NEAR RPC endpoint run by another operator: `pool_recover` decides a note's fate only when both agree. Without it the first endpoint is trusted |
 | `ONA_POOL_RECOMMENDED_NEAR` | optional, the deposit amounts the app recommends, whole NEAR separated by commas, each at least 0.1 NEAR; default `100,500,2000`. A deposit of another amount is still allowed, with a warning |
+| `ONA_POOL_AGENT_URL` | optional, the pool agent's address, `https` (plain `http` to this machine only). Requests follow no redirect and ignore proxy variables. Without it, agent calls are refused |
 
 A fake relay on localhost, for front-end work:
 
@@ -292,6 +295,57 @@ before its expiry is given up and answers 410. An attestation needs an unused re
 `id`: 4 per chat for 10 minutes, a fetch the service does not answer is not counted, and the global limit never refuses it. The same
 token on the attestation, the chat and the signature lets the relay link these three requests, as it already could from their timing.
 If the store reports a write error, every further write is refused until the relay is restarted.
+
+## Run the pool agent
+
+**Never run against a real chain yet, and not in an enclave: whoever runs it sees which note asks for which vault.**
+
+```
+cargo run -p ona-agent -- init-keys agent-keys.bin 3 3 3
+cargo run -p ona-agent -- init-store agent-keys.bin agent-store.log <pool account>
+```
+
+`init-keys <file> <cash tiers> [<tiers of vault 0> ...]` creates the blind-signing keys in a new private file and prints their
+public halves (base64, the `pk_g2` the contract takes): give the cash keys to `ona-deploy pool` (`ONA_POOL_CASH_TIERS`) and each
+vault's keys to `add_vault`. Every key serves one tier only. `init-store` creates the agent's store, bound to those keys and that pool.
+The agent never creates a store by itself, and runs one process per store. To serve, on `127.0.0.1` only:
+
+| Variable | Value |
+|---|---|
+| `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only); transactions are sent here |
+| `ONA_RPC_URL_2` | a second NEAR RPC endpoint, run by another operator; every read must agree with the first |
+| `ONA_CHAIN_ID` | the chain id both endpoints must report (for example `testnet`); mainnet is refused |
+| `ONA_POOL` | the pool contract account |
+| `ONA_AGENT_ACCOUNT` | the account named as agent in the pool |
+| `ONA_AGENT_ACCOUNT_KEY_FILE` | file holding `ed25519:<base58>`, readable by its owner only |
+| `ONA_AGENT_KEYS_FILE` | the key file from `init-keys` |
+| `ONA_AGENT_STORE_FILE` | the store file from `init-store`; must survive restarts |
+| `ONA_AGENT_PORT` | optional, default 8788 |
+| `ONA_AGENT_PER_MINUTE` | optional, requests per minute per route for all clients together, default 120 |
+| `ONA_AGENT_TICK_SECS` | optional, seconds between two ticks (sending the window's batch, settling open requests, the planner, the purge), default 60; keep it well below `ONA_AGENT_WINDOW_SECS` |
+| `ONA_AGENT_WINDOW_SECS` | optional, length of a processing window, default 900; windows alternate between entries and leaves, and cash exits; above 0 |
+| `ONA_AGENT_MIN_BATCH` | optional, ready requests of a window's class needed before any of them is sent, default 5; above 0 |
+| `ONA_AGENT_MIN_DELAY_SECS` | optional, least time a request waits after it arrives, default 600 |
+| `ONA_AGENT_JITTER_SECS` | optional, a random wait between 0 and this is added to each request, default 3000 |
+| `ONA_AGENT_RETENTION_SECS` | optional, finished records and signatures are deleted this long after they finished, default 604800 (7 days) |
+| `ONA_AGENT_ISSUES_PER_HOUR` | optional, cash issues one account may ask for per hour, default 6 |
+| `ONA_AGENT_RESERVE_PERCENT` | optional, percent of each vault's assets kept liquid, on top of what queued leaves will take, default 20 |
+| `ONA_AGENT_SETTLEMENT_SECS` | optional, money moves only at multiples of this period, default 1800 |
+| `ONA_AGENT_MIN_ACTIVE` | optional, entries and leaves needed since the last settlement before the next one, default 10 |
+| `ONA_AGENT_STEADY_SECS`, `ONA_AGENT_STEADY_YOCTO` | optional, unstake this amount from every vault at each multiple of this period, whatever the requests, default off; the period must be a multiple of 259200 (3 days, the contract's limit of one unstake of the agent's own per vault), otherwise the agent refuses to start; a line missed or blocked by a settlement is skipped |
+| `ONA_AGENT_UNBOND_WAIT_SECS` | optional, how long unstaked funds wait before `withdraw`, default 4 days (the staking pool's real delay is not verified) |
+| `ONA_AGENT_MIN_MOVE_YOCTO` | optional, smaller moves are not made, default 1 NEAR |
+
+```
+cargo run -p ona-agent -- run
+```
+
+It refuses to start if its keys are not the ones the contract verifies against, if the account is not the pool's agent, if the two
+RPC URLs name the same endpoint or an endpoint reports another chain, or if its store is missing, belongs to other keys, or is held by
+another process, or if `ONA_AGENT_WINDOW_SECS` or `ONA_AGENT_MIN_BATCH` is 0. Entries, leaves and cash exits wait in a queue and
+leave in batches (see SPEC, Pool agent); with few users a request waits until enough others arrive, up to its owner's 24-hour
+deadline, after which it is refused and the note freed. The crowd simulator (`crates/ona-crowd/PARADES.md`) models the settlement
+and reserve rules on their own, not this agent's queue: its figures are not a measure of this program.
 
 ## Journal anchoring
 

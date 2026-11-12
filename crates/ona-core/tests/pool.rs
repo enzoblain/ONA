@@ -10,8 +10,8 @@ use std::rc::Rc;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use ona_core::pool::{
-    AgentError, PoolAgent, PoolChain, PoolClient, SignedNote, CLOCK_MARGIN_NS, EXIT_STORAGE_FEE, NOTE_STORAGE_FEE,
-    PREPARATION_LIFE_NS, SIGNATURE_LIFE_NS,
+    AgentError, DepositorProof, PoolAgent, PoolChain, PoolClient, SignedNote, CLOCK_MARGIN_NS, EXIT_STORAGE_FEE,
+    NOTE_STORAGE_FEE, PREPARATION_LIFE_NS, SIGNATURE_LIFE_NS,
 };
 use ona_core::Core;
 use ona_token::{g2_to_raw, keygen, sign_blinded, verify_digest, verify_token, SecretKey, Token, G1_LEN};
@@ -90,6 +90,10 @@ struct FakePool {
     height: u64,
     /// A value every cash tier is shown at instead of its real one, to test absurd figures.
     shown_cash: Option<u128>,
+    /// The next cash issue is refused after its first note was issued and signed.
+    refuse_after_first: bool,
+    /// `signatures` cannot reach the agent.
+    signatures_down: bool,
 }
 
 type Shared = Rc<RefCell<FakePool>>;
@@ -243,17 +247,27 @@ fn lost<T>(lose: bool, value: T) -> Result<T, AgentError> {
 }
 
 impl PoolAgent for Agent {
-    fn issue_cash(&mut self, account: &str, tier: u8, blinded: &[[u8; G1_LEN]]) -> Result<Vec<[u8; G1_LEN]>, AgentError> {
+    fn issue_cash(&mut self, account: &str, notes: &[(u8, [u8; G1_LEN])], _proof: &DepositorProof) -> Result<Vec<[u8; G1_LEN]>, AgentError> {
         let mut f = self.0.borrow_mut();
         let lose = f.start()?;
-        let value = CASH[usize::from(tier)] * blinded.len() as u128;
+        let value: u128 = notes.iter().map(|(t, _)| CASH[usize::from(*t)]).sum();
         let (deposited, issued, received) = f.holders.get(account).copied().ok_or(AgentError::Refused("not a depositor".into()))?;
         if deposited - issued < value {
             return Err(AgentError::Refused("more than this account's deposits".into()));
         }
+        if std::mem::take(&mut f.refuse_after_first) {
+            let (tier, blinded) = notes[0];
+            f.holders.insert(account.into(), (deposited, issued + CASH[usize::from(tier)], received));
+            f.cash_liquid += CASH[usize::from(tier)];
+            f.sign(true, 0, &[(tier, 1)], &[blinded]);
+            return Err(AgentError::Refused("refused after the first tier".into()));
+        }
         f.holders.insert(account.into(), (deposited, issued + value, received));
         f.cash_liquid += value;
-        let sigs = f.sign(true, 0, &[(tier, blinded.len() as u64)], blinded);
+        let mut sigs = Vec::new();
+        for (tier, blinded) in notes {
+            sigs.extend(f.sign(true, 0, &[(*tier, 1)], &[*blinded]));
+        }
         lost(lose, sigs)
     }
 
@@ -319,6 +333,9 @@ impl PoolAgent for Agent {
 
     fn signatures(&mut self, blinded: &[[u8; G1_LEN]]) -> Result<Vec<Option<[u8; G1_LEN]>>, AgentError> {
         let f = self.0.borrow();
+        if f.signatures_down {
+            return Err(AgentError::Unknown("no route to the agent".into()));
+        }
         Ok(blinded.iter().map(|b| f.signed.get(b).copied()).collect())
     }
 }
@@ -366,6 +383,8 @@ impl World {
             fail_after: 0,
             height: 1_000,
             shown_cash: None,
+            refuse_after_first: false,
+            signatures_down: false,
         }));
         let mut w = Self { core: Core::new(), fake, now: Rc::new(Cell::new(1_000_000_000_000_000_000)), path };
         w.restart();
@@ -426,7 +445,18 @@ impl World {
     /// Prepares, then executes after the user confirmed.
     fn run(&mut self, request: Value) -> Value {
         let prepared = self.prepare(request);
-        self.ok(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}))
+        self.execute(&prepared)
+    }
+
+    /// Executes a preparation. A deposit takes two calls: the first returns the text the user's wallet signs.
+    fn execute(&mut self, prepared: &Value) -> Value {
+        let reply = self.ok(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}));
+        if prepared["summary"]["op"] != "deposit" {
+            return reply;
+        }
+        assert_eq!(reply["complete"], false, "{reply}");
+        assert!(reply["sign_message"]["message"].as_str().unwrap().starts_with("ONA pool cash issue v1"));
+        self.ok(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"], "depositor_signature": wallet_signature()}))
     }
 
     fn portfolio(&mut self) -> Value {
@@ -436,6 +466,13 @@ impl World {
     fn cash_value(&mut self) -> String {
         self.portfolio()["cash"]["value"].as_str().unwrap().to_string()
     }
+}
+
+/// What the user's wallet returns for `sign_message`. The fake agent of these tests does not check it; the real agent
+/// does (`crates/ona-agent/tests`).
+fn wallet_signature() -> Value {
+    let proof = DepositorProof { public_key: [7u8; 32], signature: [8u8; 64], nonce: [0u8; 32] };
+    json!({"public_key": proof.public_key_text(), "signature": B64.encode(proof.signature)})
 }
 
 impl Drop for World {
@@ -458,8 +495,15 @@ fn a_deposit_is_prepared_for_the_users_wallet_and_becomes_cash_notes() {
     ]));
     assert_eq!(s["network"], NETWORK);
     assert_eq!(prepared["mode"], "mock", "figures from a fake pool are labelled so");
-    w.ok(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}));
+    let first = w.ok(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}));
+    assert_eq!(first["sign_message"]["recipient"], POOL);
+    let e = w.error(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}));
+    assert!(e.contains("depositor_signature"), "{e}");
+    assert_eq!(w.portfolio()["cash"]["awaiting_signature"], 3, "the notes are made and saved before anything leaves");
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"], "depositor_signature": wallet_signature()}));
     assert_eq!(w.cash_value(), (111 * NEAR / 10).to_string());
+    let e = w.error(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"], "depositor_signature": wallet_signature()}));
+    assert!(e.contains("already used"), "{e}");
 }
 
 #[test]
@@ -627,7 +671,7 @@ fn recovery_holds_an_unspent_note_again_only_after_its_signature_expired() {
     // An agent that answers "unknown" without acting: the chain never sees the note.
     struct Silent;
     impl PoolAgent for Silent {
-        fn issue_cash(&mut self, _: &str, _: u8, _: &[[u8; G1_LEN]]) -> Result<Vec<[u8; G1_LEN]>, AgentError> {
+        fn issue_cash(&mut self, _: &str, _: &[(u8, [u8; G1_LEN])], _: &DepositorProof) -> Result<Vec<[u8; G1_LEN]>, AgentError> {
             Err(AgentError::Unknown("timeout".into()))
         }
         fn enter(&mut self, _: u32, _: &SignedNote, _: &[(u8, u64)], _: &[[u8; G1_LEN]]) -> Result<Vec<[u8; G1_LEN]>, AgentError> {
@@ -784,8 +828,49 @@ fn a_certain_refusal_leaves_no_note_waiting_for_a_signature() {
     // A refused deposit leaves no cash note waiting either.
     let p = w.prepare(json!({"op": "deposit", "account": "carol.test", "amount": (10 * NEAR).to_string()}));
     w.fake.borrow_mut().holders.remove("carol.test");
-    w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"], "depositor_signature": wallet_signature()}));
     assert_eq!(w.portfolio()["cash"]["awaiting_signature"], 0);
+    // Refused after one of its two notes was issued: that one is kept, the other forgotten.
+    let p = w.prepare(json!({"op": "deposit", "account": "dave.test", "amount": (11 * NEAR).to_string()}));
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    w.fake.borrow_mut().refuse_after_first = true;
+    let before: u128 = w.portfolio()["cash"]["value"].as_str().unwrap().parse().unwrap();
+    let e = w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"], "depositor_signature": wallet_signature()}));
+    assert!(e.contains("kept"), "{e}");
+    let cash = &w.portfolio()["cash"];
+    assert_eq!(cash["awaiting_signature"], 0, "the unsigned note is forgotten");
+    let after: u128 = cash["value"].as_str().unwrap().parse().unwrap();
+    assert_eq!(after - before, NEAR, "the issued note (the first, 1 NEAR) is kept");
+}
+
+#[test]
+fn a_refused_deposit_forgets_nothing_while_the_agent_cannot_say_what_it_signed() {
+    let mut w = World::new("refused-unreachable");
+    let p = w.prepare(json!({"op": "deposit", "account": "alice.test", "amount": (11 * NEAR).to_string()}));
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    {
+        let mut f = w.fake.borrow_mut();
+        f.refuse_after_first = true;
+        f.signatures_down = true;
+    }
+    let e = w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"], "depositor_signature": wallet_signature()}));
+    assert!(e.contains("pool_recover"), "{e}");
+    assert_eq!(w.portfolio()["cash"]["awaiting_signature"], 2, "nothing forgotten on a network error");
+    w.fake.borrow_mut().signatures_down = false;
+    let r = w.ok(json!({"cmd": "pool_recover"}));
+    assert_eq!(r["signatures_recovered"], 1, "{r}");
+    assert_eq!(w.portfolio()["cash"]["value"], NEAR.to_string());
+}
+
+#[test]
+fn a_deposit_abandoned_between_its_two_calls_forgets_its_notes() {
+    let mut w = World::new("deposit-abandoned");
+    let p = w.prepare(json!({"op": "deposit", "account": "alice.test", "amount": (11 * NEAR).to_string()}));
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    assert_eq!(w.portfolio()["cash"]["awaiting_signature"], 2);
+    w.now.set(w.now.get() + PREPARATION_LIFE_NS + 1);
+    assert_eq!(w.portfolio()["cash"]["awaiting_signature"], 0, "no signature was asked for them");
 }
 
 #[test]
@@ -841,7 +926,8 @@ fn a_deposit_whose_cash_was_never_finished_is_recovered() {
     let mut w = World::new("deposit-lost");
     w.fail_on(1, Fail::AnswerLost);
     let p = w.prepare(json!({"op": "deposit", "account": "alice.test", "amount": (10 * NEAR).to_string()}));
-    let e = w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    let e = w.error(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"], "depositor_signature": wallet_signature()}));
     assert!(e.contains("outcome unknown"), "{e}");
     assert_eq!(w.portfolio()["cash"]["awaiting_signature"], 1);
     let r = w.ok(json!({"cmd": "pool_recover"}));
@@ -881,7 +967,8 @@ fn without_an_agent_nothing_is_spent() {
     core.set_pool(PoolClient::new(wallet, Box::new(Chain(w.fake.clone())), Box::new(ona_core::pool::NoAgent), POOL));
     let send = |core: &mut Core, v: Value| -> Value { serde_json::from_str(&core.dispatch(&v.to_string())).unwrap() };
     let prepared = send(&mut core, json!({"cmd": "pool_prepare", "op": "deposit", "account": "alice.test", "amount": NEAR.to_string()}));
-    let reply = send(&mut core, json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}));
+    send(&mut core, json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}));
+    let reply = send(&mut core, json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"], "depositor_signature": wallet_signature()}));
     assert_eq!(reply["ok"], false);
     assert_eq!(reply["error"], "no connection to the pool agent yet");
     let p = send(&mut core, json!({"cmd": "pool_portfolio"}));
@@ -903,6 +990,7 @@ fn examples_for_the_docs() {
     let attached: u128 = p["summary"]["wallet_call"]["attached"].as_str().unwrap().parse().unwrap();
     w.user_deposits("alice.test", attached);
     show(&mut w, json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    show(&mut w, json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"], "depositor_signature": wallet_signature()}));
     let p = show(&mut w, json!({"cmd": "pool_prepare", "op": "enter", "vault": 0, "amount": (10 * NEAR).to_string()}));
     show(&mut w, json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
     show(&mut w, json!({"cmd": "pool_portfolio"}));

@@ -9,9 +9,13 @@
 //!
 //! Notes live in the encrypted wallet with their status. Each note has a fresh owner key. Every owner signature
 //! follows the formats of SPEC (`ona-pool`), built by `ona_wallet::pool`. Calls only the agent may make
-//! (`issue_cash`, `enter`, `leave`, `pay_exit`) go through `PoolAgent`; the transport to the real agent is not
-//! built yet, so `NoAgent` refuses them. Reading the portfolio reads the configuration, the cash and every vault,
-//! whoever runs it, and sends nothing to the relay.
+//! (`issue_cash`, `enter`, `leave`, `pay_exit`) go through `PoolAgent`: `pool_agent::HttpAgent` when
+//! `ONA_POOL_AGENT_URL` is set, otherwise `NoAgent`, which refuses them. Reading the portfolio reads the
+//! configuration, the cash and every vault, whoever runs it, and sends nothing to the relay.
+//!
+//! A deposit's `pool_execute` runs twice: the first call makes the cash notes and returns `sign_message`, the text the
+//! user's own NEAR wallet signs (NEP-413 `signMessage`); the second call carries that signature
+//! (`depositor_signature`), and the agent issues the cash only for it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -173,11 +177,90 @@ impl AgentError {
     }
 }
 
+/// The depositor's wallet signature over `issue_message`, in the NEP-413 form: its key (a full-access key of the
+/// account), the signature and the nonce the wallet signed with. The recipient is the pool contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepositorProof {
+    pub public_key: [u8; 32],
+    pub signature: [u8; 64],
+    pub nonce: [u8; 32],
+}
+
+impl DepositorProof {
+    pub fn public_key_text(&self) -> String {
+        format!("ed25519:{}", bs58_encode(&self.public_key))
+    }
+
+    /// `{"public_key": "ed25519:<base58>", "signature": <base64>}`, with the nonce the wallet was given.
+    fn parse(v: &Value, nonce: [u8; 32]) -> Result<Self, String> {
+        use base64::Engine;
+        let bad = || "depositor_signature needs public_key (ed25519:…) and signature (base64)".to_string();
+        let key = v["public_key"].as_str().and_then(|k| k.strip_prefix("ed25519:")).ok_or_else(bad)?;
+        let public_key = bs58_decode(key).and_then(|b| b.try_into().ok()).ok_or_else(bad)?;
+        let signature = v["signature"]
+            .as_str()
+            .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(bad)?;
+        Ok(Self { public_key, signature, nonce })
+    }
+}
+
+const BASE58: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+fn bs58_encode(bytes: &[u8]) -> String {
+    let mut digits: Vec<u8> = Vec::new();
+    for &b in bytes {
+        let mut carry = u32::from(b);
+        for d in digits.iter_mut() {
+            carry += u32::from(*d) << 8;
+            *d = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+    let zeros = bytes.iter().take_while(|b| **b == 0).count();
+    std::iter::repeat_n(b'1', zeros).chain(digits.iter().rev().map(|d| BASE58[usize::from(*d)])).map(char::from).collect()
+}
+
+fn bs58_decode(text: &str) -> Option<Vec<u8>> {
+    let mut bytes: Vec<u8> = Vec::new();
+    for c in text.bytes() {
+        let mut carry = u32::try_from(BASE58.iter().position(|x| *x == c)?).ok()?;
+        for b in bytes.iter_mut() {
+            carry += u32::from(*b) * 58;
+            *b = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            bytes.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    let zeros = text.bytes().take_while(|c| *c == b'1').count();
+    Some(std::iter::repeat_n(0u8, zeros).chain(bytes.into_iter().rev()).collect())
+}
+
+/// The exact text the depositor's wallet signs (NEP-413, recipient: the pool) to have these cash notes issued:
+/// the pool, the account, and `hex(SHA-256((tier || blinded point)*))` over the notes in order. The agent builds the
+/// same text from the request (`ona-agent` `nep413::issue_message`).
+pub fn issue_message(pool: &str, account: &str, notes: &[(u8, [u8; G1_LEN])]) -> String {
+    let mut h = Sha256::new();
+    for (tier, blinded) in notes {
+        h.update([*tier]);
+        h.update(blinded);
+    }
+    format!("ONA pool cash issue v1\npool: {pool}\naccount: {account}\nnotes: {}", hex(&h.finalize()))
+}
+
 /// The calls only the agent may make, and the blind signatures it returns, one per blinded point in order.
-/// `issue_cash` must be authenticated by the depositor on the agent's side (not built): the agent issues cash
-/// only to the account that deposited, and the contract refuses more than its deposits.
+/// `issue_cash` carries the depositor's wallet signature: the agent issues cash only to the account that signed,
+/// and the contract refuses more than its deposits.
 pub trait PoolAgent {
-    fn issue_cash(&mut self, account: &str, tier: u8, blinded: &[[u8; G1_LEN]]) -> Result<Vec<[u8; G1_LEN]>, AgentError>;
+    fn issue_cash(&mut self, account: &str, notes: &[(u8, [u8; G1_LEN])], proof: &DepositorProof) -> Result<Vec<[u8; G1_LEN]>, AgentError>;
     fn enter(
         &mut self,
         vault: u32,
@@ -196,6 +279,10 @@ pub trait PoolAgent {
     /// The blind signatures the agent made for these points, if any, in order: used to recover notes whose
     /// answer was lost.
     fn signatures(&mut self, blinded: &[[u8; G1_LEN]]) -> Result<Vec<Option<[u8; G1_LEN]>>, AgentError>;
+    /// False when no agent exists at all, so nothing was ever sent to one.
+    fn connected(&self) -> bool {
+        true
+    }
 }
 
 /// No transport to the agent exists yet: every agent call is refused before anything is sent.
@@ -204,7 +291,7 @@ pub struct NoAgent;
 const NO_AGENT: &str = "no connection to the pool agent yet";
 
 impl PoolAgent for NoAgent {
-    fn issue_cash(&mut self, _: &str, _: u8, _: &[[u8; G1_LEN]]) -> Result<Vec<[u8; G1_LEN]>, AgentError> {
+    fn issue_cash(&mut self, _: &str, _: &[(u8, [u8; G1_LEN])], _: &DepositorProof) -> Result<Vec<[u8; G1_LEN]>, AgentError> {
         Err(AgentError::Refused(NO_AGENT.into()))
     }
     fn enter(&mut self, _: u32, _: &SignedNote, _: &[(u8, u64)], _: &[[u8; G1_LEN]]) -> Result<Vec<[u8; G1_LEN]>, AgentError> {
@@ -218,6 +305,9 @@ impl PoolAgent for NoAgent {
     }
     fn signatures(&mut self, _: &[[u8; G1_LEN]]) -> Result<Vec<Option<[u8; G1_LEN]>>, AgentError> {
         Err(AgentError::Refused(NO_AGENT.into()))
+    }
+    fn connected(&self) -> bool {
+        false
     }
 }
 
@@ -386,6 +476,8 @@ struct Prepared {
     steps: Vec<Step>,
     created_at: u64,
     reserved: Vec<[u8; 32]>,
+    /// A deposit's cash notes, made by its first `pool_execute`, and the nonce its wallet signature uses.
+    issue: Option<(Vec<(u8, [u8; G1_LEN])>, [u8; 32])>,
 }
 
 pub struct PoolClient {
@@ -465,8 +557,8 @@ impl PoolClient {
     }
 
     /// `None` when `ONA_WALLET_FILE` is not set. Otherwise `ONA_WALLET_KEY_FILE`, `ONA_POOL` and `ONA_RPC_URL` are
-    /// needed, and `ONA_POOL_RECOMMENDED_NEAR` may list the recommended deposits. The agent is `NoAgent`: no
-    /// transport to it exists yet.
+    /// needed, and `ONA_POOL_RECOMMENDED_NEAR` may list the recommended deposits. The agent is reached at
+    /// `ONA_POOL_AGENT_URL` when it is set; otherwise it is `NoAgent`, which refuses every agent call.
     pub fn from_env() -> Result<Option<Self>, String> {
         let Ok(file) = std::env::var("ONA_WALLET_FILE") else {
             return Ok(None);
@@ -490,7 +582,15 @@ impl PoolClient {
             Err(_) => return Err("ONA_RPC_URL_2 is not valid text".into()),
         };
         let wallet = Wallet::open(Path::new(&file), &key)?;
-        let mut client = Self::new(wallet, Box::new(NearPool::new(&rpc, &pool)), Box::new(NoAgent), &pool);
+        // The agent's address follows the RPC rule: https, or plain http to this machine only.
+        let agent: Box<dyn PoolAgent> = match std::env::var("ONA_POOL_AGENT_URL") {
+            Ok(url) => {
+                ona_near::check_rpc_url(&url).map_err(|e| format!("ONA_POOL_AGENT_URL: {e}"))?;
+                Box::new(crate::pool_agent::HttpAgent::to_url(&url))
+            }
+            Err(_) => Box::new(NoAgent),
+        };
+        let mut client = Self::new(wallet, Box::new(NearPool::new(&rpc, &pool)), agent, &pool);
         if let Some(url) = second {
             client = client.with_second_chain(Box::new(NearPool::new(&url, &pool)));
         }
@@ -524,10 +624,21 @@ impl PoolClient {
         Ok(State { network, cash, vaults })
     }
 
-    /// Drops preparations older than `PREPARATION_LIFE_NS`, freeing their notes.
+    /// Drops preparations older than `PREPARATION_LIFE_NS`, freeing their notes. A deposit abandoned between its two calls
+    /// also forgets the cash notes its first call made: no signature was asked for them.
     fn expire(&mut self) {
         let now = self.now();
-        self.prepared.retain(|_, p| now < p.created_at.saturating_add(PREPARATION_LIFE_NS));
+        let (live, gone): (BTreeMap<_, _>, BTreeMap<_, _>) =
+            std::mem::take(&mut self.prepared).into_iter().partition(|(_, p)| now < p.created_at.saturating_add(PREPARATION_LIFE_NS));
+        self.prepared = live;
+        for (_, p) in gone {
+            if let Some((notes, _)) = p.issue {
+                let blinded: Vec<[u8; G1_LEN]> = notes.iter().map(|n| n.1).collect();
+                if let Err(e) = self.drop_pending(None, &blinded) {
+                    eprintln!("cannot forget the notes of an abandoned deposit: {e}");
+                }
+            }
+        }
     }
 
     /// Held notes of `vault` (cash when `None`) not reserved by a live preparation, with their value.
@@ -747,7 +858,7 @@ impl PoolClient {
         summary["network"] = json!(state.network);
         summary["contract"] = json!(self.contract);
         summary["expires_at"] = json!(created_at.saturating_add(PREPARATION_LIFE_NS));
-        self.prepared.insert(id.clone(), Prepared { op, vault, amount, nonce, steps, created_at, reserved });
+        self.prepared.insert(id.clone(), Prepared { op, vault, amount, nonce, steps, created_at, reserved, issue: None });
         Ok(json!({"prepared_id": id, "summary": summary}))
     }
 
@@ -759,6 +870,9 @@ impl PoolClient {
         if expected != id {
             return Err("this preparation belongs to another network or contract".into());
         }
+        if let Some(Step::Issue { account, outputs }) = prepared.steps.first().cloned() {
+            return self.execute_deposit(&state, id, prepared, &account, &outputs, request);
+        }
         let mut done = Vec::new();
         let result = self.run_steps(&state, &prepared.steps, &mut done);
         match result {
@@ -769,15 +883,78 @@ impl PoolClient {
         }
     }
 
+    /// First call: makes the cash notes (saved before anything leaves) and returns the text the depositor's wallet must
+    /// sign; the preparation stays usable until it expires. Second call, with `depositor_signature`: the agent issues
+    /// the cash for that signature.
+    fn execute_deposit(
+        &mut self,
+        state: &State,
+        id: &str,
+        mut prepared: Prepared,
+        account: &str,
+        outputs: &[(u8, u64)],
+        request: &Value,
+    ) -> Result<Value, String> {
+        use base64::Engine;
+        let Some((notes, nonce)) = prepared.issue.clone() else {
+            let mut notes = Vec::new();
+            for (tier, count) in outputs {
+                for b in self.new_notes(state, None, &[(*tier, *count)])? {
+                    notes.push((*tier, b));
+                }
+            }
+            let mut nonce = [0u8; 32];
+            OsRng.fill_bytes(&mut nonce);
+            let message = issue_message(&self.contract, account, &notes);
+            prepared.issue = Some((notes, nonce));
+            self.prepared.insert(id.to_string(), prepared);
+            return Ok(json!({
+                "executed": "deposit", "complete": false,
+                "sign_message": {
+                    "message": message, "recipient": self.contract,
+                    "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+                },
+                "next": "sign sign_message with the depositing account's wallet (NEP-413), then call pool_execute again with depositor_signature",
+            }));
+        };
+        let Some(signature) = request.get("depositor_signature") else {
+            self.prepared.insert(id.to_string(), prepared);
+            return Err("missing field depositor_signature: sign sign_message with the depositing account's wallet first".into());
+        };
+        let proof = DepositorProof::parse(signature, nonce)?;
+        let blinded: Vec<[u8; G1_LEN]> = notes.iter().map(|n| n.1).collect();
+        let sigs = match self.agent.issue_cash(account, &notes, &proof) {
+            Ok(sigs) => sigs,
+            Err(AgentError::Refused(e)) => {
+                // Some tiers may have been issued before the refusal: keep what the agent signed, forget the rest.
+                // Without its answer nothing is forgotten: `pool_recover` asks again later.
+                let signed = match self.agent.signatures(&blinded) {
+                    Ok(signed) if signed.len() == blinded.len() => signed,
+                    // No agent at all: nothing was sent, nothing can have been signed.
+                    _ if !self.agent.connected() => vec![None; blinded.len()],
+                    Ok(_) => return Err(format!("{e} (the agent's list of signatures has the wrong length: run pool_recover later)")),
+                    Err(asked) => return Err(format!("{e} (cannot ask the agent which notes it signed: {}; run pool_recover later)", asked.message())),
+                };
+                let mut kept = 0;
+                for (b, s) in blinded.iter().zip(signed.iter()) {
+                    match s {
+                        Some(sig) => kept += self.finish(state, None, &[*b], &[*sig])?.len(),
+                        None => self.drop_pending(None, &[*b])?,
+                    }
+                }
+                return Err(if kept == 0 { e } else { format!("{e} ({kept} cash notes were issued before the refusal and are kept)") });
+            }
+            Err(e) => return Err(e.message()),
+        };
+        let issued = self.finish(state, None, &blinded, &sigs)?.len();
+        Ok(json!({"executed": "deposit", "complete": true, "steps": [{"issued_cash": issued}]}))
+    }
+
     fn run_steps(&mut self, state: &State, steps: &[Step], done: &mut Vec<Value>) -> Result<(), String> {
         for step in steps {
             match step {
-                Step::Issue { account, outputs } => {
-                    for (tier, count) in outputs {
-                        let notes = self.issue(state, account, *tier, *count)?;
-                        done.push(json!({"issued_cash": notes}));
-                    }
-                }
+                // Handled by `execute_deposit`.
+                Step::Issue { .. } => return Err("a deposit runs through execute_deposit".into()),
                 Step::Enter { nf, vault, outputs } => {
                     self.enter(state, nf, *vault, outputs)?;
                     done.push(json!({"entered": vault}));
@@ -941,19 +1118,6 @@ impl PoolClient {
             nfs.push(self.wallet.finish_note(vault, b, s, pk)?.nf);
         }
         Ok(nfs)
-    }
-
-    fn issue(&mut self, state: &State, account: &str, tier: u8, count: u64) -> Result<usize, String> {
-        let blinded = self.new_notes(state, None, &[(tier, count)])?;
-        let sigs = match self.agent.issue_cash(account, tier, &blinded) {
-            Ok(sigs) => sigs,
-            Err(AgentError::Refused(e)) => {
-                self.drop_pending(None, &blinded)?;
-                return Err(e);
-            }
-            Err(e) => return Err(e.message()),
-        };
-        Ok(self.finish(state, None, &blinded, &sigs)?.len())
     }
 
     fn note(&self, nf: &[u8; 32]) -> Result<PoolNote, String> {
