@@ -15,16 +15,16 @@ const preparedActions = {}; // "chat:index" → the exact action from ona-core, 
 const doneActions = {};   // "chat:index" → what research_action_do answered
 
 const STEP_LABELS = {
-  search: "Recherche", read: "Lecture d'une page", compare: "Comparaison des offres",
-  confirm_recipient: "Choix du destinataire (vous)", contact: "Prise de contact",
-  prepare_payment: "Préparation du paiement", confirm_payment: "Confirmation du paiement (vous)", pay: "Paiement",
+  search: "Search", read: "Read a page", compare: "Compare the offers",
+  confirm_recipient: "Choose the recipient (you)", contact: "Get in touch",
+  prepare_payment: "Prepare the payment", confirm_payment: "Confirm the payment (you)", pay: "Pay",
 };
 const OUTPUT_LABELS = {
-  search: "Recherches envoyées", fetch: "Pages lues", contact: "Messages envoyés", pay: "Paiements",
-  message: "Messages remis à votre messagerie",
+  search: "Searches sent", fetch: "Pages read", contact: "Messages sent", pay: "Payments",
+  message: "Messages handed to your mail app",
 };
-const STATUS_LABELS = { waiting: "À confirmer", working: "En cours" };
-const STATE_LABELS = { accepted: "Confirmé", rejected: "Refusé", expired: "Plus d'actualité" };
+const STATUS_LABELS = { waiting: "To confirm", working: "Working" };
+const STATE_LABELS = { accepted: "Confirmed", rejected: "Declined", expired: "No longer current" };
 
 function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -67,7 +67,7 @@ async function run(command, args) {
   try {
     return await invoke(command, args);
   } catch (error) {
-    toast(`Action impossible : ${error}`);
+    toast(`Could not do that: ${error}`);
     throw error;
   }
 }
@@ -99,13 +99,13 @@ function drawPhoneButton(state) {
   const dot = $("phone-dot");
   if (state.phone?.verified) {
     dot.className = "dot ok";
-    $("phone-label").textContent = "Téléphone appairé";
+    $("phone-label").textContent = "Phone paired";
   } else if (state.awaiting_code) {
     dot.className = "dot warn";
-    $("phone-label").textContent = "Vérifiez le code";
+    $("phone-label").textContent = "Check the code";
   } else {
     dot.className = "dot";
-    $("phone-label").textContent = "Appairer un téléphone";
+    $("phone-label").textContent = "Pair a phone";
   }
 }
 
@@ -116,25 +116,25 @@ function drawPhone(state) {
   if (state.awaiting_code) {
     const code = state.awaiting_code;
     body.replaceChildren(
-      el("h3", {}, "Code à vérifier"),
-      el("p", { class: "help" }, "Le téléphone doit afficher le même code :"),
+      el("h3", {}, "Code to check"),
+      el("p", { class: "help" }, "The phone must show the same code:"),
       el("div", { class: "code" }, `${code.slice(0, 3)} ${code.slice(3)}`),
-      el("p", { class: "help" }, "Si les codes diffèrent, ou si le téléphone n'affiche aucun code, quelqu'un s'est peut-être interposé : refusez. Ce code expire au bout de 5 minutes."),
+      el("p", { class: "help" }, "If the codes differ, or if the phone shows no code, someone may be in the middle: decline. This code expires after 5 minutes."),
       el("div", { class: "card-actions actions" },
-        el("button", { class: "secondary", onclick: () => run("forget_phone").then(refresh) }, "Refuser"),
-        el("button", { class: "primary", onclick: () => run("confirm_code").then(refresh) }, "Les codes sont identiques")),
+        el("button", { class: "secondary", onclick: () => run("forget_phone").then(refresh) }, "Decline"),
+        el("button", { class: "primary", onclick: () => run("confirm_code").then(refresh) }, "The codes match")),
     );
   } else if (state.phone) {
-    const date = new Date(state.phone.paired_at * 1000).toLocaleString("fr-FR");
+    const date = new Date(state.phone.paired_at * 1000).toLocaleString("en-US");
     body.replaceChildren(
-      el("h3", {}, "Téléphone appairé"),
-      el("p", { class: "help" }, `Appairé le ${date}`),
-      el("div", { class: "actions" }, el("button", { class: "ghost danger", onclick: forgetPhone }, "Oublier ce téléphone")),
+      el("h3", {}, "Phone paired"),
+      el("p", { class: "help" }, `Paired on ${date}`),
+      el("div", { class: "actions" }, el("button", { class: "ghost danger", onclick: forgetPhone }, "Forget this phone")),
     );
   } else if (state.qr) {
     body.replaceChildren(
-      el("p", { class: "help" }, "Dans l'app ONA du téléphone, scannez ce code. Il ne sert qu'une fois."),
-      el("img", { class: "qr", alt: "Code d'appairage", src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(state.qr)}` }),
+      el("p", { class: "help" }, "Scan this code with the ONA app on the phone. It works only once."),
+      el("img", { class: "qr", alt: "Pairing code", src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(state.qr)}` }),
     );
   } else {
     body.replaceChildren(el("p", { class: "help" }, waitingReason(state)));
@@ -146,28 +146,28 @@ function drawPhone(state) {
     button.classList.toggle("on", button.dataset.mode === state.mode);
   }
   $("mode-help").textContent = state.mode === "tor"
-    ? "Le serveur écoute seulement sur cet ordinateur (127.0.0.1) et est publié en service .onion par Tor."
-    : "Version de développement : le serveur écoute sur le réseau local, en clair. Tout appareil de ce réseau voit les échanges.";
-  $("reachable").textContent = state.reachable ? `Adresse : ${state.reachable}` : "";
+    ? "The server listens on this computer only (127.0.0.1) and is published as a .onion service by Tor."
+    : "Development build: the server listens on the local network, unencrypted. Any device on this network sees the traffic.";
+  $("reachable").textContent = state.reachable ? `Address: ${state.reachable}` : "";
   $("relay-client").hidden = !state.relay_client;
   $("relay-client-line").textContent = state.relay_client || "";
   $("server-error").hidden = !state.server_error;
   $("server-error").textContent = state.server_error || "";
-  $("last-request").textContent = state.last_request ? `Dernière requête du téléphone : ${state.last_request}` : "";
+  $("last-request").textContent = state.last_request ? `Last request from the phone: ${state.last_request}` : "";
 }
 
 function waitingReason(state) {
-  if (state.mode === "local") return "Pas d'adresse sur le réseau local.";
+  if (state.mode === "local") return "No address on the local network.";
   switch (state.tor.state) {
-    case "missing": return "Tor n'est pas installé sur cet ordinateur. Installez le paquet « tor » (Linux) ou le Tor Expert Bundle (Windows), puis rouvrez ONA.";
-    case "failed": return `Tor : ${state.tor.message}`;
-    case "starting": return "Publication de l'adresse .onion…";
-    default: return "Tor arrêté";
+    case "missing": return "Tor is not installed on this computer. Install the “tor” package (Linux) or the Tor Expert Bundle (Windows), then reopen ONA.";
+    case "failed": return `Tor: ${state.tor.message}`;
+    case "starting": return "Publishing the .onion address…";
+    default: return "Tor stopped";
   }
 }
 
 async function forgetPhone() {
-  if (!await ask("Oublier ce téléphone ?", "Il ne pourra plus rien demander ni confirmer à cet ordinateur. Un nouveau code d'appairage sera créé.", "Oublier")) return;
+  if (!await ask("Forget this phone?", "It will no longer be able to ask or confirm anything on this computer. A new pairing code will be created.", "Forget")) return;
   await run("forget_phone");
   refresh();
 }
@@ -205,13 +205,13 @@ function confirmation(pending, state) {
   const open = state === "pending";
   const footer = open
     ? el("div", { class: "actions" },
-        el("button", { class: "secondary", onclick: () => decide(pending, "reject") }, "Refuser"),
+        el("button", { class: "secondary", onclick: () => decide(pending, "reject") }, "Decline"),
         el("button", {
           class: "primary", disabled: pending.kind === "recipient" && !chosenFirm[pending.id],
           onclick: () => decide(pending, "accept"),
         }, {
-          plan: "Valider le plan", recipient: "Contacter ce cabinet", payment: "Confirmer le paiement",
-          queries: "Lancer ces recherches",
+          plan: "Approve the plan", recipient: "Contact this firm", payment: "Confirm the payment",
+          queries: "Run these searches",
         }[pending.kind]))
     : el("div", { class: `state ${state}` }, STATE_LABELS[state] || state);
 
@@ -220,36 +220,36 @@ function confirmation(pending, state) {
     // Editable here only; the phone accepts them as shown. An emptied field is dropped.
     const shown = editedQueries[pending.id] || pending.queries;
     content = [
-      el("h3", {}, "Recherches à lancer"),
-      el("div", { class: "sub" }, "Rien ne part sur le web avant votre accord. Ces recherches passeront par Tor, telles qu'écrites ici."),
+      el("h3", {}, "Searches to run"),
+      el("div", { class: "sub" }, "Nothing goes out to the web before you approve. These searches will go through Tor, exactly as written here."),
       el("div", { class: "queries" }, shown.map((query, i) => open
         ? el("input", {
-            class: "field", value: query, maxlength: 120, "aria-label": `Recherche ${i + 1}`,
+            class: "field", value: query, maxlength: 120, "aria-label": `Search ${i + 1}`,
             oninput: (event) => {
               const list = [...(editedQueries[pending.id] || pending.queries)];
               list[i] = event.target.value;
               editedQueries[pending.id] = list;
             },
           })
-        : el("div", { class: "query" }, `« ${query} »`))),
+        : el("div", { class: "query" }, `“${query}”`))),
     ];
   } else if (pending.kind === "plan") {
-    content = [el("h3", {}, "Confirmation demandée"), el("ol", {}, pending.plan.map((s) => el("li", {}, STEP_LABELS[s] || s)))];
+    content = [el("h3", {}, "Confirmation needed"), el("ol", {}, pending.plan.map((s) => el("li", {}, STEP_LABELS[s] || s)))];
   } else if (pending.kind === "recipient") {
-    content = [el("h3", {}, "Choisir le destinataire"), ...pending.offers.map((offer) => el("label", {
+    content = [el("h3", {}, "Choose the recipient"), ...pending.offers.map((offer) => el("label", {
       class: `offer ${chosenFirm[pending.id] === offer.firm_id ? "selected" : ""}`,
     },
     el("input", {
       type: "radio", name: pending.id, disabled: !open, checked: chosenFirm[pending.id] === offer.firm_id,
       onchange: () => { chosenFirm[pending.id] = offer.firm_id; lastChat = ""; refresh(); },
     }),
-    `${offer.firm_id} — ${Math.floor(offer.price_cents / 100)} €, sous ${offer.delay_days} jours`))];
+    `${offer.firm_id} — €${Math.floor(offer.price_cents / 100)}, within ${offer.delay_days} ${offer.delay_days === 1 ? "day" : "days"}`))];
   } else {
     const p = pending.payment;
     content = [
-      el("h3", {}, "Paiement"),
-      el("div", { class: "row" }, el("span", {}, "Montant"), el("span", {}, near(p.amount))),
-      el("div", { class: "row" }, el("span", {}, "Destinataire"), el("span", { class: "mono" }, p.to)),
+      el("h3", {}, "Payment"),
+      el("div", { class: "row" }, el("span", {}, "Amount"), el("span", {}, near(p.amount))),
+      el("div", { class: "row" }, el("span", {}, "Recipient"), el("span", { class: "mono" }, p.to)),
       el("div", { class: "sub mono" }, p.screen),
     ];
   }
@@ -261,13 +261,13 @@ function exposure(report) {
   // A research contacts no firm: the row is shown for the lawyer mission's reports only.
   const firms = (report.firms_contacted || []).join(", ");
   return el("div", { class: "card" },
-    el("h3", {}, "Relevé d'exposition"),
-    el("div", { class: "sub" }, "Ce qui est sorti de cet ordinateur pendant la mission."),
-    el("div", { class: "row" }, el("span", {}, "Appels au modèle"), el("span", {}, report.model_calls ?? 0)),
+    el("h3", {}, "Exposure report"),
+    el("div", { class: "sub" }, "What left this computer during the mission."),
+    el("div", { class: "row" }, el("span", {}, "Model calls"), el("span", {}, report.model_calls ?? 0)),
     outputs.map(([name, count]) => el("div", { class: "row" }, el("span", {}, OUTPUT_LABELS[name] || name), el("span", {}, count))),
-    firms ? el("div", { class: "row" }, el("span", {}, "Cabinets contactés"), el("span", {}, firms)) : null,
-    (report.payments || []).map((p) => el("div", { class: "row" }, el("span", {}, "Paiement"), el("span", {}, `${near(p.amount || "0")} → ${p.to || "?"}`))),
-    report.mode !== "real" ? el("div", { class: "sub" }, "Relevé d'une simulation") : null);
+    firms ? el("div", { class: "row" }, el("span", {}, "Firms contacted"), el("span", {}, firms)) : null,
+    (report.payments || []).map((p) => el("div", { class: "row" }, el("span", {}, "Payment"), el("span", {}, `${near(p.amount || "0")} → ${p.to || "?"}`))),
+    report.mode !== "real" ? el("div", { class: "sub" }, "Report from a simulation") : null);
 }
 
 async function decide(pending, decision) {
@@ -276,7 +276,7 @@ async function decide(pending, decision) {
   if (decision === "accept" && pending.kind === "payment") args.digest = pending.payment.digest;
   if (decision === "accept" && pending.kind === "queries") {
     args.queries = (editedQueries[pending.id] || pending.queries).map((q) => q.trim()).filter(Boolean);
-    if (args.queries.length === 0) return toast("Gardez au moins une recherche.");
+    if (args.queries.length === 0) return toast("Keep at least one search.");
   }
   await run("confirm", args);
   lastChat = "";
@@ -296,20 +296,20 @@ function answer(entry) {
   const titles = Object.fromEntries((entry.sources || []).map((s) => [s.handle, s.title]));
   const notes = entry.notes || [];
   return el("div", { class: "card answer" },
-    el("h3", {}, "Réponse"),
+    el("h3", {}, "Answer"),
     el("p", { class: "answer-text" }, entry.answer),
-    notes.length ? el("h4", {}, "D'après les pages lues") : null,
+    notes.length ? el("h4", {}, "From the pages read") : null,
     notes.length ? el("ul", { class: "notes" }, notes.map((n) => el("li", {},
       el("div", {}, n.claim),
-      el("div", { class: "quote" }, `« ${n.quote} »`),
+      el("div", { class: "quote" }, `“${n.quote}”`),
       el("div", { class: "sub" }, `Source ${n.source}${titles[n.source] ? ` — ${titles[n.source]}` : ""}`)))) : null,
     el("h4", {}, "Sources"),
     (entry.sources || []).length
       ? el("ol", { class: "sources" }, entry.sources.map((s) => el("li", {},
           el("div", {}, `${s.handle} — ${s.title}`, el("span", { class: "sub" }, `  ${hostOf(s.url)}`)),
           el("div", { class: "mono" }, s.url))))
-      : el("div", { class: "sub" }, "Aucune source lue."),
-    el("div", { class: "sub" }, "Les adresses sont affichées pour information : ONA ne les ouvre pas."));
+      : el("div", { class: "sub" }, "No source read."),
+    el("div", { class: "sub" }, "Addresses are shown for information only: ONA does not open them."));
 }
 
 /** A suggested action: the person types the recipient, sees the exact action, then carries it out here. */
@@ -317,56 +317,56 @@ function action(a, state) {
   const key = `${selected}:${a.index}`;
   const isMessage = a.kind === "message";
   const card = el("div", { class: "card action" },
-    el("h3", {}, isMessage ? "Message proposé" : "Paiement proposé"),
+    el("h3", {}, isMessage ? "Suggested message" : "Suggested payment"),
     el("div", { class: "sub" }, a.purpose),
     isMessage ? el("div", { class: "message-text" }, a.text)
-      : el("div", { class: "row" }, el("span", {}, "Montant"), el("span", {}, near(a.amount || "0"))));
+      : el("div", { class: "row" }, el("span", {}, "Amount"), el("span", {}, near(a.amount || "0"))));
   const done = doneActions[key];
   if (state === "done") {
-    card.append(el("div", { class: "state accepted" }, isMessage ? "Remis à votre messagerie" : "Payé"));
+    card.append(el("div", { class: "state accepted" }, isMessage ? "Handed to your mail app" : "Paid"));
     if (done?.done === "message" && !done.opened) {
-      card.append(el("p", { class: "help" }, "La messagerie ne s'est pas ouverte. Adresse à copier dans votre messagerie :"),
+      card.append(el("p", { class: "help" }, "Your mail app did not open. Address to copy into your mail app:"),
         el("div", { class: "mono" }, done.mailto));
     }
-    if (done?.done === "payment") card.append(el("div", { class: "sub mono" }, `Transaction : ${done.tx}`));
+    if (done?.done === "payment") card.append(el("div", { class: "sub mono" }, `Transaction: ${done.tx}`));
     return card;
   }
   const prepared = preparedActions[key];
   if (prepared) {
     card.append(...[
-      el("h4", {}, "Action exacte"),
-      el("div", { class: "row" }, el("span", {}, "Destinataire"), el("span", { class: "mono" }, prepared.to)),
+      el("h4", {}, "Exact action"),
+      el("div", { class: "row" }, el("span", {}, "Recipient"), el("span", { class: "mono" }, prepared.to)),
       prepared.kind === "message"
         ? el("div", { class: "message-text" }, prepared.content)
-        : el("div", { class: "row" }, el("span", {}, "Montant"), el("span", {}, near(prepared.content))),
+        : el("div", { class: "row" }, el("span", {}, "Amount"), el("span", {}, near(prepared.content))),
       prepared.seen_in_pages
-        ? el("p", { class: "warn" }, "Cette adresse figure dans une page lue : vérifiez qu'elle est bien la bonne.")
+        ? el("p", { class: "warn" }, "This address appears in a page that was read: check that it is the right one.")
         : null,
       prepared.kind === "message"
-        ? el("p", { class: "help" }, "Le message s'ouvre dans votre messagerie : c'est vous qui l'envoyez.")
+        ? el("p", { class: "help" }, "The message opens in your mail app: you are the one who sends it.")
         : null,
       el("div", { class: "actions" },
-        el("button", { class: "secondary", onclick: () => { delete preparedActions[key]; lastChat = ""; refresh(); } }, "Modifier"),
+        el("button", { class: "secondary", onclick: () => { delete preparedActions[key]; lastChat = ""; refresh(); } }, "Edit"),
         el("button", { class: "primary", onclick: () => doAction(key, prepared) },
-          prepared.kind === "message" ? "Envoyer depuis ma messagerie" : "Payer")),
+          prepared.kind === "message" ? "Send from my mail app" : "Pay")),
     ].filter(Boolean));
     return card;
   }
   const input = el("input", {
     class: "field", value: recipients[key] || "",
-    placeholder: isMessage ? "Adresse e-mail du destinataire" : "Compte NEAR du destinataire (nom.testnet)",
-    "aria-label": "Destinataire",
+    placeholder: isMessage ? "Recipient email address" : "Recipient NEAR account (name.testnet)",
+    "aria-label": "Recipient",
     oninput: (event) => { recipients[key] = event.target.value; },
   });
-  card.append(el("label", { class: "recipient" }, "Destinataire", input),
+  card.append(el("label", { class: "recipient" }, "Recipient", input),
     el("div", { class: "actions" },
-      el("button", { class: "primary", onclick: () => prepareAction(key, a.index) }, "Préparer")));
+      el("button", { class: "primary", onclick: () => prepareAction(key, a.index) }, "Prepare")));
   return card;
 }
 
 async function prepareAction(key, index) {
   const to = (recipients[key] || "").trim();
-  if (!to) return toast("Indiquez le destinataire.");
+  if (!to) return toast("Enter the recipient.");
   try {
     const prepared = await run("research_action_prepare", { chat: selected, index, to });
     // ona-core holds one prepared action at a time: another one shown for this chat would no longer match.
@@ -471,7 +471,7 @@ $("new-chat").addEventListener("click", () => {
 });
 
 $("delete-chat").addEventListener("click", async () => {
-  if (!selected || !await ask("Supprimer la conversation ?", "Elle disparaît de cet ordinateur et du téléphone.", "Supprimer")) return;
+  if (!selected || !await ask("Delete the conversation?", "It disappears from this computer and from the phone.", "Delete")) return;
   await run("delete_chat", { id: selected });
   selected = null;
   lastState = "";
@@ -482,22 +482,22 @@ $("delete-chat").addEventListener("click", async () => {
 // Pool dialog (docs/desktop/pool-commands.md). Every operation: prepare, show the summary, confirm here, execute.
 
 const POOL_OPS = {
-  enter: "Placer du cash dans un vault",
-  switch: "Changer de vault",
-  exit: "Sortir d'un vault (en cash)",
-  exit_cash: "Payer le cash vers un compte",
-  deposit: "Déposer depuis un portefeuille NEAR",
+  enter: "Put cash into a vault",
+  switch: "Switch vaults",
+  exit: "Leave a vault (to cash)",
+  exit_cash: "Pay cash out to an account",
+  deposit: "Deposit from a NEAR wallet",
 };
 const SUMMARY_LABELS = {
-  amount: "Montant", vault: "Vault", from: "Depuis le vault", to: "Vers", shares_value: "Parts reçues (valeur)",
-  new_shares_value: "Nouvelles parts (valeur)", cash_value: "Cash reçu", received: "Reçu", left_in_cash: "Laissé dans le cash du pool (perdu)",
-  exit_limit: "Limite de sortie du compte", account: "Compte",
+  amount: "Amount", vault: "Vault", from: "From vault", to: "To", shares_value: "Shares received (value)",
+  new_shares_value: "New shares (value)", cash_value: "Cash received", received: "Received", left_in_cash: "Left in the pool's cash (lost)",
+  exit_limit: "Account exit limit", account: "Account",
 };
 const NOT_AMOUNTS = new Set(["vault", "from", "to", "account"]);
 
 async function pool(request) {
   const reply = await run("pool", { request });
-  if (reply.ok !== true) throw new Error(reply.error || "erreur du pool");
+  if (reply.ok !== true) throw new Error(reply.error || "pool error");
   return reply;
 }
 
@@ -515,36 +515,36 @@ async function openPool() {
 
 async function drawPortfolio() {
   const body = $("pool-body");
-  body.replaceChildren(el("p", { class: "help" }, "Lecture du pool…"));
+  body.replaceChildren(el("p", { class: "help" }, "Reading the pool…"));
   let portfolio;
   try {
     portfolio = await pool({ cmd: "pool_portfolio" });
   } catch (error) {
-    body.replaceChildren(el("p", { class: "error" }, `Pool indisponible : ${error.message}`),
-      el("p", { class: "help" }, "Le pool se configure avec pool.json dans le dossier de l'app (voir docs/desktop/tauri.md)."));
+    body.replaceChildren(el("p", { class: "error" }, `Pool unavailable: ${error.message}`),
+      el("p", { class: "help" }, "The pool is set up with pool.json in the app folder (see docs/desktop/tauri.md)."));
     return;
   }
   // The privacy figures (docs/desktop/privacy.md): read with the portfolio, shown only if the pool answers.
   const privacy = await pool({ cmd: "pool_privacy" }).catch(() => null);
   const holding = (name, value, pending, ...buttons) => el("div", { class: "holding" },
-    el("span", { class: "name" }, name, pending ? el("span", { class: "help" }, "  · opération en cours") : null),
+    el("span", { class: "name" }, name, pending ? el("span", { class: "help" }, "  · operation in progress") : null),
     el("span", { class: "value" }, near(value)), ...buttons);
   const vaults = portfolio.vaults || [];
   body.replaceChildren(
-    el("div", {}, el("p", { class: "help" }, "Valeur totale"), el("div", { class: "total" }, near(portfolio.total))),
-    portfolio.mode === "mock" ? el("p", { class: "warn" }, "Simulation : pool fictif (mode mock).") : null,
+    el("div", {}, el("p", { class: "help" }, "Total value"), el("div", { class: "total" }, near(portfolio.total))),
+    portfolio.mode === "mock" ? el("p", { class: "warn" }, "Simulation: fake pool (mock mode).") : null,
     privacy ? privacyCard(privacy) : null,
     el("div", {},
       holding("Cash", portfolio.cash.value, portfolio.cash.spending_value !== "0"),
-      ...vaults.map((v) => holding(`Vault ${v.vault}${v.frozen ? " (gelé)" : ""}`, v.value,
+      ...vaults.map((v) => holding(`Vault ${v.vault}${v.frozen ? " (frozen)" : ""}`, v.value,
         v.spending_value !== "0" || v.awaiting_signature > 0,
-        el("button", { class: "secondary", onclick: () => poolForm("switch", portfolio, v.vault) }, "Changer"),
-        el("button", { class: "secondary", onclick: () => poolForm("exit", portfolio, v.vault) }, "Sortir")))),
+        el("button", { class: "secondary", onclick: () => poolForm("switch", portfolio, v.vault) }, "Switch"),
+        el("button", { class: "secondary", onclick: () => poolForm("exit", portfolio, v.vault) }, "Leave")))),
     el("div", { class: "ops" },
-      el("button", { class: "primary", onclick: () => poolForm("enter", portfolio, undefined, privacy) }, "Placer du cash"),
-      el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Payer vers un compte"),
-      el("button", { class: "secondary", onclick: () => poolForm("deposit", portfolio) }, "Déposer"),
-      el("button", { class: "secondary", onclick: recover }, "Récupérer les opérations en attente")),
+      el("button", { class: "primary", onclick: () => poolForm("enter", portfolio, undefined, privacy) }, "Put cash in"),
+      el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Pay to an account"),
+      el("button", { class: "secondary", onclick: () => poolForm("deposit", portfolio) }, "Deposit"),
+      el("button", { class: "secondary", onclick: recover }, "Recover pending operations")),
   );
 }
 
@@ -552,21 +552,21 @@ async function drawPortfolio() {
 function privacyCard(p) {
   const smallest = p.wallet.smallest_set;
   const line = smallest === null || smallest === undefined
-    ? "Aucun billet dans le pool pour l'instant."
+    ? "No notes in the pool yet."
     : smallest <= 1
-      ? "Votre billet le moins protégé est seul de sa valeur à sa place : un observateur de la chaîne peut le suivre."
-      : `Votre billet le moins protégé se confond avec au plus ${smallest} billets de même valeur au même endroit.`;
+      ? "Your least protected note is the only one of its value in its place: anyone watching the chain can follow it."
+      : `Your least protected note blends in with at most ${smallest} notes of the same value in the same place.`;
   return el("div", { class: "card privacy" },
-    el("h3", {}, "Confidentialité"),
+    el("h3", {}, "Privacy"),
     el("p", {}, line),
-    el("p", { class: "help" }, `Sans ONA, un dépôt direct en staking est lié à votre compte : 1. Chiffre maximal, compté sur la chaîne ; un observateur qui recoupe les dates et les montants peut en exclure certains.`));
+    el("p", { class: "help" }, `Without ONA, a direct staking deposit is tied to your account: 1. These are upper bounds, counted on the chain; someone who cross-checks dates and amounts can rule some notes out.`));
 }
 
 /** "+ X" next to a vault: how many more notes an entry would hide among than the cash it spends. */
 function gainLabel(v) {
   if (v.if_entered === undefined) return "";
   const gain = v.gain === undefined ? "" : v.gain >= 0 ? `, +${v.gain}` : `, ${v.gain}`;
-  return ` — parmi ${v.if_entered} billets${gain}`;
+  return ` — among ${v.if_entered} notes${gain}`;
 }
 
 /** The form of one operation; on submit, `pool_prepare`, then the summary to confirm. */
@@ -576,18 +576,18 @@ function poolForm(op, portfolio, vault, privacy) {
     .filter((i) => i !== except)
     .map((i) => el("option", { value: i }, `Vault ${i}${op === "enter" && byVault.has(i) ? gainLabel(byVault.get(i)) : ""}`));
   const amountField = (label, all) => el("label", {}, label,
-    el("input", { name: "amount", placeholder: all ? "en NEAR, ou « tout »" : "en NEAR", required: true }));
+    el("input", { name: "amount", placeholder: all ? "in NEAR, or “all”" : "in NEAR", required: true }));
   const fields = {
-    enter: [el("label", {}, "Vault", el("select", { name: "vault" }, vaultOptions())), amountField("Cash à placer", true)],
-    switch: [el("label", {}, "Vers le vault", el("select", { name: "to" }, vaultOptions(vault))), amountField(`Parts du vault ${vault} à déplacer`, true)],
-    exit: [amountField(`Parts du vault ${vault} à sortir en cash`, true)],
-    exit_cash: [el("label", {}, "Compte NEAR qui a déposé", el("input", { name: "to", placeholder: "nom.testnet", required: true })), amountField("Cash à payer", false)],
-    deposit: [el("label", {}, "Votre compte NEAR", el("input", { name: "account", placeholder: "nom.testnet", required: true })), amountField("Montant à déposer", false)],
+    enter: [el("label", {}, "Vault", el("select", { name: "vault" }, vaultOptions())), amountField("Cash to put in", true)],
+    switch: [el("label", {}, "To vault", el("select", { name: "to" }, vaultOptions(vault))), amountField(`Shares of vault ${vault} to move`, true)],
+    exit: [amountField(`Shares of vault ${vault} to turn into cash`, true)],
+    exit_cash: [el("label", {}, "NEAR account that deposited", el("input", { name: "to", placeholder: "name.testnet", required: true })), amountField("Cash to pay", false)],
+    deposit: [el("label", {}, "Your NEAR account", el("input", { name: "account", placeholder: "name.testnet", required: true })), amountField("Amount to deposit", false)],
   }[op];
   const form = el("form", {}, el("h3", {}, POOL_OPS[op]), ...fields,
     el("div", { class: "card-actions actions" },
-      el("button", { type: "button", class: "secondary", onclick: drawPortfolio }, "Annuler"),
-      el("button", { type: "submit", class: "primary" }, "Préparer")));
+      el("button", { type: "button", class: "secondary", onclick: drawPortfolio }, "Cancel"),
+      el("button", { type: "submit", class: "primary" }, "Prepare")));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(form));
@@ -595,7 +595,7 @@ function poolForm(op, portfolio, vault, privacy) {
     if (data.amount !== undefined) {
       const all = /^\s*(tout|all)\s*$/i.test(data.amount);
       const amount = all ? "all" : yocto(data.amount);
-      if (!amount) return toast("Montant illisible : écrivez par exemple 1.5");
+      if (!amount) return toast("Unreadable amount: write for example 1.5");
       request.amount = amount;
     }
     if (op === "enter") request.vault = Number(data.vault);
@@ -606,7 +606,7 @@ function poolForm(op, portfolio, vault, privacy) {
     try {
       showSummary(await pool(request));
     } catch (error) {
-      toast(`Préparation refusée : ${error.message}`);
+      toast(`Preparation refused: ${error.message}`);
     }
   });
   $("pool-body").replaceChildren(form);
@@ -622,22 +622,22 @@ function summaryRows(summary) {
 function showSummary(prepared) {
   const summary = prepared.summary;
   const fees = Object.entries(summary.fees || {}).map(([key, value]) =>
-    el("div", { class: "row" }, el("span", {}, `Frais : ${key}`), el("span", {}, /^\d+$/.test(String(value)) ? near(String(value)) : String(value))));
+    el("div", { class: "row" }, el("span", {}, `Fee: ${key}`), el("span", {}, /^\d+$/.test(String(value)) ? near(String(value)) : String(value))));
   const warnings = [summary.warning, ...(summary.warnings || [])].filter(Boolean).map((w) => el("p", { class: "warn" }, w));
-  const expires = new Date(Number(BigInt(summary.expires_at) / 1000000n)).toLocaleTimeString("fr-FR");
+  const expires = new Date(Number(BigInt(summary.expires_at) / 1000000n)).toLocaleTimeString("en-US");
   const card = el("div", { class: "card" }, el("h3", {}, POOL_OPS[summary.op] || summary.op),
     ...summaryRows(summary), ...fees, ...warnings,
-    el("p", { class: "help" }, `Réseau ${summary.network}, contrat ${summary.contract}. Valable jusqu'à ${expires}.`));
+    el("p", { class: "help" }, `Network ${summary.network}, contract ${summary.contract}. Valid until ${expires}.`));
   if (summary.op === "deposit") {
     // Sent and signed by the person's own NEAR wallet, on a page the app opens in the browser (docs/desktop/wallet.md).
-    card.append(el("p", { class: "help" }, "Votre portefeuille NEAR envoie ce dépôt, puis signe un message pour l'agent du pool. ONA ne voit jamais ses clés."),
+    card.append(el("p", { class: "help" }, "Your NEAR wallet sends this deposit, then signs a message for the pool agent. ONA never sees its keys."),
       el("div", { class: "card-actions actions" },
-        el("button", { class: "secondary", onclick: drawPortfolio }, "Annuler"),
-        el("button", { class: "primary", onclick: () => openWallet(prepared) }, "Ouvrir mon portefeuille")));
+        el("button", { class: "secondary", onclick: drawPortfolio }, "Cancel"),
+        el("button", { class: "primary", onclick: () => openWallet(prepared) }, "Open my wallet")));
   } else {
     card.append(el("div", { class: "card-actions actions" },
-      el("button", { class: "secondary", onclick: drawPortfolio }, "Annuler"),
-      el("button", { class: "primary", onclick: () => execute(prepared.prepared_id) }, "Confirmer")));
+      el("button", { class: "secondary", onclick: drawPortfolio }, "Cancel"),
+      el("button", { class: "primary", onclick: () => execute(prepared.prepared_id) }, "Confirm")));
   }
   $("pool-body").replaceChildren(card);
 }
@@ -651,21 +651,21 @@ async function openWallet(prepared) {
     return;
   }
   $("pool-body").replaceChildren(el("div", { class: "card" },
-    el("h3", {}, "Dépôt en cours dans votre navigateur"),
-    el("p", { class: "help" }, "La page de votre portefeuille s'est ouverte. Si ce n'est pas le cas, ouvrez cette adresse dans votre navigateur :"),
+    el("h3", {}, "Deposit in progress in your browser"),
+    el("p", { class: "help" }, "Your wallet page has opened. If it has not, open this address in your browser:"),
     el("p", { class: "mono" }, url),
-    el("p", { class: "help" }, "Une fois la page terminée, actualisez : les billets apparaissent quand l'agent du pool les a émis."),
-    el("div", { class: "card-actions actions" }, el("button", { class: "primary", onclick: drawPortfolio }, "Actualiser"))));
+    el("p", { class: "help" }, "Once the page is done, refresh: the notes appear when the pool agent has issued them."),
+    el("div", { class: "card-actions actions" }, el("button", { class: "primary", onclick: drawPortfolio }, "Refresh"))));
 }
 
 async function execute(preparedId) {
   try {
     const reply = await pool({ cmd: "pool_execute", prepared_id: preparedId });
-    toast(reply.complete ? "Opération faite." : "Opération en partie faite : voir les étapes.");
+    toast(reply.complete ? "Operation done." : "Operation partly done: see the steps.");
   } catch (error) {
     // Entries, exits and cash payments are queued by the pool agent: their outcome comes later through pool_recover.
-    if (/outcome unknown/.test(error.message)) toast("Envoyée à l'agent du pool : le résultat arrivera plus tard (Récupérer).");
-    else toast(`Opération refusée : ${error.message}`);
+    if (/outcome unknown/.test(error.message)) toast("Sent to the pool agent: the result will come later (Recover).");
+    else toast(`Operation refused: ${error.message}`);
   }
   await drawPortfolio();
 }
@@ -673,9 +673,9 @@ async function execute(preparedId) {
 async function recover() {
   try {
     const r = await pool({ cmd: "pool_recover" });
-    toast(`Récupération : ${r.spent} faites, ${r.held_again} revenues, ${r.still_spending} en attente${r.agent_error ? ` (agent : ${r.agent_error})` : ""}.`);
+    toast(`Recovery: ${r.spent} done, ${r.held_again} returned, ${r.still_spending} pending${r.agent_error ? ` (agent: ${r.agent_error})` : ""}.`);
   } catch (error) {
-    toast(`Récupération impossible : ${error.message}`);
+    toast(`Could not recover: ${error.message}`);
   }
   await drawPortfolio();
 }

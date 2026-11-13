@@ -207,7 +207,7 @@ impl TorService {
         if let Some(child) = self.child.as_mut() {
             if let Ok(Some(_)) = child.try_wait() {
                 self.child = None;
-                self.state = TorState::Failed("tor s'est arrêté".into());
+                self.state = TorState::Failed("tor stopped".into());
                 return;
             }
         }
@@ -232,7 +232,7 @@ impl TorService {
             }
         }
         if self.started.is_some_and(|t| t.elapsed() > PUBLISH_LIMIT) {
-            self.state = TorState::Failed("le service .onion ne répond pas par Tor".into());
+            self.state = TorState::Failed("the .onion service does not answer through Tor".into());
             return;
         }
         let started_long_enough = self.started.is_some_and(|t| t.elapsed() >= PROBE_START);

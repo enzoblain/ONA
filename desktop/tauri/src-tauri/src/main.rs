@@ -23,7 +23,7 @@ use worker::{Mode, Worker};
 type Reply = Result<Value, String>;
 
 fn call(worker: &Worker, job: impl FnOnce(&mut worker::App) -> Reply + Send + 'static) -> Reply {
-    worker.call(job).unwrap_or_else(|| Err("ONA s'est arrêté".into()))
+    worker.call(job).unwrap_or_else(|| Err("ONA has stopped".into()))
 }
 
 #[tauri::command]
@@ -86,9 +86,9 @@ async fn research_action_do(worker: State<'_, Worker>, chat: String, digest: Str
 #[tauri::command]
 async fn pool(worker: State<'_, Worker>, request: Value) -> Reply {
     if !matches!(request["cmd"].as_str(), Some("pool_portfolio" | "pool_prepare" | "pool_execute" | "pool_recover" | "pool_privacy")) {
-        return Err("commande du pool inconnue".into());
+        return Err("unknown pool command".into());
     }
-    let sender = worker.call(|app| app.engine.pool_sender()).ok_or("ONA s'est arrêté")?;
+    let sender = worker.call(|app| app.engine.pool_sender()).ok_or("ONA has stopped")?;
     tauri::async_runtime::spawn_blocking(move || {
         let (reply, answer) = std::sync::mpsc::channel();
         sender.send((request, reply)).map_err(|_| "ona-core stopped".to_string())?;
@@ -120,7 +120,7 @@ async fn forget_phone(worker: State<'_, Worker>) -> Reply {
 
 #[tauri::command]
 async fn set_mode(worker: State<'_, Worker>, mode: String) -> Reply {
-    let mode = Mode::parse(&mode, worker::LOCAL_MODE_ALLOWED).ok_or("mode inconnu")?;
+    let mode = Mode::parse(&mode, worker::LOCAL_MODE_ALLOWED).ok_or("unknown mode")?;
     call(&worker, move |app| app.set_mode(mode).map(|_| Value::Null))
 }
 
@@ -134,7 +134,7 @@ fn computer_name() -> String {
     from_env.or_else(from_file).or_else(from_command)
         .map(|n| n.trim().to_owned())
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "Mon ordinateur".into())
+        .unwrap_or_else(|| "My computer".into())
 }
 
 /// Debug builds only: prints the pairing text on stdout (for the iOS simulator, which cannot scan a QR code) and,

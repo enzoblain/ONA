@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -10,62 +10,62 @@
   <aside id="sidebar">
     <header>
       <h1>Conversations</h1>
-      <button id="new-chat" class="icon" title="Nouvelle conversation" aria-label="Nouvelle conversation">+</button>
+      <button id="new-chat" class="icon" title="New conversation" aria-label="New conversation">+</button>
     </header>
     <ul id="chat-list"></ul>
-    <p id="no-chats" class="empty" hidden>Aucune conversation</p>
+    <p id="no-chats" class="empty" hidden>No conversations</p>
     <button id="pool-button" class="phone-button">
       <span class="dot ok"></span>
       <span>Pool</span>
     </button>
     <button id="phone-button" class="phone-button">
       <span id="phone-dot" class="dot"></span>
-      <span id="phone-label">Aucun téléphone</span>
+      <span id="phone-label">No phone</span>
     </button>
   </aside>
 
   <main>
-    <div id="mode-banner" class="banner" hidden>Simulation — modèle, web et paiements fictifs (ona-core en mode mock)</div>
+    <div id="mode-banner" class="banner" hidden>Simulation — model, web and payments are fake (ona-core in mock mode)</div>
 
     <section id="welcome" class="welcome">
       <div class="logo"></div>
-      <h2>Que dois-je faire pour vous ?</h2>
-      <p>Posez une question : l'agent travaille sur cet ordinateur. Il vous montre ses recherches avant de les lancer, répond avec ses sources, et ne contacte ni ne paie personne sans votre accord, donné sur cet ordinateur.</p>
+      <h2>What can I do for you?</h2>
+      <p>Ask a question: the agent works on this computer. It shows you its searches before running them, answers with its sources, and never contacts or pays anyone without your approval, given on this computer.</p>
     </section>
 
     <section id="conversation" hidden>
       <header class="conversation-header">
         <h2 id="chat-title"></h2>
-        <button id="delete-chat" class="ghost danger">Supprimer</button>
+        <button id="delete-chat" class="ghost danger">Delete</button>
       </header>
       <div id="items" class="items"></div>
     </section>
 
     <form id="composer" class="composer">
-      <textarea id="text" rows="1" maxlength="2000" placeholder="Demandez à l'agent…"></textarea>
-      <button id="send" type="submit" class="send" aria-label="Envoyer">↑</button>
+      <textarea id="text" rows="1" maxlength="2000" placeholder="Ask the agent…"></textarea>
+      <button id="send" type="submit" class="send" aria-label="Send">↑</button>
     </form>
   </main>
 
   <dialog id="phone-dialog">
     <header>
-      <h2>Téléphone</h2>
-      <button id="close-phone" class="ghost">Fermer</button>
+      <h2>Phone</h2>
+      <button id="close-phone" class="ghost">Close</button>
     </header>
     <div id="phone-body"></div>
     <section class="connection">
-      <h3>Connexion</h3>
+      <h3>Connection</h3>
       <div class="segmented" role="radiogroup" hidden>
-        <button data-mode="tor">Par Tor</button>
-        <button data-mode="local">Réseau local (développement)</button>
+        <button data-mode="tor">Through Tor</button>
+        <button data-mode="local">Local network (development)</button>
       </div>
       <p id="mode-help" class="help"></p>
       <p id="reachable" class="mono"></p>
       <p id="server-error" class="error" hidden></p>
       <p id="last-request" class="help"></p>
       <div id="relay-client" hidden>
-        <h3>Relais</h3>
-        <p class="help">Pour que cet ordinateur puisse joindre le relais .onion (s'il est réservé à des clients nommés), donnez cette ligne à la personne qui le fait tourner :</p>
+        <h3>Relay</h3>
+        <p class="help">For this computer to reach the .onion relay (if it only accepts named clients), give this line to the person who runs it:</p>
         <p id="relay-client-line" class="mono"></p>
       </div>
     </section>
@@ -74,17 +74,17 @@
   <dialog id="pool-dialog" class="pool">
     <header>
       <h2>Pool</h2>
-      <button id="close-pool" class="ghost">Fermer</button>
+      <button id="close-pool" class="ghost">Close</button>
     </header>
     <div id="pool-body"></div>
-    <p class="help pool-note">Les opérations du pool se confirment ici, jamais sur le téléphone.</p>
+    <p class="help pool-note">Pool operations are confirmed here, never on the phone.</p>
   </dialog>
 
   <dialog id="ask-dialog" class="ask">
     <h2 id="ask-title"></h2>
     <p id="ask-text" class="help"></p>
     <div class="actions">
-      <button id="ask-cancel" class="secondary">Annuler</button>
+      <button id="ask-cancel" class="secondary">Cancel</button>
       <button id="ask-ok" class="primary danger-fill"></button>
     </div>
   </dialog>

@@ -149,7 +149,7 @@ fn read_secret_store() -> Result<(SystemStore, Option<Vec<u8>>), String> {
         return Err("tests: no system credential store".into());
     }
     if cfg!(debug_assertions) && std::env::var("ONA_NO_KEYCHAIN").as_deref() == Ok("1") {
-        return Err("désactivé pour le développement (ONA_NO_KEYCHAIN)".into());
+        return Err("disabled for development (ONA_NO_KEYCHAIN)".into());
     }
     let store = SystemStore::new()?;
     let got = store.get()?;
@@ -226,7 +226,7 @@ impl App {
         let loaded = match secrets.try_recv() {
             Ok(result) => result.map(|(store, got)| (Box::new(store) as Box<dyn SecretStore>, got)),
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => Err("la lecture du trousseau s'est arrêtée".into()),
+            Err(mpsc::TryRecvError::Disconnected) => Err("reading the credential store stopped".into()),
         };
         self.secrets = None;
         self.pairing = PairingAuthority::with_loaded_secrets(&self.name, self.data_dir.join("pairing.json"), loaded);
@@ -256,7 +256,7 @@ impl App {
                 }
                 self.server = Some(server);
             }
-            Err(e) => self.server_error = Some(format!("Écoute impossible : {e}. Nouvel essai…")),
+            Err(e) => self.server_error = Some(format!("Cannot listen: {e}. Trying again…")),
         }
     }
 
@@ -285,7 +285,7 @@ impl App {
 
     pub fn set_mode(&mut self, mode: Mode) -> Result<(), String> {
         if mode == Mode::LocalNetwork && !LOCAL_MODE_ALLOWED {
-            return Err("mode réservé aux versions de développement".into());
+            return Err("this mode is for development builds only".into());
         }
         if mode == self.mode {
             return Ok(());
@@ -293,7 +293,7 @@ impl App {
         self.mode = mode;
         let saved = std::fs::create_dir_all(&self.data_dir).and_then(|_| std::fs::write(self.data_dir.join("mode"), mode.name()));
         self.serve();
-        saved.map_err(|e| format!("Choix non enregistré : {e}"))
+        saved.map_err(|e| format!("Choice not saved: {e}"))
     }
 
     /// Opens the wallet page for a deposit prepared in the pool window (its `pool_prepare` reply), and returns its
@@ -304,7 +304,7 @@ impl App {
             let worker = Worker { jobs: self.jobs.clone() };
             let handler: server::Handler = Arc::new(move |request: http::Request| wallet_request(&worker, request));
             let server = PhoneServer::start(Exposure::Localhost, 0, handler, server::Limits::default())
-                .map_err(|e| format!("page du portefeuille : {e}"))?;
+                .map_err(|e| format!("wallet page: {e}"))?;
             self.wallet_server = Some(server);
         }
         let port = self.wallet_server.as_ref().map(|s| s.port).unwrap_or_default();

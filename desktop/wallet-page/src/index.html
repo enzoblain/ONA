@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>ONA — dépôt dans le pool</title>
+  <title>ONA — pool deposit</title>
   <link rel="stylesheet" href="wallet.css">
   <style>
     :root { color-scheme: light dark; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -22,16 +22,16 @@
   </style>
 </head>
 <body>
-  <h1>Dépôt dans le pool ONA</h1>
+  <h1>Deposit into the ONA pool</h1>
   <dl>
-    <dt>Compte qui dépose</dt><dd id="account">…</dd>
-    <dt>Montant envoyé</dt><dd id="amount">…</dd>
-    <dt>Contrat</dt><dd id="receiver">…</dd>
-    <dt>Réseau</dt><dd id="network">…</dd>
+    <dt>Depositing account</dt><dd id="account">…</dd>
+    <dt>Amount sent</dt><dd id="amount">…</dd>
+    <dt>Contract</dt><dd id="receiver">…</dd>
+    <dt>Network</dt><dd id="network">…</dd>
   </dl>
-  <p class="help">Votre portefeuille NEAR envoie ce dépôt, puis signe un message pour l'agent du pool. ONA ne voit jamais les clés de votre portefeuille. Le dépôt est public sur la chaîne ; les billets que vous recevrez ensuite ne sont pas liés à ce compte.</p>
-  <button id="go" disabled>Ouvrir mon portefeuille</button>
-  <p id="status">Chargement…</p>
+  <p class="help">Your NEAR wallet sends this deposit, then signs a message for the pool agent. ONA never sees your wallet's keys. The deposit is public on the chain; the notes you receive afterwards are not linked to this account.</p>
+  <button id="go" disabled>Open my wallet</button>
+  <p id="status">Loading…</p>
   <script src="wallet.js"></script>
 </body>
 </html>

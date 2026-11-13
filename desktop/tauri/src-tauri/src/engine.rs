@@ -135,25 +135,25 @@ fn stopped() -> Value {
 
 pub const MAX_TEXT: usize = 2000;
 const CONTACT_MESSAGE: &str = "Bonjour, je souhaite un devis pour une consultation en droit du travail.";
-const PLAN_MESSAGE: &str = "J'ai préparé un plan en {} étapes. Il est figé avant toute lecture du web : je ne contacterai personne et ne paierai rien sans votre accord. Validez-le pour que je commence.";
-const RECIPIENT_MESSAGE: &str = "J'ai trouvé {} offres. Laquelle dois-je contacter ?";
-const PAYMENT_MESSAGE: &str = "Le cabinet est contacté. Il reste à confirmer le paiement de la consultation.";
-const DONE_MESSAGE: &str = "C'est fait. Voici ce qui est sorti de votre ordinateur pendant cette mission.";
-const CANCELLED_MESSAGE: &str = "Mission arrêtée à votre demande. Rien d'autre ne sera envoyé.";
-const BUSY_MESSAGE: &str = "Je suis encore sur la mission en cours : je vous tiens au courant ici.";
-const QUERIES_MESSAGE: &str = "Voici les recherches que je propose. Rien ne quitte votre ordinateur avant votre accord : validez-les ici ou sur votre téléphone (on ne peut les modifier que sur l'ordinateur).";
-const ANSWER_MESSAGE: &str = "Voici ma réponse, avec ses sources.";
-const ACTIONS_MESSAGE: &str = "Voici ma réponse, avec ses sources. Je vous propose aussi {} action(s) : vous les complétez sur l'ordinateur, avec votre accord.";
-const QUERIES_CANCELLED_MESSAGE: &str = "Recherche arrêtée à votre demande : aucune requête n'est partie.";
+const PLAN_MESSAGE: &str = "I have prepared a {}-step plan. It is fixed before anything is read on the web: I will contact no one and pay nothing without your approval. Approve it so I can start.";
+const RECIPIENT_MESSAGE: &str = "I found {}. Which one should I contact?";
+const PAYMENT_MESSAGE: &str = "The firm has been contacted. The consultation payment still needs your confirmation.";
+const DONE_MESSAGE: &str = "Done. Here is what left your computer during this mission.";
+const CANCELLED_MESSAGE: &str = "Mission stopped at your request. Nothing else will be sent.";
+const BUSY_MESSAGE: &str = "I am still working on the current mission: I will keep you posted here.";
+const QUERIES_MESSAGE: &str = "Here are the searches I suggest. Nothing leaves your computer before you approve: approve them here or on your phone (they can only be edited on the computer).";
+const ANSWER_MESSAGE: &str = "Here is my answer, with its sources.";
+const ACTIONS_MESSAGE: &str = "Here is my answer, with its sources. I also suggest {}, to complete on this computer with your approval.";
+const QUERIES_CANCELLED_MESSAGE: &str = "Search stopped at your request: no query was sent.";
 
 fn running_label(tool: &str) -> Option<&'static str> {
     Some(match tool {
-        "search" => "Recherche en cours…",
-        "read" => "Lecture d'une page…",
-        "compare" => "Comparaison des offres…",
-        "contact" => "Prise de contact…",
-        "prepare_payment" => "Préparation du paiement…",
-        "pay" => "Envoi du paiement…",
+        "search" => "Searching…",
+        "read" => "Reading a page…",
+        "compare" => "Comparing the offers…",
+        "contact" => "Getting in touch…",
+        "prepare_payment" => "Preparing the payment…",
+        "pay" => "Sending the payment…",
         _ => return None,
     })
 }
@@ -167,7 +167,7 @@ fn ok(reply: &Value) -> bool {
 }
 
 fn error_of(reply: &Value) -> String {
-    reply["error"].as_str().unwrap_or("erreur inconnue").to_owned()
+    reply["error"].as_str().unwrap_or("unknown error").to_owned()
 }
 
 /// What binds a payment confirmation to one mission, once (format v2, shared with ona-core).
@@ -371,14 +371,14 @@ impl Chat {
         }
         if let Some(r) = &run.research {
             return Some(match r.stage {
-                Stage::Open | Stage::Propose => ("think".into(), "Choix des recherches…"),
-                Stage::Steps if r.searched < r.queries => ("search".into(), "Recherche en cours…"),
-                Stage::Steps if r.read < r.sources.len() => ("read".into(), "Lecture d'une page…"),
-                _ => ("think".into(), "Rédaction de la réponse…"),
+                Stage::Open | Stage::Propose => ("think".into(), "Choosing the searches…"),
+                Stage::Steps if r.searched < r.queries => ("search".into(), "Searching…"),
+                Stage::Steps if r.read < r.sources.len() => ("read".into(), "Reading a page…"),
+                _ => ("think".into(), "Writing the answer…"),
             });
         }
         if run.plan.is_empty() {
-            return Some(("think".into(), "Préparation d'un plan…"));
+            return Some(("think".into(), "Preparing a plan…"));
         }
         let tool = run.plan.get(run.cursor)?;
         running_label(tool).map(|text| (tool.clone(), text))
@@ -568,9 +568,9 @@ impl ChatEngine {
             research.stage = Stage::Steps;
             run.phase = Phase::Running;
             if accepted != *shown {
-                let list: Vec<String> = accepted.iter().map(|q| format!("« {q} »")).collect();
+                let list: Vec<String> = accepted.iter().map(|q| format!("“{q}”")).collect();
                 chat.add(Content::Activity { tool: "think".into(),
-                                             text: format!("Recherches modifiées sur l'ordinateur : {}", list.join(", ")) });
+                                             text: format!("Searches edited on the computer: {}", list.join(", ")) });
             }
             chat.decide(id, "accepted");
             return Ok(());
@@ -635,12 +635,12 @@ impl ChatEngine {
     fn action_run(&mut self, chat_id: &str, index: u64) -> Result<&mut Chat, String> {
         let chat = self.chat_mut(chat_id).ok_or_else(|| ProtocolError::UnknownChat.code().to_owned())?;
         let run = chat.run.as_ref().filter(|r| r.research.as_ref().is_some_and(|r| r.stage == Stage::Answered))
-            .ok_or("cette recherche n'est plus en cours : l'action n'est plus disponible")?;
+            .ok_or("this search is no longer running: the action is no longer available")?;
         let serial = run.serial;
         let suggested = chat.items.iter().any(|item| matches!(&item.content,
             Content::Action { run, action, done: false } if *run == serial && action["index"].as_u64() == Some(index)));
         if !suggested {
-            return Err("cette action n'est plus disponible".into());
+            return Err("this action is no longer available".into());
         }
         Ok(chat)
     }
@@ -671,7 +671,7 @@ impl ChatEngine {
     pub fn action_do(&mut self, chat_id: &str, digest: &str) -> Result<Value, String> {
         let chat = self.chat_mut(chat_id).ok_or_else(|| ProtocolError::UnknownChat.code().to_owned())?;
         let index = chat.run.as_ref().and_then(|r| r.research.as_ref()).and_then(|r| r.prepared)
-            .ok_or("aucune action préparée")? as u64;
+            .ok_or("no action prepared")? as u64;
         let chat = self.action_run(chat_id, index)?;
         let Some(run) = chat.run.as_mut() else { return Err("no research".into()) };
         let confirmed = run.core.call(json!({"cmd": "research_action_confirm", "digest": digest}));
@@ -699,8 +699,8 @@ impl ChatEngine {
             item.content = Content::Exposure(exposure);
         }
         let text = match done["done"].as_str() {
-            Some("payment") => format!("Paiement envoyé : {}", done["tx"].as_str().unwrap_or("?")),
-            _ => "Message ouvert dans votre messagerie : à vous de l'envoyer".to_owned(),
+            Some("payment") => format!("Payment sent: {}", done["tx"].as_str().unwrap_or("?")),
+            _ => "Message opened in your mail app: it is up to you to send it".to_owned(),
         };
         chat.add(Content::Activity { tool: "action".into(), text });
         if let Some(object) = done.as_object_mut() {
@@ -780,7 +780,7 @@ fn step(chat: &mut Chat) -> Option<String> {
             return None;
         }
         run.opened = true;
-        chat.add(Content::Activity { tool: "think".into(), text: "Lecture de votre demande et préparation d'un plan".into() });
+        chat.add(Content::Activity { tool: "think".into(), text: "Reading your request and preparing a plan".into() });
         return opened["mode"].as_str().map(String::from);
     }
     if run.plan.is_empty() {
@@ -811,7 +811,7 @@ fn advance(chat: &mut Chat) {
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
             run.handles = reply["handles"].as_array().map(|h| h.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            activity(format!("Recherche « avocat droit du travail paris » : {} résultats", run.handles.len()))
+            activity(format!("Search “avocat droit du travail paris”: {}", plural(run.handles.len(), "result")))
         }
         "read" => {
             let Some(handle) = run.handles.get(run.read_count).cloned() else { return fail(chat, "no page left to read") };
@@ -821,23 +821,23 @@ fn advance(chat: &mut Chat) {
             let (Some(firm), Some(price), Some(delay)) = (offer["firm_id"].as_str(), offer["price_cents"].as_i64(), offer["delay_days"].as_i64())
             else { return fail(chat, &error_of(&reply)) };
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
-            activity(format!("Lecture d'une page : {firm}, {} €, sous {delay} jours", price / 100))
+            activity(format!("Read a page: {firm}, €{}, within {}", price / 100, plural(delay as usize, "day")))
         }
         "compare" => {
             let Some(reply) = run.core.poll(json!({"cmd": "compare"})) else { return };
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
             run.ranked = reply["ranked"].as_array().cloned().unwrap_or_default();
-            activity(format!("Comparaison : {} offres classées", run.ranked.len()))
+            activity(format!("Comparison: {} ranked", plural(run.ranked.len(), "offer")))
         }
         "confirm_recipient" => {
             let ranked = run.ranked.clone();
-            chat.add(Content::Agent(RECIPIENT_MESSAGE.replace("{}", &ranked.len().to_string())));
+            chat.add(Content::Agent(RECIPIENT_MESSAGE.replace("{}", &plural(ranked.len(), "offer"))));
             return wait(chat, Request::Recipient(ranked));
         }
         "contact" => {
             let Some(reply) = run.core.poll(json!({"cmd": "contact", "message": CONTACT_MESSAGE})) else { return };
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
-            activity(format!("Message générique envoyé à {}", run.chosen.as_deref().unwrap_or("?")))
+            activity(format!("Generic message sent to {}", run.chosen.as_deref().unwrap_or("?")))
         }
         "prepare_payment" => {
             // No amount: ona-core computes it from the chosen offer's price and the policy's rate.
@@ -849,7 +849,7 @@ fn advance(chat: &mut Chat) {
             };
             run.cursor += 1;
             let next_is_confirmation = run.plan.get(run.cursor).is_some_and(|t| t == "confirm_payment");
-            chat.add(activity("Paiement préparé à partir de l'annuaire".into()));
+            chat.add(activity("Payment prepared from the directory".into()));
             if next_is_confirmation {
                 chat.add(Content::Agent(PAYMENT_MESSAGE.into()));
                 wait(chat, request);
@@ -860,7 +860,7 @@ fn advance(chat: &mut Chat) {
         "pay" => {
             let Some(reply) = run.core.poll(json!({"cmd": "pay"})) else { return };
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
-            activity(format!("Paiement envoyé : {}", reply["tx"].as_str().unwrap_or("?")))
+            activity(format!("Payment sent: {}", reply["tx"].as_str().unwrap_or("?")))
         }
         other => return fail(chat, &format!("unknown step {other}")),
     };
@@ -869,7 +869,7 @@ fn advance(chat: &mut Chat) {
 }
 
 fn plural(count: usize, word: &str) -> String {
-    format!("{count} {word}{}", if count > 1 { "s" } else { "" })
+    format!("{count} {word}{}", if count == 1 { "" } else { "s" })
 }
 
 /// Moves a free research on by one ona-core command (docs/research.md, "The flow"). The slow ones (the model, Tor)
@@ -886,7 +886,7 @@ fn step_research(chat: &mut Chat) -> Option<String> {
                 return None;
             }
             r.stage = Stage::Propose;
-            chat.add(think("Lecture de votre question et choix des recherches"));
+            chat.add(think("Reading your question and choosing the searches"));
             return opened["mode"].as_str().map(String::from);
         }
         Stage::Propose => {
@@ -908,7 +908,7 @@ fn step_research(chat: &mut Chat) -> Option<String> {
             }
             let handle = reply["handle"].as_str().unwrap_or_default();
             let site = r.sources.iter().find(|(h, _)| h == handle).map(|(_, s)| s.clone()).unwrap_or_else(|| "?".into());
-            let error = reply["error"].as_str().unwrap_or("erreur inconnue");
+            let error = reply["error"].as_str().unwrap_or("unknown error");
             let activity = |tool: &str, text: String| Content::Activity { tool: tool.into(), text };
             let content = match reply["event"].as_str().unwrap_or_default() {
                 "searched" => {
@@ -921,28 +921,28 @@ fn step_research(chat: &mut Chat) -> Option<String> {
                     let query = reply["query"].as_str().unwrap_or_default();
                     match reply["error"].as_str() {
                         // One query failed; the others go on (ona-core stops only when none gave a page).
-                        Some(failure) => activity("search", format!("Recherche « {query} » : échec ({failure})")),
-                        None => activity("search", format!("Recherche « {query} » : {}", plural(sources.len(), "source"))),
+                        Some(failure) => activity("search", format!("Search “{query}”: failed ({failure})")),
+                        None => activity("search", format!("Search “{query}”: {}", plural(sources.len(), "source"))),
                     }
                 }
                 "read" => {
                     r.read += 1;
                     let notes = reply["notes"].as_u64().unwrap_or(0) as usize;
-                    activity("read", format!("Lecture de {site} : {}", plural(notes, "note")))
+                    activity("read", format!("Read {site}: {}", plural(notes, "note")))
                 }
                 "unreadable" => {
                     r.read += 1;
-                    activity("read", format!("Lecture de {site} impossible : {error}"))
+                    activity("read", format!("Could not read {site}: {error}"))
                 }
                 "unread" => {
                     r.read += 1;
-                    activity("read", format!("Page de {site} non lue par le modèle : {error}"))
+                    activity("read", format!("Page from {site} not read by the model: {error}"))
                 }
                 "refused" => {
                     r.read += 1;
-                    activity("read", format!("Page de {site} non envoyée au modèle : {error}"))
+                    activity("read", format!("Page from {site} not sent to the model: {error}"))
                 }
-                "answered" => think("Réponse rédigée à partir des notes vérifiées"),
+                "answered" => think("Answer written from the checked notes"),
                 other => {
                     let error = format!("unknown research event {other}");
                     fail(chat, &error);
@@ -966,7 +966,7 @@ fn step_research(chat: &mut Chat) -> Option<String> {
             chat.add(Content::Agent(if actions.is_empty() {
                 ANSWER_MESSAGE.into()
             } else {
-                ACTIONS_MESSAGE.replace("{}", &actions.len().to_string())
+                ACTIONS_MESSAGE.replace("{}", &plural(actions.len(), "action"))
             }));
             let answer = json!({"answer": result["answer"].take(), "notes": result["notes"].take(),
                                 "sources": result["sources"].take()});
@@ -1025,7 +1025,7 @@ fn fail(chat: &mut Chat, error: &str) {
     if let Some(run) = chat.run.as_mut() {
         run.phase = Phase::Stopped;
     }
-    chat.add(Content::Agent(format!("L'agent s'est arrêté : {error}.")));
+    chat.add(Content::Agent(format!("The agent stopped: {error}.")));
 }
 
 fn clean(text: &str) -> Option<String> {
@@ -1322,10 +1322,10 @@ mod tests {
         assert!(view["chat"]["working"].is_null());
         let items = items_of(&engine, &chat);
         let search = items.iter().find(|i| i["tool"] == "search").unwrap();
-        assert_eq!(search["text"], format!("Recherche « {} » : 2 sources", queries[0]));
+        assert_eq!(search["text"], format!("Search “{}”: 2 sources", queries[0]));
         let reads: Vec<&Value> = items.iter().filter(|i| i["tool"] == "read").collect();
         assert_eq!(reads.len(), 2);
-        assert!(reads[0]["text"].as_str().unwrap().starts_with("Lecture de "), "{}", reads[0]);
+        assert!(reads[0]["text"].as_str().unwrap().starts_with("Read "), "{}", reads[0]);
         assert!(reads[0]["text"].as_str().unwrap().ends_with(" notes"), "{}", reads[0]);
 
         let answer = items.iter().find(|i| i["kind"] == "answer").unwrap();
@@ -1363,8 +1363,8 @@ mod tests {
         run_until_idle(&mut engine, &chat);
         let items = items_of(&engine, &chat);
         let searches: Vec<&str> = items.iter().filter(|i| i["tool"] == "search").map(|i| i["text"].as_str().unwrap()).collect();
-        assert_eq!(searches, ["Recherche « plombier Lyon tarif » : 2 sources", "Recherche « plombier Lyon avis » : 0 source"]);
-        assert!(items.iter().any(|i| i["text"] == "Recherches modifiées sur l'ordinateur : « plombier Lyon tarif », « plombier Lyon avis »"));
+        assert_eq!(searches, ["Search “plombier Lyon tarif”: 2 sources", "Search “plombier Lyon avis”: 0 sources"]);
+        assert!(items.iter().any(|i| i["text"] == "Searches edited on the computer: “plombier Lyon tarif”, “plombier Lyon avis”"));
         let confirmation = items.iter().find(|i| i["kind"] == "confirmation").unwrap();
         assert_eq!(confirmation["state"], "accepted");
         assert_eq!(items.last().unwrap()["exposure"]["outputs"]["search"], 2);
@@ -1428,7 +1428,7 @@ mod tests {
         let done = engine.action_do(&chat, payment["digest"].as_str().unwrap()).unwrap();
         assert_eq!(done["done"], "payment");
         assert!(items_of(&engine, &chat).iter().any(|i| i["tool"] == "action"
-            && i["text"].as_str().unwrap().starts_with("Paiement envoyé")));
+            && i["text"].as_str().unwrap().starts_with("Payment sent: ")));
 
         // A new question in the chat: the old answer's actions are no longer available.
         engine.post("Et à Paris ?", &chat).unwrap();

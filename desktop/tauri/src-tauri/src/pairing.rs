@@ -222,7 +222,7 @@ impl PairingAuthority {
 
     /// While the secret store is being read: no pairing, no QR code, nothing written; the window says why.
     pub fn waiting(name: &str) -> Self {
-        let reason = "Lecture du trousseau du système… Si une fenêtre le demande, autorisez ONA.".to_owned();
+        let reason = "Reading the system credential store… If a window asks, allow ONA.".to_owned();
         Self {
             name: name.to_owned(),
             record: Record { computer_key: SigningKey::random(&mut OsRng).to_bytes().to_vec(), phone: None, onion_auth: Vec::new() },
@@ -238,13 +238,13 @@ impl PairingAuthority {
             Some(Ok(bytes)) => match serde_json::from_slice::<Record>(&bytes) {
                 Ok(record) => Some(record),
                 Err(e) => {
-                    unreadable = Some(format!("Fichier d'appairage illisible ({e}) : rien n'a été modifié."));
+                    unreadable = Some(format!("Unreadable pairing file ({e}): nothing was changed."));
                     None
                 }
             },
             Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
             Some(Err(e)) => {
-                unreadable = Some(format!("Fichier d'appairage illisible ({e}) : rien n'a été modifié."));
+                unreadable = Some(format!("Unreadable pairing file ({e}): nothing was changed."));
                 None
             }
         };
@@ -272,14 +272,14 @@ impl PairingAuthority {
                         stored = got;
                     }
                     // Unreadable: like an unreadable file, nothing is replaced and no pairing is offered.
-                    Some(Err(e)) => unreadable = Some(format!("Secret d'appairage illisible dans le trousseau ({e}) : rien n'a été modifié.")),
+                    Some(Err(e)) => unreadable = Some(format!("Unreadable pairing secret in the credential store ({e}): nothing was changed.")),
                     // Nothing stored yet: the secrets still in the file (an earlier version) move to the store below.
                     None => created = true,
                 }
                 secrets = Some(store);
             }
             Some(Err(e)) => {
-                fallback = Some(format!("Trousseau du système indisponible ({e}) : la clé d'appairage reste dans un fichier lisible par vous seul."));
+                fallback = Some(format!("System credential store unavailable ({e}): the pairing key stays in a file only you can read."));
             }
         }
         if let Some(error) = unreadable {
@@ -445,7 +445,7 @@ impl PairingAuthority {
         let Some(awaiting) = self.awaiting.take() else { return Ok(()) };
         if now() >= awaiting.at + AWAIT_TTL {
             self.new_code();
-            return Err("Délai dépassé : recommencez l'appairage avec le nouveau code.".into());
+            return Err("Time is up: pair again with the new code.".into());
         }
         self.record.phone = Some(awaiting.phone);
         self.save()
@@ -529,7 +529,7 @@ impl PairingAuthority {
             write_private(&path, &bytes).map_err(|e| e.to_string())
         });
         self.storage_error = match &result {
-            Err(e) => Some(format!("Enregistrement de l'appairage impossible : {e}")),
+            Err(e) => Some(format!("Could not save the pairing: {e}")),
             Ok(()) => self.fallback.clone(),
         };
         result
@@ -946,7 +946,7 @@ pub mod tests {
         let store = MemoryStore::default();
         store.0.borrow_mut().1 = true;
         let authority = with_store(&path, &store);
-        assert!(authority.storage_error.as_deref().is_some_and(|e| e.contains("Trousseau")));
+        assert!(authority.storage_error.as_deref().is_some_and(|e| e.starts_with("System credential store unavailable")));
         assert!(std::fs::read_to_string(&path).unwrap().contains("computer_key"));
         let _ = std::fs::remove_dir_all(dir);
     }

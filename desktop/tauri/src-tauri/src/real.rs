@@ -169,7 +169,7 @@ pub fn make_core(setup: &CoreSetup) -> Box<dyn MissionCore> {
 
 /// Through the app's tor only (`ONA_REQUIRE_TOR`): nothing the core sends may go straight to its destination.
 fn network(core_socks: Option<u16>, what: &str) -> Result<ona_core::tor::Network, String> {
-    let socks = core_socks.ok_or_else(|| format!("{what} passe par Tor : choisissez le mode Tor, et attendez que le code QR apparaisse"))?;
+    let socks = core_socks.ok_or_else(|| format!("{what} goes through Tor: choose Tor mode, and wait for the QR code to appear"))?;
     ona_core::tor::Network::from_values(Some(&format!("127.0.0.1:{socks}")), Some("1"))
 }
 
@@ -185,10 +185,10 @@ pub fn make_pool_core(setup: &CoreSetup) -> Box<dyn MissionCore> {
         if cfg!(debug_assertions) {
             ona_core::tor::Network::from_values(None, Some("0"))
         } else {
-            Err("pool.json : local_node est réservé aux versions de développement".to_owned())
+            Err("pool.json: local_node is for development builds only".to_owned())
         }
     } else {
-        network(setup.core_socks, "le pool")
+        network(setup.core_socks, "the pool")
     };
     let made = network.and_then(|network| {
         let client = ona_core::pool::PoolClient::from_lookup(|name| Ok(settings.lookup(name)), &network)?
@@ -204,7 +204,7 @@ pub fn make_pool_core(setup: &CoreSetup) -> Box<dyn MissionCore> {
 }
 
 fn real_core(settings: &ModelSettings, core_socks: Option<u16>) -> Result<ona_core::Core, String> {
-    let network = network(core_socks, "le vrai modèle")?;
+    let network = network(core_socks, "the real model")?;
     let config = ona_core::remote::RemoteConfig::from_lookup(|name| settings.lookup(name))?;
     let mut core = ona_core::Core::new();
     core.use_real_model(config, &network)?;

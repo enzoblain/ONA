@@ -30,7 +30,7 @@ async function app(step, body = {}) {
     body: JSON.stringify(body),
   });
   const reply = await response.json();
-  if (!response.ok || reply.ok === false) throw new Error(reply.error || `erreur ${response.status}`);
+  if (!response.ok || reply.ok === false) throw new Error(reply.error || `error ${response.status}`);
   return reply;
 }
 
@@ -72,29 +72,29 @@ async function main() {
   $("amount").textContent = near(state.wallet_call.attached);
   $("receiver").textContent = state.wallet_call.receiver;
   $("network").textContent = state.network;
-  if (state.step === "done") return show("Dépôt terminé. Vous pouvez fermer cette page.", "ok");
+  if (state.step === "done") return show("Deposit complete. You can close this page.", "ok");
 
   const back = returned();
-  if (back.error) show(`Le portefeuille a refusé : ${back.error}`, "error");
+  if (back.error) show(`The wallet refused: ${back.error}`, "error");
 
   const selector = await setupWalletSelector({
     network: state.network === "mainnet" ? "mainnet" : "testnet",
     modules: [setupMyNearWallet(), setupMeteorWallet(), setupHereWallet(), setupIntearWallet()],
   });
-  const modal = setupModal(selector, { description: "Choisissez le portefeuille du compte qui dépose." });
+  const modal = setupModal(selector, { description: "Choose the wallet of the depositing account." });
 
   // Only the account named in the deposit: the contract issues cash to the account that deposited.
   const signedInAs = () => selector.store.getState().accounts.find((a) => a.active)?.accountId;
   const wallet = async () => {
     const account = signedInAs();
     if (account !== state.account) {
-      throw new Error(account ? `le portefeuille est connecté à ${account}, pas à ${state.account}` : "aucun portefeuille connecté");
+      throw new Error(account ? `the wallet is connected to ${account}, not to ${state.account}` : "no wallet connected");
     }
     return selector.wallet();
   };
 
   async function deposit() {
-    show("Envoi du dépôt depuis votre portefeuille…");
+    show("Sending the deposit from your wallet…");
     const call = state.wallet_call;
     const outcome = await (await wallet()).signAndSendTransaction({
       signerId: state.account,
@@ -106,13 +106,13 @@ async function main() {
   }
 
   async function deposited(tx) {
-    show("Dépôt envoyé. L'ordinateur prépare vos billets…");
+    show("Deposit sent. The computer is preparing your notes…");
     state = await app("deposited", { tx });
     await sign();
   }
 
   async function sign() {
-    show("Signez le message de l'agent du pool dans votre portefeuille…");
+    show("Sign the pool agent's message in your wallet…");
     const m = state.sign_message;
     const signed = await (await wallet()).signMessage({
       message: m.message,
@@ -124,13 +124,13 @@ async function main() {
   }
 
   async function finish(signed) {
-    if (signed.accountId && signed.accountId !== state.account) throw new Error(`message signé par ${signed.accountId}`);
-    show("Signature reçue. L'agent du pool émet vos billets…");
+    if (signed.accountId && signed.accountId !== state.account) throw new Error(`message signed by ${signed.accountId}`);
+    show("Signature received. The pool agent is issuing your notes…");
     state = await app("signed", { public_key: signed.publicKey, signature: signed.signature });
-    show(state.step === "done" ? "Dépôt terminé. Vous pouvez fermer cette page." : "Envoyé à l'agent du pool : le résultat arrivera dans l'app (Récupérer).", "ok");
+    show(state.step === "done" ? "Deposit complete. You can close this page." : "Sent to the pool agent: the result will show up in the app (Recover).", "ok");
   }
 
-  const run = (work) => work().catch((e) => show(`Interrompu : ${e.message}`, "error"));
+  const run = (work) => work().catch((e) => show(`Interrupted: ${e.message}`, "error"));
   $("go").onclick = () => run(async () => {
     if (signedInAs() !== state.account) {
       modal.show();
@@ -144,7 +144,7 @@ async function main() {
   if (back.tx && state.step === "deposit") return run(() => deposited(back.tx));
   if (back.signed && state.step === "sign") return run(() => finish(back.signed));
   $("go").disabled = false;
-  show(state.step === "sign" ? "Il reste à signer le message de l'agent du pool." : "Connectez le portefeuille du compte qui dépose.");
+  show(state.step === "sign" ? "The pool agent's message still needs your signature." : "Connect the wallet of the depositing account.");
 }
 
-main().catch((e) => show(`Erreur : ${e.message}`, "error"));
+main().catch((e) => show(`Error: ${e.message}`, "error"));
