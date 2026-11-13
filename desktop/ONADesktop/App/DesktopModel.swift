@@ -20,6 +20,8 @@ final class DesktopModel {
 
     let pairing: PairingAuthority
     let engine: ChatEngine
+    /// Pool deposits with the person's own NEAR wallet, on a page opened in the browser (docs/desktop/wallet.md).
+    let wallet: WalletPage
     let tor = TorService()
     private(set) var serverError: String?
     /// Set when the app's folder could not be kept out of Time Machine.
@@ -56,6 +58,9 @@ final class DesktopModel {
         // The pool's core (pool.json): one for the app, made again when tor's port for the core changes.
         engine = ChatEngine(makeCore: { OnaCoreMission(setup: RealModel.setup(coreSocks: tor.coreSocks)) },
                             makePoolCore: { OnaCoreMission(setup: RealModel.poolSetup(coreSocks: tor.coreSocks)) })
+        let engine = self.engine
+        wallet = WalletPage(assets: Bundle.main.url(forResource: "dist", withExtension: nil) ?? Bundle.main.bundleURL,
+                            pool: { await engine.pool($0) })
         mode = ConnectionMode(rawValue: LocalModePolicy.resolve(stored: UserDefaults.standard.string(forKey: "connectionMode"))) ?? .tor
         let router = PhoneRouter(pairing: pairing, engine: engine)
         router.onRequest = { [weak self] line in

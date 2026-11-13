@@ -49,7 +49,7 @@ struct ContentView: View {
             PhoneSheet(model: model)
         }
         .sheet(isPresented: $showingPool) {
-            PoolSheet(engine: model.engine)
+            PoolSheet(engine: model.engine, wallet: model.wallet)
         }
         // A phone that just paired: the codes must be compared now.
         .onChange(of: model.pairing.awaiting) { _, awaiting in

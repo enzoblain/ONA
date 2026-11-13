@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>ONA — dépôt dans le pool</title>
+  <link rel="stylesheet" href="wallet.css">
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { max-width: 520px; margin: 48px auto; padding: 0 16px; line-height: 1.5; }
+    h1 { font-size: 22px; }
+    dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; }
+    dt { color: GrayText; }
+    dd { margin: 0; font-variant-numeric: tabular-nums; word-break: break-all; }
+    button { font: inherit; padding: 10px 18px; border-radius: 999px; border: 0; background: #3b5bdb; color: white; cursor: pointer; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #status { margin-top: 16px; }
+    .ok { color: #2b8a3e; }
+    .error { color: #c92a2a; }
+    p.help { color: GrayText; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Dépôt dans le pool ONA</h1>
+  <dl>
+    <dt>Compte qui dépose</dt><dd id="account">…</dd>
+    <dt>Montant envoyé</dt><dd id="amount">…</dd>
+    <dt>Contrat</dt><dd id="receiver">…</dd>
+    <dt>Réseau</dt><dd id="network">…</dd>
+  </dl>
+  <p class="help">Votre portefeuille NEAR envoie ce dépôt, puis signe un message pour l'agent du pool. ONA ne voit jamais les clés de votre portefeuille. Le dépôt est public sur la chaîne ; les billets que vous recevrez ensuite ne sont pas liés à ce compte.</p>
+  <button id="go" disabled>Ouvrir mon portefeuille</button>
+  <p id="status">Chargement…</p>
+  <script src="wallet.js"></script>
+</body>
+</html>

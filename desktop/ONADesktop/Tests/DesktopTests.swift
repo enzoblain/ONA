@@ -1002,3 +1002,70 @@ struct OnionPublishedTests {
         #expect((reply["error"] as? String)?.contains("wallet key") == true, "past the network checks: \(reply)")
     }
 }
+
+@MainActor
+@Suite struct WalletPageTests {
+    static let assets = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .appending(path: "../../wallet-page/dist").standardized
+
+    static let prepared: [String: Any] = ["ok": true, "prepared_id": "p1", "summary": [
+        "op": "deposit", "account": "alice.testnet", "network": "testnet", "expires_at": 4_000_000_000_000_000_000 as UInt64,
+        "wallet_call": ["receiver": "pool.testnet", "method": "deposit", "args": [:] as [String: Any], "attached": "11010000000000000000000000"],
+    ] as [String: Any]]
+
+    func request(_ page: WalletPage, _ method: String, _ path: String, origin: Bool = true, body: String = "{}") -> HTTPRequest {
+        var headers = [HTTPRequest.Header("host", "127.0.0.1:\(page.port ?? 0)")]
+        if origin { headers.append(.init("origin", "http://127.0.0.1:\(page.port ?? 0)")) }
+        return HTTPRequest(method: method, path: path, headers: headers, body: Data(body.utf8))
+    }
+
+    /// The page drives the two `pool_execute` calls; only this server's own page may.
+    @Test func followsTheDepositThroughThePage() async throws {
+        var calls: [[String: Any]] = []
+        let page = WalletPage(assets: Self.assets) { request in
+            calls.append(request)
+            if request["depositor_signature"] == nil {
+                return ["ok": true, "complete": false, "sign_message": ["message": "m", "recipient": "pool.testnet", "nonce": "bg=="]]
+            }
+            return ["ok": false, "error": "outcome unknown, run pool_recover later"]
+        }
+        defer { page.stop() }
+        let url = try await page.open(prepared: Self.prepared)
+        #expect(url.absoluteString.hasSuffix("/"))
+        let base = url.path().hasSuffix("/") ? String(url.path().dropLast()) : url.path()
+
+        let index = await page.answer(request(page, "GET", base + "/", origin: false))
+        #expect(index.status == 200 && index.contentType.hasPrefix("text/html"))
+        let script = await page.answer(request(page, "GET", base + "/wallet.js?x=1", origin: false))
+        #expect(script.status == 200 && script.reply.count > 100_000)
+
+        #expect(await page.answer(request(page, "POST", base + "/state", origin: false)).status == 403)
+        #expect(await page.answer(request(page, "POST", "/wallet/other/state")).status == 404)
+        var rebinding = request(page, "POST", base + "/state")
+        rebinding = HTTPRequest(method: "POST", path: rebinding.path, headers: [.init("host", "evil.example")], body: Data("{}".utf8))
+        #expect(await page.answer(rebinding).status == 403)
+
+        let state = await page.answer(request(page, "POST", base + "/state"))
+        let object = try #require(try JSONSerialization.jsonObject(with: state.reply) as? [String: Any])
+        #expect(object["step"] as? String == "deposit" && object["prepared_id"] == nil)
+
+        _ = await page.answer(request(page, "POST", base + "/deposited", body: #"{"tx":"h"}"#))
+        #expect(page.session?.step == .sign(["message": "m", "recipient": "pool.testnet", "nonce": "bg=="]))
+        #expect(await page.answer(request(page, "POST", base + "/signed", body: "{}")).status == 400)
+        _ = await page.answer(request(page, "POST", base + "/signed", body: #"{"public_key":"ed25519:K","signature":"S"}"#))
+        #expect(page.session?.step == .done)
+        #expect(calls.count == 2)
+        let signature = calls.last?["depositor_signature"] as? [String: String]
+        #expect(signature == ["public_key": "ed25519:K", "signature": "S"])
+        #expect(calls.allSatisfy { $0["prepared_id"] as? String == "p1" })
+    }
+
+    @Test func onlyADepositOpensThePage() async {
+        var enter = Self.prepared
+        var summary = enter["summary"] as! [String: Any]
+        summary["op"] = "enter"
+        enter["summary"] = summary
+        #expect(WalletPage.Session(prepared: enter) == nil)
+        #expect(WalletPage.Session(prepared: Self.prepared)?.account == "alice.testnet")
+    }
+}

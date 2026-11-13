@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -65,6 +65,9 @@ pub struct App {
     /// The client key tor was started with: when pairing replaces it (a phone forgotten), tor starts again.
     tor_auth: Option<String>,
     name: String,
+    /// The wallet page's server (127.0.0.1, port chosen by the system) and the deposit it serves.
+    wallet_server: Option<PhoneServer>,
+    wallet: Option<crate::wallet::Session>,
     /// The secret store being read on its own thread; None once the pairing is loaded.
     secrets: Option<Receiver<Result<(SystemStore, Option<Vec<u8>>), String>>>,
 }
@@ -116,6 +119,8 @@ impl Worker {
                 jobs: sender,
                 setup,
                 tor_auth: None,
+                wallet_server: None,
+                wallet: None,
             };
             app.load_pairing();
             run(app, inbox);
@@ -145,6 +150,30 @@ fn read_secret_store() -> Result<(SystemStore, Option<Vec<u8>>), String> {
     let store = SystemStore::new()?;
     let got = store.get()?;
     Ok((store, got))
+}
+
+/// What a wallet page request needs.
+enum WalletWork {
+    Reply(http::Response),
+    /// A `pool_execute`, sent to the pool's own thread from the connection's thread: the worker is not held meanwhile.
+    Execute { sender: Sender<(Value, Sender<Value>)>, request: Value, second: bool, token: String },
+}
+
+/// Answers one request of the wallet page, on the connection's thread.
+fn wallet_request(worker: &Worker, request: http::Request) -> http::Response {
+    let stopped = || http::Response::new(503, json!({"ok": false, "error": "stopped"}));
+    let Some(work) = worker.call(move |app| app.wallet_ask(request)) else { return stopped() };
+    match work {
+        WalletWork::Reply(response) => response,
+        WalletWork::Execute { sender, request, second, token } => {
+            let (reply, answer) = mpsc::channel();
+            let value = match sender.send((request, reply)) {
+                Ok(()) => answer.recv().unwrap_or_else(|_| json!({"ok": false, "error": "ona-core stopped"})),
+                Err(_) => json!({"ok": false, "error": "ona-core stopped"}),
+            };
+            worker.call(move |app| app.wallet_after(&token, second, &value)).unwrap_or_else(stopped)
+        }
+    }
 }
 
 fn run(mut app: App, inbox: Receiver<Job>) {
@@ -258,7 +287,75 @@ impl App {
         saved.map_err(|e| format!("Choix non enregistré : {e}"))
     }
 
+    /// Opens the wallet page for a deposit prepared in the pool window (its `pool_prepare` reply), and returns its
+    /// address. One deposit at a time: a new one replaces the previous page.
+    pub fn open_wallet(&mut self, prepared: &Value) -> Result<String, String> {
+        let session = crate::wallet::Session::from_prepared(prepared)?;
+        if self.wallet_server.is_none() {
+            let worker = Worker { jobs: self.jobs.clone() };
+            let handler: server::Handler = Arc::new(move |request: http::Request| wallet_request(&worker, request));
+            let server = PhoneServer::start(Exposure::Localhost, 0, handler, server::Limits::default())
+                .map_err(|e| format!("page du portefeuille : {e}"))?;
+            self.wallet_server = Some(server);
+        }
+        let port = self.wallet_server.as_ref().map(|s| s.port).unwrap_or_default();
+        // Ends with "/": the page loads wallet.js and wallet.css next to it.
+        let url = format!("http://127.0.0.1:{port}/wallet/{}/", session.token);
+        self.wallet = Some(session);
+        // The address is also shown in the window, in case no browser opens.
+        let _ = crate::wallet::open_in_browser(&url);
+        Ok(url)
+    }
+
+    /// A request of the wallet page, answered here, or a `pool_execute` to run on the pool's thread (not this one).
+    fn wallet_ask(&mut self, request: http::Request) -> WalletWork {
+        use crate::wallet::{Ask, Step};
+        let reply = |status: u16, error: &str| WalletWork::Reply(http::Response::new(status, json!({"ok": false, "error": error})));
+        let host = format!("127.0.0.1:{}", self.wallet_server.as_ref().map(|s| s.port).unwrap_or_default());
+        let Some(session) = self.wallet.as_mut() else { return reply(404, "no deposit in progress") };
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(u64::MAX);
+        if session.expired(now) && session.step != Step::Done {
+            self.wallet = None;
+            return reply(410, "this deposit expired: prepare it again in the app");
+        }
+        let ask = match crate::wallet::parse(&request, &session.token, &host) {
+            Ok(ask) => ask,
+            Err(response) => return WalletWork::Reply(response),
+        };
+        let execute = match (ask, &session.step) {
+            (Ask::Asset(content_type, bytes), _) => return WalletWork::Reply(http::Response::asset(content_type, bytes)),
+            (Ask::State, _) => return WalletWork::Reply(http::Response::new(200, session.state())),
+            (Ask::Deposited, Step::Deposit) => json!({"cmd": "pool_execute", "prepared_id": session.prepared_id}),
+            (Ask::Signed { public_key, signature }, Step::Sign(_)) => json!({"cmd": "pool_execute", "prepared_id": session.prepared_id,
+                "depositor_signature": {"public_key": public_key, "signature": signature}}),
+            // Sent twice (a page reloaded): the current state, nothing run again.
+            (Ask::Deposited | Ask::Signed { .. }, _) => return WalletWork::Reply(http::Response::new(200, session.state())),
+        };
+        if session.executing {
+            return reply(409, "the previous step is still running");
+        }
+        session.executing = true;
+        let second = execute.get("depositor_signature").is_some();
+        WalletWork::Execute { sender: self.engine.pool_sender(), request: execute, second, token: session.token.clone() }
+    }
+
+    fn wallet_after(&mut self, token: &str, second: bool, reply: &Value) -> http::Response {
+        let Some(session) = self.wallet.as_mut().filter(|s| s.token == token) else {
+            return http::Response::new(410, json!({"ok": false, "error": "this deposit is no longer in progress"}));
+        };
+        session.executing = false;
+        let next = if second { crate::wallet::after_second_execute(reply) } else { crate::wallet::after_first_execute(reply) };
+        match next {
+            Ok(step) => {
+                session.step = step;
+                http::Response::new(200, session.state())
+            }
+            Err(error) => http::Response::new(409, json!({"ok": false, "error": error})),
+        }
+    }
+
     pub fn stop(&mut self) {
+        self.wallet_server = None;
         self.server = None;
         self.tor.stop();
     }

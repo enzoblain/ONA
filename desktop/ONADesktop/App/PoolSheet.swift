@@ -1,9 +1,11 @@
+import AppKit
 import SwiftUI
 
 /// The pool (docs/desktop/pool-commands.md): the portfolio, and every operation as prepare, summary, confirm here,
 /// execute. Pool operations are confirmed on this Mac only, never on the phone.
 struct PoolSheet: View {
     let engine: ChatEngine
+    let wallet: WalletPage
     @Environment(\.dismiss) private var dismiss
     @State private var screen: Screen = .loading
     @State private var message: String?
@@ -14,7 +16,9 @@ struct PoolSheet: View {
         case unavailable(String)
         case portfolio(PoolPortfolio)
         case form(Draft)
-        case summary(id: String, PoolSummary)
+        case summary(id: String, PoolSummary, prepared: NSDictionary)
+        /// A deposit going on in the browser: the wallet page's address.
+        case walletOpen(URL)
     }
 
     /// An operation being filled in: `vault` is the vault it starts from (switch, exit) or goes to (enter).
@@ -71,8 +75,21 @@ struct PoolSheet: View {
             portfolioView(portfolio)
         case .form(let form):
             formView(form)
-        case .summary(let id, let summary):
-            summaryView(id: id, summary)
+        case .summary(let id, let summary, let prepared):
+            summaryView(id: id, summary, prepared: prepared)
+        case .walletOpen(let url):
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Dépôt en cours dans votre navigateur").font(.headline)
+                Text("La page de votre portefeuille s'est ouverte. Si ce n'est pas le cas, ouvrez cette adresse :")
+                    .foregroundStyle(.secondary)
+                Text(url.absoluteString).font(.caption.monospaced()).textSelection(.enabled)
+                Text("Une fois la page terminée, actualisez : les billets apparaissent quand l'agent du pool les a émis.")
+                    .font(.callout).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Actualiser") { Task { await load() } }.buttonStyle(.borderedProminent)
+                }
+            }
         }
     }
 
@@ -182,7 +199,7 @@ struct PoolSheet: View {
 
     // MARK: - Summary
 
-    private func summaryView(id: String, _ summary: PoolSummary) -> some View {
+    private func summaryView(id: String, _ summary: PoolSummary, prepared: NSDictionary) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(summary.title).font(.headline)
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
@@ -199,17 +216,14 @@ struct PoolSheet: View {
             Text("Réseau \(summary.network), contrat \(summary.contract).\(expiry(summary))")
                 .font(.callout).foregroundStyle(.secondary)
             if summary.op == "deposit" {
-                // Sent and signed by the person's own NEAR wallet: no wallet is connected to this app yet.
-                Label("Le dépôt s'envoie avec votre propre portefeuille NEAR, puis ce portefeuille signe un message. La connexion d'un portefeuille à l'app n'existe pas encore : ce dépôt ne peut pas être fait ici.",
-                      systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
-                if let call = summary.walletCall {
-                    Text("Appel à envoyer").foregroundStyle(.secondary)
-                    Text(call).font(.caption.monospaced()).textSelection(.enabled)
-                }
+                // Sent and signed by the person's own NEAR wallet, on a page opened in the browser.
+                Text("Votre portefeuille NEAR envoie ce dépôt, puis signe un message pour l'agent du pool. ONA ne voit jamais ses clés.")
+                    .font(.callout).foregroundStyle(.secondary)
                 HStack {
                     Spacer()
-                    Button("Retour") { Task { await load() } }
+                    Button("Annuler") { Task { await load() } }
+                    Button("Ouvrir mon portefeuille") { Task { await openWallet(prepared) } }
+                        .buttonStyle(.borderedProminent)
                 }
             } else {
                 HStack {
@@ -259,13 +273,23 @@ struct PoolSheet: View {
             return
         }
         message = nil
-        screen = .summary(id: id, PoolSummary(summary))
+        screen = .summary(id: id, PoolSummary(summary), prepared: reply as NSDictionary)
     }
 
     private func execute(_ id: String) async {
         let reply = await run(["cmd": "pool_execute", "prepared_id": id])
         message = PoolOutcome.execute(reply)
         await load()
+    }
+
+    private func openWallet(_ prepared: NSDictionary) async {
+        do {
+            let url = try await wallet.open(prepared: prepared as? [String: Any] ?? [:])
+            NSWorkspace.shared.open(url)
+            screen = .walletOpen(url)
+        } catch {
+            message = error.localizedDescription
+        }
     }
 
     private func recover() async {

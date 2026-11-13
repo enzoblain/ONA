@@ -237,6 +237,15 @@ Desktop app for Windows and Linux (`desktop/tauri/src-tauri`), pinned exactly (`
 | `qrcode` | 0.14.1 | pairing QR code (SVG) |
 | `keyring` | 4.2.0 | the pairing secrets in the system's credential store (Keychain, Windows Credential Manager, Secret Service) |
 | `x25519-dalek` | 2.0.1 | the public half of the phone's Tor client key, written for `tor` |
+
+The desktop apps' wallet page (`desktop/wallet-page`, docs/desktop/wallet.md), bundled into `dist/` and embedded in both apps;
+exact versions in `package.json`, every transitive one in `package-lock.json`:
+
+| Library | Version | Used for |
+|---|---|---|
+| `@near-wallet-selector/core`, `modal-ui`, `my-near-wallet`, `meteor-wallet`, `here-wallet`, `intear-wallet` | 10.1.4 | connecting the person's own NEAR wallet for a pool deposit |
+| `buffer` | 6.0.3 | `Buffer` in the browser (the message nonce) |
+| `esbuild` | 0.28.2 | bundling the page (build only, not shipped) |
 | `serde`, `serde_json` | 1.0.229, 1.0.154 | JSON |
 
 Build tooling, not shipped: `.github/workflows/release.yml` builds the apps on GitHub's machines with Rust 1.99.1,
