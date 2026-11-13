@@ -269,9 +269,15 @@ pub trait Transport {
     ) -> Result<ResponseWithHeaders, String> {
         Err("this transport does not return response headers".into())
     }
+    /// A new model call starts: its requests (attestation, chat, signature) may share one connection path, and
+    /// the next call must not share it. Through Tor, a new circuit. Does nothing elsewhere.
+    fn new_call(&mut self) {}
 }
 
 impl<T: Transport> Transport for &mut T {
+    fn new_call(&mut self) {
+        (**self).new_call()
+    }
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
         (**self).get(path, headers)
     }
@@ -504,6 +510,9 @@ impl<T: Transport, V: ModelKeyVerifier> E2eeClient<T, V> {
         if self.spent.saturating_add(reserved) > self.token_budget {
             return Err("token budget exhausted".into());
         }
+        // One circuit for this call's three requests, which the relay links anyway (the signature is asked for with
+        // the reply's id); a new one for the next call.
+        self.transport.new_call();
         let model_key = self.fetch_model_key(token)?;
         let client = ClientKey::generate();
         let aad = match self.version {

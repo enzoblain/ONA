@@ -2,7 +2,7 @@
 
 `ona_core::tor` (re-exported by `crates/ona-tor`) sends the client's traffic through a local `tor` daemon. `ona` uses it when
 `ONA_TOR_SOCKS` is set: the relay (`ona real`), the pool agent and the NEAR RPC reads of the pool commands all go through Tor, each
-request on its own circuit, and nothing goes directly (docs/INSTALL.md, "Go through Tor"). So do the requests of the model key check to
+request on its own circuit except the three requests of one model call, which share one (SPEC, "Network: Tor"), and nothing goes directly (docs/INSTALL.md, "Go through Tor"). So do the requests of the model key check to
 Intel (`api.trustedservices.intel.com` and `certificates.trustedservices.intel.com`, for the collateral of the model's quote, at most once
 an hour). Without it `ona` says at start that it
 connects directly; `ONA_REQUIRE_TOR=1` makes it refuse to start. The desktop and phone apps do not set it yet.

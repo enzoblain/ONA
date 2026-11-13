@@ -58,6 +58,8 @@ struct FakeEnclave {
     last_token: String,
     last_version: String,
     chats: usize,
+    /// Requests seen in each model call (`new_call` starts one).
+    requests_per_call: Vec<usize>,
 }
 
 impl FakeEnclave {
@@ -73,6 +75,7 @@ impl FakeEnclave {
             last_token: String::new(),
             last_version: String::new(),
             chats: 0,
+            requests_per_call: vec![],
         }
     }
 
@@ -86,7 +89,14 @@ impl FakeEnclave {
 }
 
 impl Transport for FakeEnclave {
+    fn new_call(&mut self) {
+        self.requests_per_call.push(0);
+    }
+
     fn get(&mut self, path: &str, _headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
+        if let Some(n) = self.requests_per_call.last_mut() {
+            *n += 1;
+        }
         if path.starts_with("/v1/attestation/report") {
             let nonce = path.rsplit("nonce=").next().unwrap_or_default();
             let answered = if self.attack == Attack::ReplayNonce { "old-nonce" } else { nonce };
@@ -109,6 +119,9 @@ impl Transport for FakeEnclave {
     }
 
     fn post(&mut self, _path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String> {
+        if let Some(n) = self.requests_per_call.last_mut() {
+            *n += 1;
+        }
         self.chats += 1;
         self.last_token = header(headers, "X-Ona-Token").to_string();
         self.last_request = body.to_vec();
@@ -187,6 +200,16 @@ fn version_3_is_the_default() {
     assert_eq!(c.chat("bonjour").unwrap().content, "secret reply");
     assert_eq!(enclave.last_version, "3");
     assert_eq!(enclave.received_prompts, vec!["bonjour"]);
+}
+
+/// Through Tor, the requests between two `new_call` share one circuit: each chat starts one, before its attestation.
+#[test]
+fn each_chat_is_one_call_with_its_three_requests() {
+    let mut enclave = FakeEnclave::new(Attack::None);
+    let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
+    c.chat("un").unwrap();
+    c.chat("deux").unwrap();
+    assert_eq!(enclave.requests_per_call, vec![3, 3], "attestation, chat, signature; then a new call");
 }
 
 #[test]

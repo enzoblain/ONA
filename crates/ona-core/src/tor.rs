@@ -143,16 +143,28 @@ impl TorProxy {
 }
 
 /// The encrypted model client's transport, through Tor. Compression stays off, as in `HttpTransport`, because the
-/// reply signature covers the exact bytes. Each request draws new SOCKS credentials, so each has its own circuit.
+/// reply signature covers the exact bytes. The requests of one model call share SOCKS credentials, so one circuit
+/// (and one onion rendezvous); `new_call` draws new ones, so each call has its own circuit. Without `new_call`, every
+/// request gets its own.
 pub struct TorTransport {
     base: String,
     proxy: TorProxy,
+    /// The current call's agent, with its credentials. None: each request draws its own.
+    call: Option<Agent>,
 }
 
 impl TorTransport {
     pub fn new(base: &str, proxy: &TorProxy) -> Result<Self, String> {
         check_destination(base)?;
-        Ok(Self { base: base.trim_end_matches('/').to_string(), proxy: proxy.clone() })
+        Ok(Self { base: base.trim_end_matches('/').to_string(), proxy: proxy.clone(), call: None })
+    }
+
+    /// The agent for the next request: the call's, or a new one (new credentials) outside a call.
+    fn agent(&self) -> Result<Agent, String> {
+        match &self.call {
+            Some(agent) => Ok(agent.clone()),
+            None => self.proxy.agent(),
+        }
     }
 
     /// A path not starting with `/` could extend the host name once appended to the base.
@@ -165,8 +177,13 @@ impl TorTransport {
 }
 
 impl Transport for TorTransport {
+    fn new_call(&mut self) {
+        // A failure to build the agent leaves None: each request then draws its own credentials, never shared ones.
+        self.call = self.proxy.agent().ok();
+    }
+
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
-        let mut request = self.proxy.agent()?.get(self.url(path)?);
+        let mut request = self.agent()?.get(self.url(path)?);
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -177,7 +194,7 @@ impl Transport for TorTransport {
     }
 
     fn post(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String> {
-        let mut request = self.proxy.agent()?.post(self.url(path)?);
+        let mut request = self.agent()?.post(self.url(path)?);
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -193,7 +210,7 @@ impl Transport for TorTransport {
         headers: &[(String, String)],
         wanted: &[&str],
     ) -> Result<ResponseWithHeaders, String> {
-        crate::e2ee::ureq_get(&self.proxy.agent()?, &self.url(path)?, headers, wanted)
+        crate::e2ee::ureq_get(&self.agent()?, &self.url(path)?, headers, wanted)
     }
 }
 
@@ -283,6 +300,11 @@ pub enum NetTransport {
 }
 
 impl Transport for NetTransport {
+    fn new_call(&mut self) {
+        if let Self::Tor(t) = self {
+            t.new_call()
+        }
+    }
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
         match self {
             Self::Direct(t) => t.get(path, headers),
@@ -359,7 +381,7 @@ mod tests {
     }
 
     fn unchecked(port: u16, proxy: &TorProxy) -> TorTransport {
-        TorTransport { base: format!("https://localhost:{port}"), proxy: proxy.clone() }
+        TorTransport { base: format!("https://localhost:{port}"), proxy: proxy.clone(), call: None }
     }
 
     #[test]
@@ -441,6 +463,24 @@ mod tests {
         assert!(user(&a).is_some());
         assert_ne!(user(&a), user(&b), "two agents must not share a circuit");
         assert_eq!(host(&a), Some(("127.0.0.1".to_string(), 9050)));
+    }
+
+    #[test]
+    fn a_model_call_shares_one_circuit_and_the_next_call_gets_another() {
+        let user = |agent: &Agent| agent.config().proxy().and_then(|p| p.username()).map(String::from);
+        let proxy = TorProxy::new("127.0.0.1:9050").unwrap();
+        let mut t = TorTransport::new("https://relay.example.org", &proxy).unwrap();
+        assert_ne!(user(&t.agent().unwrap()), user(&t.agent().unwrap()), "outside a call, each request alone");
+        t.new_call();
+        let first = user(&t.agent().unwrap());
+        assert!(first.is_some());
+        assert_eq!(first, user(&t.agent().unwrap()), "the requests of one call share credentials");
+        t.new_call();
+        assert_ne!(first, user(&t.agent().unwrap()), "a new call, a new circuit");
+        let mut net = Network::Tor(proxy).transport("https://relay.example.org").unwrap();
+        net.new_call();
+        let NetTransport::Tor(inner) = &net else { panic!("through Tor") };
+        assert!(inner.call.is_some(), "the network's transport forwards new_call");
     }
 
     #[test]

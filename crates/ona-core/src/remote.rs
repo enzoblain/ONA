@@ -293,6 +293,9 @@ impl<T> Recording<T> {
 }
 
 impl<T: Transport> Transport for Recording<T> {
+    fn new_call(&mut self) {
+        self.inner.new_call()
+    }
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
         // Counted first: a request that fails may still have reached the relay.
         self.requests += 1;

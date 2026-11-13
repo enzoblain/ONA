@@ -678,7 +678,11 @@ transport (`remote::http_model`), the pool agent's (`HttpAgent::through`) and th
 - **Set** (`ip:port` on this machine; another machine is refused, the link to it would not be encrypted): SOCKS5 with remote name
   resolution (`socks5h`): host names go to Tor as SOCKS domain names, nothing is resolved locally. Every request makes a new HTTP
   agent with a random 8-byte SOCKS user name and password, so with `IsolateSOCKSAuth` (Tor's default, from the Tor manual, not
-  verified on the real network) each request, and so each pool operation and each RPC read, has its own circuit. Destinations must be
+  verified on the real network) each request, and so each pool operation and each RPC read, has its own circuit. One exception
+  since 13/11/2026: the three requests of one model call (attestation, chat, signature) share one agent, so one circuit and one
+  onion rendezvous; each call draws new credentials (`Transport::new_call`). The relay links those three anyway (the signature is
+  asked for with the reply's id), so sharing tells it nothing more. Tested with unit tests (credentials shared within a call, new
+  ones per call); the speed-up was not measured. Destinations must be
   `https` to a public host name or `http` to a version 3 onion service; a local name, an IP address (also written as a name), plain
   `http` to the internet, a non-numeric port, a query or a fragment are refused before anything is sent. A Tor that is down,
   refuses, or does not speak SOCKS makes the request fail; nothing is retried directly. No proxy is read from the environment, no
