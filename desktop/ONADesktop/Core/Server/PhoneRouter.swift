@@ -101,7 +101,9 @@ public final class PhoneRouter {
                 ProtocolBytes.confirmMessage(pairingID: $0, counter: $1, id: id, decision: decision, firm: firm,
                                              digest: digest, content: content)
             }) { return error(409, failure) }
-            if let failure = engine.confirm(id: id, decision: decision, firm: firm, digest: digest) {
+            // Search queries (`kind: "queries"`) are accepted as shown, never edited from the phone: no `queries` here.
+            // Actions suggested by a research are done on the computer only: the phone has no route for them.
+            if let failure = engine.confirm(id: id, decision: decision, firm: firm, digest: digest, queries: nil) {
                 return error(409, failure)
             }
             pairing.recordConfirmation(id)

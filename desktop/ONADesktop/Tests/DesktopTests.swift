@@ -23,6 +23,19 @@ struct ProtocolBytesTests {
         #expect(Array(encoded) == [2, 0, 0, 0, 0x61, 0x62, 1, 0, 0, 0, 1, 0, 0, 0, 0])
     }
 
+    /// The queries digest of a free research (docs/research.md): same vector in the Tauri app and the iPhone app.
+    @Test func queriesDigestVector() {
+        let id = "c-0123456789abcdef0123456789abcdef"
+        let queries = ["plombier Lyon", "tarif déplacement plombier"]
+        let digest = "8174711c622fea16bd82439613d544f31d2c2d8c3fb4bc1e22414a092a7cb01c"
+        #expect(ProtocolBytes.queriesDigest(id: id, queries: queries) == digest)
+        // fields(domain, id, q1, q2): no count.
+        let fields = ProtocolBytes.encode([.text("ona/queries/v1"), .text(id)] + queries.map { .text($0) })
+        #expect(sha(fields) == digest)
+        #expect(Pending(id: id, request: .queries(queries)).content == digest)
+        #expect(ProtocolBytes.queriesDigest(id: id, queries: queries.reversed()) != digest)
+    }
+
     @Test func protocolV1Vectors() throws {
         let (computer, phone) = (Vector.computerKey, Vector.phoneKey)
         #expect(ProtocolBytes.commitment(phoneKey: phone, phoneNonce: Vector.phoneNonce)
@@ -309,7 +322,7 @@ struct EngineTests {
     }
 
     @Test func fullMissionDrivenByOnaCore() throws {
-        let engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let engine = ChatEngine(makeCore: { OnaCoreMission() }, newChats: .mission)
         let chat = try engine.create("Trouve-moi un avocat en droit du travail").get()
         let plan = try #require(chat.pending)
         guard case .plan(let steps) = plan.request else { Issue.record("plan"); return }
@@ -349,7 +362,7 @@ struct EngineTests {
 
     /// Ids never repeat (they used to restart at chat-1-c-1).
     @Test func idsAreRandomAndNeverReused() throws {
-        let engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let engine = ChatEngine(makeCore: { OnaCoreMission() }, newChats: .mission)
         let chat = try engine.create("Trouve un avocat").get()
         let other = try engine.create("Trouve un avocat").get()
         #expect(chat.id != other.id)
@@ -372,7 +385,7 @@ struct EngineTests {
             }
         }
         var made = 0
-        let engine = ChatEngine(makeCore: { made += 1; return Failing() })
+        let engine = ChatEngine(makeCore: { made += 1; return Failing() }, newChats: .mission)
         let chat = try engine.create("Trouve un avocat").get()
         #expect(chat.status == .idle)
         #expect(engine.post("Recommence", to: chat.id) == nil)
@@ -405,7 +418,7 @@ struct EngineTests {
     }
 
     @Test func listAndChatJSONMatchWhatThePhoneDecodes() throws {
-        let engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let engine = ChatEngine(makeCore: { OnaCoreMission() }, newChats: .mission)
         let chat = try engine.create("Bonjour").get()
         let list = engine.listJSON()
         #expect(list["mode"] as? String == "mock")
@@ -424,12 +437,14 @@ struct RouterTests {
     @MainActor
     final class Setup {
         let authority = PairingAuthority(name: "Mac", store: MemoryPairingStore())
-        let engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let engine: ChatEngine
         let router: PhoneRouter
         let phone = Phone()
         var id = "", token = ""
 
-        init(pair: Bool = true) {
+        /// The lawyer mission by default (these tests were written for it); `.research` for free research.
+        init(pair: Bool = true, newChats: ChatKind = .mission) {
+            engine = ChatEngine(makeCore: { OnaCoreMission() }, newChats: newChats)
             router = PhoneRouter(pairing: authority, engine: engine)
             router.allowedHosts = { [RouterTests.host, "127.0.0.1:8790"] }
             if pair, let paired = phone.pair(with: authority) {
@@ -692,7 +707,7 @@ struct OnionPublishedTests {
     }
 
     @Test func aSlowCoreDoesNotBlockTheEngine() throws {
-        let engine = ChatEngine(makeCore: { Slow() })
+        let engine = ChatEngine(makeCore: { Slow() }, newChats: .mission)
         let started = Date.now
         _ = try engine.create("Trouve-moi un avocat en droit du travail à Paris").get()
         engine.tick()
@@ -1084,5 +1099,198 @@ struct OnionPublishedTests {
         #expect(alone?.line.contains("seul") == true)
         #expect(PoolPrivacy(["ok": true, "wallet": ["smallest_set": NSNull()]])?.line.contains("Aucun billet") == true)
         #expect(PoolPrivacy(["ok": false]) == nil)
+    }
+}
+
+@MainActor
+@Suite("Free research over the real ona-core (fake model, demo web)")
+struct ResearchTests {
+    static let question = "Trouve un plombier à Lyon et écris-lui pour un devis, paie 0.1 NEAR d'acompte"
+
+    func run(_ engine: ChatEngine, _ chat: Chat, until status: ChatStatus, limit: Int = 40) {
+        for _ in 0..<limit where chat.status != status { engine.tick() }
+    }
+
+    func texts(_ chat: Chat, tool wanted: String) -> [String] {
+        chat.items.compactMap {
+            if case .activity(let tool, let text) = $0.content, tool == wanted { return text }
+            return nil
+        }
+    }
+
+    func actions(_ chat: Chat) -> [(id: String, action: ResearchAction)] {
+        chat.items.compactMap {
+            if case .action(let action) = $0.content { return ($0.id, action) }
+            return nil
+        }
+    }
+
+    func exposure(_ chat: Chat) -> (id: String, report: [String: Any])? {
+        for item in chat.items.reversed() {
+            if case .exposure(let data) = item.content,
+               let report = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { return (item.id, report) }
+        }
+        return nil
+    }
+
+    @Test func aNewChatIsAResearchWhoseQueriesAreConfirmedFirst() throws {
+        let engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let chat = try engine.create(Self.question).get()
+        #expect(chat.status == .waiting)
+        let pending = try #require(chat.pending)
+        guard case .queries(let queries) = pending.request else { Issue.record("queries"); return }
+        #expect(queries == [Self.question], "the demo planner proposes the question itself")
+        #expect(engine.pendingContent(pending.id) == ProtocolBytes.queriesDigest(id: pending.id, queries: queries))
+        #expect(texts(chat, tool: "search").isEmpty, "nothing searched before the person accepts")
+        let view = try #require(engine.chatJSON(chat.id)?["chat"] as? [String: Any])
+        #expect(view["status"] as? String == "waiting")
+        let shown = try #require((view["items"] as? [[String: Any]])?.last?["pending"] as? [String: Any])
+        #expect(shown["kind"] as? String == "queries")
+        #expect(shown["queries"] as? [String] == queries)
+        #expect(shown["content"] as? String == pending.content)
+        // A message while the queries wait does not start anything else.
+        #expect(engine.post("Alors ?", to: chat.id) == nil)
+        #expect(chat.pending?.id == pending.id)
+    }
+
+    @Test func editedQueriesAreSearchedThenAnsweredWithSourcesAndActions() throws {
+        let engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let chat = try engine.create(Self.question).get()
+        let pending = try #require(chat.pending)
+        // ona-core refuses a query that is too long: the confirmation stays.
+        #expect(engine.confirm(id: pending.id, decision: "accept", firm: nil, digest: nil,
+                               queries: [String(repeating: "x", count: 121)]) != nil)
+        #expect(chat.pending?.id == pending.id)
+        #expect(engine.confirm(id: pending.id, decision: "accept", firm: nil, digest: nil,
+                               queries: [" plombier Lyon ", "", "tarif déplacement plombier"]) == nil)
+        #expect(chat.status == .working)
+        #expect(chat.state(of: pending) == .accepted)
+        run(engine, chat, until: .idle)
+        #expect(texts(chat, tool: "search") == ["Recherche « plombier Lyon » : 2 sources",
+                                                "Recherche « tarif déplacement plombier » : 0 source"])
+        #expect(texts(chat, tool: "read") == ["Lecture de annuaire.example.net : 2 notes",
+                                              "Lecture de guide.example.org : 2 notes"])
+        let answer = try #require(chat.items.lazy.compactMap { item -> ResearchAnswer? in
+            if case .answer(let answer) = item.content { return answer }
+            return nil
+        }.first)
+        #expect(!answer.answer.isEmpty)
+        #expect(!answer.notes.isEmpty && answer.notes.allSatisfy { !$0.quote.isEmpty })
+        #expect(answer.sources.map(\.host) == ["annuaire.example.net", "guide.example.org"])
+        let suggested = actions(chat).map(\.action)
+        #expect(suggested.count == 2)
+        #expect(suggested.first.map { if case .message = $0.kind { true } else { false } } == true)
+        #expect(suggested.last?.kind == .payment(amount: "100000000000000000000000"))
+        let report = try #require(exposure(chat)?.report)
+        #expect((report["outputs"] as? [String: Int])?["search"] == 2)
+        #expect((report["outputs"] as? [String: Int])?["fetch"] == 2)
+
+        // The phone's view.
+        let view = try #require(engine.chatJSON(chat.id)?["chat"] as? [String: Any])
+        #expect(view["status"] as? String == "idle")
+        let items = view["items"] as? [[String: Any]] ?? []
+        let answerJSON = try #require(items.first { $0["kind"] as? String == "answer" })
+        #expect(answerJSON["answer"] as? String == answer.answer)
+        #expect((answerJSON["sources"] as? [[String: Any]])?.first?["url"] as? String == answer.sources.first?.url)
+        #expect((answerJSON["notes"] as? [[String: Any]])?.first?["quote"] as? String == answer.notes.first?.quote)
+        let actionJSON = items.filter { $0["kind"] as? String == "action" }
+        #expect(actionJSON.map { $0["state"] as? String } == ["suggested", "suggested"])
+        #expect((actionJSON.last?["action"] as? [String: Any])?["amount"] as? String == "100000000000000000000000")
+        #expect((actionJSON.first?["action"] as? [String: Any])?["kind"] as? String == "message")
+        #expect(items.last?["kind"] as? String == "exposure")
+    }
+
+    @Test func actionsNeedTheRecipientAndTheExactConfirmation() throws {
+        let engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let chat = try engine.create(Self.question).get()
+        let pending = try #require(chat.pending)
+        #expect(engine.confirm(id: pending.id, decision: "accept", firm: nil, digest: nil) == nil)
+        run(engine, chat, until: .idle)
+        let (message, payment) = (try #require(actions(chat).first), try #require(actions(chat).last))
+        let exposureID = try #require(exposure(chat)?.id)
+        let zeros = String(repeating: "0", count: 64)
+
+        // A message: an e-mail address typed by the person.
+        guard case .failure = engine.prepareAction(chat: chat.id, item: message.id, to: "pas une adresse") else {
+            Issue.record("bad address accepted"); return
+        }
+        guard case .failure = engine.doAction(chat: chat.id, item: message.id, digest: zeros) else {
+            Issue.record("done without preparing"); return
+        }
+        let prepared = try engine.prepareAction(chat: chat.id, item: message.id, to: " contact@plomberie.example ").get()
+        #expect(prepared.kind == "message" && prepared.to == "contact@plomberie.example")
+        #expect(prepared.seenInPages == false)
+        guard case .message(let text) = message.action.kind else { Issue.record("message"); return }
+        #expect(prepared.content == text)
+        guard case .failure = engine.doAction(chat: chat.id, item: message.id, digest: zeros) else {
+            Issue.record("other digest accepted"); return
+        }
+        let sent = try engine.doAction(chat: chat.id, item: message.id, digest: prepared.digest).get()
+        guard case .message(let mailto) = sent else { Issue.record("mailto"); return }
+        #expect(mailto.absoluteString.hasPrefix("mailto:contact@plomberie.example?subject="))
+        #expect(chat.doneActions == [message.id])
+        guard case .failure = engine.prepareAction(chat: chat.id, item: message.id, to: "contact@plomberie.example") else {
+            Issue.record("done twice"); return
+        }
+
+        // A payment: a NEAR account typed by the person, the amount from the answer.
+        let pay = try engine.prepareAction(chat: chat.id, item: payment.id, to: "plomberie.testnet").get()
+        #expect(pay.kind == "payment" && pay.content == "100000000000000000000000")
+        let paid = try engine.doAction(chat: chat.id, item: payment.id, digest: pay.digest).get()
+        guard case .payment(let tx) = paid else { Issue.record("payment"); return }
+        #expect(tx.hasPrefix("mock-tx-"))
+
+        let states = (engine.chatJSON(chat.id)?["chat"] as? [String: Any])?["items"] as? [[String: Any]] ?? []
+        #expect(states.filter { $0["kind"] as? String == "action" }.map { $0["state"] as? String } == ["done", "done"])
+        // The exposure report, in place, now counts the message and the payment.
+        let report = try #require(exposure(chat))
+        #expect(report.id == exposureID)
+        #expect((report.report["outputs"] as? [String: Int])?["message"] == 1)
+        #expect(texts(chat, tool: "pay").count == 1 && texts(chat, tool: "contact").count == 1)
+    }
+
+    @Test func refusingTheQueriesStopsBeforeAnythingIsSearched() throws {
+        let engine = ChatEngine(makeCore: { OnaCoreMission() })
+        let chat = try engine.create(Self.question).get()
+        let pending = try #require(chat.pending)
+        #expect(engine.confirm(id: pending.id, decision: "reject", firm: nil, digest: nil) == nil)
+        #expect(chat.status == .idle)
+        #expect(chat.state(of: pending) == .rejected)
+        let report = try #require(exposure(chat)?.report)
+        #expect((report["outputs"] as? [String: Int])?["search"] == nil)
+        // A new message starts a new research.
+        #expect(engine.post("Cherche plutôt un électricien", to: chat.id) == nil)
+        #expect(chat.pending.map { $0.id != pending.id } == true)
+    }
+}
+
+@MainActor
+@Suite("Phone router, free research")
+struct ResearchRouterTests {
+    @Test func thePhoneAcceptsTheQueriesAsShownBySignedConfirmation() throws {
+        let setup = RouterTests.Setup(newChats: .research)
+        let (_, created) = setup.create(ResearchTests.question)
+        let chatID = try #require(created)
+        let view = try #require(setup.post("/v1/chats/\(chatID)/view", ["token": setup.token]).json["chat"] as? [String: Any])
+        let shown = try #require((view["items"] as? [[String: Any]])?.last?["pending"] as? [String: Any])
+        #expect(shown["kind"] as? String == "queries")
+        let id = try #require(shown["id"] as? String), queries = try #require(shown["queries"] as? [String])
+        let pending = try #require(setup.engine.chats.first?.pending)
+        // Signed over other queries: refused.
+        let other = ProtocolBytes.queriesDigest(id: id, queries: ["autre chose"])
+        #expect(setup.post("/v1/confirm", setup.confirmBody(pending, content: other)).json["error"] as? String
+                == "signature does not verify")
+        // The phone recomputes the digest from the queries it shows.
+        let content = ProtocolBytes.queriesDigest(id: id, queries: queries)
+        #expect(setup.post("/v1/confirm", setup.confirmBody(pending, content: content)).status == 200)
+        let chat = try #require(setup.engine.chat(chatID))
+        #expect(chat.status == .working)
+        for _ in 0..<40 where chat.status != .idle { setup.engine.tick() }
+        let items = (setup.post("/v1/chats/\(chatID)/view", ["token": setup.token]).json["chat"] as? [String: Any])?["items"]
+            as? [[String: Any]] ?? []
+        #expect(items.contains { $0["kind"] as? String == "answer" })
+        #expect(items.filter { $0["kind"] as? String == "action" }.count == 2)
+        // The phone cannot do actions: there is no route for them.
+        #expect(setup.post("/v1/chats/\(chatID)/actions", ["token": setup.token]).status == 404)
     }
 }
