@@ -100,8 +100,11 @@ and next to each vault offered for an entry (docs/desktop/privacy.md). The "with
   that does not exist. Run your own node for the signer and the relay.
 - The model enclave reads the pseudonymized prompt by design, under a TEE assumption. Pseudonyms replace declared terms only (see
   [what pseudonyms cover](#what-pseudonyms-cover)).
-- **The relay can read what goes to the model and invent replies.** The client takes the model key from an attestation report that the
-  relay delivers and does not verify the Intel and NVIDIA quotes yet. Every exposure report with a real call says so.
+- **The model key is trusted on Intel's word and on observed values.** Since 13/11/2026 the client uses a model key only if its Intel
+  TDX quote is signed by Intel (checked with `dcap-qvl`), binds the key and the request, and shows the system and deployment seen in one
+  report of 10/11/2026 (SPEC.md, "Model key check"). Not checked: the NVIDIA GPU evidence, which is not bound to that quote, and what the
+  deployment's code does with the prompt. The check has not yet run against Intel's real collateral. Every exposure report with a real
+  call says what is and is not checked.
 - The payment confirmation is a digest bound to the network, the contract, the mission, a random nonce, the recipient and the amount
   of the chosen offer; it proves the caller saw these fields, not that a human did, since it is not signed by a separate device.
 - NEAR AI Cloud keeps one usage row per request.

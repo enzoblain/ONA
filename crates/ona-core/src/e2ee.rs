@@ -22,10 +22,12 @@
 //! nothing verified shows that the enclave removes padding, so it would reach the model as part of
 //! the prompt.
 //!
-//! Not done here: verifying the Intel TDX and NVIDIA quotes. Until that check is added, the key
-//! returned by `attested_model_key` is only as trustworthy as the party that returned the report:
-//! a relay that answers with its own key reads every prompt and can write every reply, signed
-//! "validly" with that key. Nothing here can detect it.
+//! The model key comes from the attestation report through a `ModelKeyVerifier`, chosen by whoever
+//! builds the client. The real one, `attestation::near_ai_verifier`, accepts the key only if its
+//! Intel TDX quote is signed by Intel, binds this key and our nonce, and shows the measured system and
+//! deployment on its list (see `attestation` and `quote`). A relay that puts its own key in the report
+//! is then refused before the prompt is encrypted. The NVIDIA GPU evidence is not checked, and it is
+//! not bound to the TDX quote anyway.
 
 use std::time::Duration;
 
@@ -191,13 +193,20 @@ impl ClientKey {
     }
 }
 
-/// Picks the model key from an attestation report, for the attestation answering our nonce.
-pub fn attested_model_key(report: &Value, nonce: &str) -> Result<[u8; 32], String> {
+/// The model attestation of a report that answers our nonce.
+pub fn attestation_for_nonce<'a>(report: &'a Value, nonce: &str) -> Result<&'a Value, String> {
     let attestations = report["model_attestations"].as_array().ok_or("report has no model attestation")?;
-    let matching = attestations
+    attestations
         .iter()
         .find(|a| a["request_nonce"].as_str() == Some(nonce))
-        .ok_or("no attestation answers our nonce: the report may be replayed")?;
+        .ok_or_else(|| "no attestation answers our nonce: the report may be replayed".to_string())
+}
+
+/// Reads the model key the report claims, for the attestation answering our nonce. **Checks
+/// nothing about it**: anyone who wrote the report chose this key. The client only uses a key that a
+/// `ModelKeyVerifier` returned.
+pub fn reported_model_key(report: &Value, nonce: &str) -> Result<[u8; 32], String> {
+    let matching = attestation_for_nonce(report, nonce)?;
     let key: [u8; 32] = matching["signing_public_key"]
         .as_str()
         .and_then(from_hex)
@@ -243,10 +252,23 @@ pub fn verify_reply_signature(
         .map_err(|_| "signature is invalid".to_string())
 }
 
+/// Status, body, and the values of the response headers that were asked for, in the same order.
+pub type ResponseWithHeaders = (u16, Vec<u8>, Vec<Option<String>>);
+
 pub trait Transport {
     /// Returns the status and the exact bytes of the body.
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String>;
     fn post(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String>;
+    /// As `get`, also returning the response headers named in `wanted`. Intel's collateral service
+    /// sends its certificate chains in headers. Transports that cannot do it refuse.
+    fn get_with_headers(
+        &mut self,
+        _path: &str,
+        _headers: &[(String, String)],
+        _wanted: &[&str],
+    ) -> Result<ResponseWithHeaders, String> {
+        Err("this transport does not return response headers".into())
+    }
 }
 
 impl<T: Transport> Transport for &mut T {
@@ -255,6 +277,54 @@ impl<T: Transport> Transport for &mut T {
     }
     fn post(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String> {
         (**self).post(path, headers, body)
+    }
+    fn get_with_headers(
+        &mut self,
+        path: &str,
+        headers: &[(String, String)],
+        wanted: &[&str],
+    ) -> Result<ResponseWithHeaders, String> {
+        (**self).get_with_headers(path, headers, wanted)
+    }
+}
+
+/// Sends a GET with `agent` and returns the status, the body and the `wanted` response headers.
+pub(crate) fn ureq_get(
+    agent: &ureq::Agent,
+    url: &str,
+    headers: &[(String, String)],
+    wanted: &[&str],
+) -> Result<ResponseWithHeaders, String> {
+    let mut request = agent.get(url);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let mut response = request.call().map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    let found = wanted
+        .iter()
+        .map(|name| response.headers().get(*name).and_then(|v| v.to_str().ok()).map(str::to_string))
+        .collect();
+    let body = response.body_mut().read_to_vec().map_err(|e| e.to_string())?;
+    Ok((status, body, found))
+}
+
+/// Gives the model key to encrypt to, from an attestation report and the nonce we sent. The client
+/// trusts whatever key this returns, so the real one must check the report: see
+/// `attestation::near_ai_verifier`.
+pub trait ModelKeyVerifier {
+    fn model_key(&mut self, report: &Value, nonce: &str) -> Result<[u8; 32], String>;
+}
+
+impl<V: ModelKeyVerifier + ?Sized> ModelKeyVerifier for &mut V {
+    fn model_key(&mut self, report: &Value, nonce: &str) -> Result<[u8; 32], String> {
+        (**self).model_key(report, nonce)
+    }
+}
+
+impl<V: ModelKeyVerifier + ?Sized> ModelKeyVerifier for Box<V> {
+    fn model_key(&mut self, report: &Value, nonce: &str) -> Result<[u8; 32], String> {
+        (**self).model_key(report, nonce)
     }
 }
 
@@ -302,6 +372,15 @@ impl Transport for HttpTransport {
         let reply = response.body_mut().read_to_vec().map_err(|e| e.to_string())?;
         Ok((status, reply))
     }
+
+    fn get_with_headers(
+        &mut self,
+        path: &str,
+        headers: &[(String, String)],
+        wanted: &[&str],
+    ) -> Result<ResponseWithHeaders, String> {
+        ureq_get(&self.agent, &format!("{}{path}", self.base), headers, wanted)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,8 +389,9 @@ pub struct ChatReply {
     pub tokens_used: u32,
 }
 
-pub struct E2eeClient<T> {
+pub struct E2eeClient<T, V> {
     transport: T,
+    verifier: V,
     model: String,
     max_tokens: u32,
     token_budget: u64,
@@ -336,11 +416,13 @@ fn token_headers(token: Option<&str>) -> Vec<(String, String)> {
     headers
 }
 
-impl<T: Transport> E2eeClient<T> {
+impl<T: Transport, V: ModelKeyVerifier> E2eeClient<T, V> {
+    /// `verifier` decides which model key is trusted: the client encrypts only to a key it returned.
     /// `token_budget` is a hard stop on the tokens this client may spend, across all its calls.
-    pub fn new(transport: T, model: &str, max_tokens: u32, token_budget: u64) -> Self {
+    pub fn new(transport: T, verifier: V, model: &str, max_tokens: u32, token_budget: u64) -> Self {
         Self {
             transport,
+            verifier,
             model: model.to_string(),
             max_tokens,
             token_budget,
@@ -375,7 +457,9 @@ impl<T: Transport> E2eeClient<T> {
             return Err(format!("attestation request failed with status {status}"));
         }
         let report: Value = serde_json::from_slice(&body).map_err(|_| "attestation is not JSON".to_string())?;
-        attested_model_key(&report, &nonce)
+        let key = self.verifier.model_key(&report, &nonce)?;
+        ed_public_to_x25519(&key)?;
+        Ok(key)
     }
 
     /// Sends one prompt, paid with a request token bought from the relay.
@@ -413,8 +497,8 @@ impl<T: Transport> E2eeClient<T> {
 
     /// A deliberately high estimate of the cost is reserved before the request leaves and stays
     /// reserved if anything fails afterwards, since the call may have been paid. Only the usage in
-    /// a validly signed reply replaces it. Until enclave quotes are verified, that signature only
-    /// proves as much as the key the relay reported.
+    /// a validly signed reply replaces it. That signature proves as much as the verifier's check of
+    /// the model key.
     fn send_chat(&mut self, prompt: &str, token: Option<&str>) -> Result<ChatReply, String> {
         let reserved = u64::from(self.max_tokens).saturating_add(estimate_prompt_tokens(prompt));
         if self.spent.saturating_add(reserved) > self.token_budget {
@@ -591,8 +675,16 @@ mod tests {
         }
     }
 
-    fn client(transport: &mut Fake, max_tokens: u32, budget: u64) -> E2eeClient<&mut Fake> {
-        let mut c = E2eeClient::new(transport, MODEL, max_tokens, budget);
+    /// Takes the reported key without any check: these tests are about the exchange, not the quote.
+    struct Unverified;
+    impl ModelKeyVerifier for Unverified {
+        fn model_key(&mut self, report: &Value, nonce: &str) -> Result<[u8; 32], String> {
+            reported_model_key(report, nonce)
+        }
+    }
+
+    fn client(transport: &mut Fake, max_tokens: u32, budget: u64) -> E2eeClient<&mut Fake, Unverified> {
+        let mut c = E2eeClient::new(transport, Unverified, MODEL, max_tokens, budget);
         c.signature_retry_delay = Duration::ZERO;
         c
     }
@@ -752,6 +844,21 @@ mod tests {
         let mut t = fake(json!({"total_tokens": 40}));
         t.reply_id = "chatcmpl-AbC_1.2";
         assert!(client(&mut t, 100, 1000).chat("x").is_ok());
+    }
+
+    #[test]
+    fn the_key_the_verifier_refuses_is_never_used() {
+        struct Refuse;
+        impl ModelKeyVerifier for Refuse {
+            fn model_key(&mut self, _: &Value, _: &str) -> Result<[u8; 32], String> {
+                Err("model attestation refused".into())
+            }
+        }
+        let mut t = fake(json!({"total_tokens": 1}));
+        let mut c = E2eeClient::new(&mut t, Refuse, MODEL, 100, 1000);
+        assert!(c.chat("x").unwrap_err().contains("refused"));
+        assert_eq!(c.tokens_spent(), 0);
+        assert_eq!(t.chats, 0, "nothing is encrypted to an unverified key");
     }
 
     #[test]

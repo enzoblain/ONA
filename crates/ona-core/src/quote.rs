@@ -1,24 +1,25 @@
 //! Checks a NEAR AI model attestation before its key is trusted.
 //!
-//! **Worth nothing until the Intel signature check is implemented.** `IntelQuoteVerifier` has no
-//! implementation yet: without it anyone can write a quote with any measurement, so every check below
-//! only reads values an attacker chose. Nothing passes outside tests for that reason.
-//!
-//! With a real Intel check, this accepts a quote only if:
+//! `verify_model_attestation` accepts a quote only if:
+//! - the `IntelQuoteVerifier` verified its signature chain up to Intel's root with Intel's collateral
+//!   (`attestation::DcapVerifier`, built on `dcap-qvl`), the TCB status it found is one the caller
+//!   accepts, and its collateral is not older than the caller allows. The report fields below are read
+//!   from the body the verifier returns, and that body must be the quote's own;
 //! - the system measurements (MRTD, RTMR0 to RTMR2) are on the caller's list;
 //! - the event log replays to the quote's RTMR3, and its `os-image-hash` and `compose-hash` events
 //!   name a listed OS image and the hash of the reported `app_compose`;
-//! - `report_data` is `signing_address || nonce` and `mr_config_id` is `0x01 || compose hash || zeros`;
-//! - the enclave is not in debug mode;
-//! - the Intel verifier's TCB status is one the caller accepts, and its collateral is not older than
-//!   the caller allows. The report fields are read from the body the verifier returns.
+//! - `report_data` is `signing_address || nonce`, and `mr_config_id` is `0x01 || compose hash ||
+//!   zeros`. On the real report of 2026-11-10 the signing address is the ed25519 public key itself;
+//!   the check requires the two fields to be equal, so the key used to encrypt is the one bound;
+//! - the enclave is not in debug mode.
 //!
-//! `dcap-qvl` was not available offline when this was written, so `IntelQuoteVerifier` still has no
-//! implementation and this module is not called by the client.
+//! The accepted measurements are values observed on one real report, not references published by
+//! NEAR AI: another machine or a new image is refused until its values are added.
 //!
 //! **The GPU evidence is not bound to the TDX quote.** Its nonce only shows it is fresh. A relay can
 //! copy a genuine payload from another machine next to its own quote, so NVIDIA's verdict says nothing
-//! about the machine that holds the model key.
+//! about the machine that holds the model key. `check_gpu_evidence` is therefore separate, and the
+//! client does not call it: NVIDIA's service is not contacted.
 //!
 //! Formats were checked on one real report (2026-11-10) that NEAR AI's official verifier accepted.
 //! The verifier's source could not be read while writing this. RTMR3 events carry no digest in the
@@ -69,7 +70,8 @@ pub struct IntelVerdict {
 
 /// Verifies a TDX quote's signature chain up to Intel's root, with Intel's collateral, and returns
 /// what it found. Must return `Ok` only for a quote whose signature chain it fully verified; the
-/// TCB status and the collateral date are then judged by `Policy`. Meant for `dcap-qvl`.
+/// TCB status and the collateral date are then judged by `Policy`. Implemented with `dcap-qvl` by
+/// `attestation::DcapVerifier`.
 pub trait IntelQuoteVerifier {
     fn verify(&self, quote: &[u8]) -> Result<IntelVerdict, String>;
 }
@@ -236,13 +238,13 @@ fn single_event<'a>(events: &'a [RuntimeEvent], name: &str) -> Result<&'a [u8], 
 }
 
 /// Returns the model's signing key if every check passes. `nonce` is the one we sent, as 64 hex
-/// characters. See the module documentation for what a pass does and does not prove.
+/// characters. See the module documentation for what a pass does and does not prove. The GPU
+/// evidence is not looked at here: see `check_gpu_evidence`.
 pub fn verify_model_attestation(
     attestation: &Value,
     nonce: &str,
     policy: &Policy,
     intel: &dyn IntelQuoteVerifier,
-    nvidia: &dyn NvidiaVerifier,
 ) -> Result<[u8; 32], String> {
     let nonce_bytes: [u8; 32] = decode_hex(nonce)
         .filter(|_| nonce.len() == 64)
@@ -260,10 +262,12 @@ pub fn verify_model_attestation(
     }
 
     let quote = attestation["intel_quote"].as_str().and_then(decode_hex).ok_or("intel_quote is missing or not hex")?;
-    let verdict = intel.verify(&quote)?;
+    let verdict = intel.verify(&quote).map_err(|e| format!("Intel signature check of the quote failed: {e}"))?;
     check_quote_header(&quote)?;
     if !policy.accepted_tcb.contains(&verdict.tcb_status) {
-        return Err(format!("TCB status {:?} is not accepted", verdict.tcb_status));
+        let advisories =
+            if verdict.advisory_ids.is_empty() { "none".to_string() } else { verdict.advisory_ids.join(", ") };
+        return Err(format!("TCB status {:?} is not accepted (Intel advisories: {advisories})", verdict.tcb_status));
     }
     if verdict.collateral_issued_at > policy.now_unix.saturating_add(MAX_CLOCK_SKEW_SECS) {
         return Err("Intel collateral is dated in the future".into());
@@ -306,12 +310,17 @@ pub fn verify_model_attestation(
     if !policy.compose_hashes.contains(&compose) {
         return Err("this deployment is not on our list".into());
     }
+    Ok(address)
+}
 
+/// Checks that the GPU evidence answers our nonce and that NVIDIA's service accepts it. Even when it
+/// passes, it does not show that this GPU sits in the machine of the TDX quote: see the module
+/// documentation. Not called by the client.
+pub fn check_gpu_evidence(attestation: &Value, nonce: &str, nvidia: &dyn NvidiaVerifier) -> Result<(), String> {
     let payload = attestation["nvidia_payload"].as_str().ok_or("nvidia_payload is missing")?;
     let parsed: Value = serde_json::from_str(payload).map_err(|_| "nvidia_payload is not JSON".to_string())?;
     if parsed["nonce"].as_str().map(str::to_ascii_lowercase) != Some(nonce.to_ascii_lowercase()) {
         return Err("GPU evidence does not answer our nonce".into());
     }
-    nvidia.verify(payload)?;
-    Ok(address)
+    nvidia.verify(payload)
 }

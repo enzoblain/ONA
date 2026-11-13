@@ -18,13 +18,13 @@ use rand::RngCore;
 use ureq::config::AutoHeaderValue;
 use ureq::{Agent, Proxy};
 
-use crate::e2ee::{HttpTransport, Transport};
+use crate::e2ee::{HttpTransport, ResponseWithHeaders, Transport};
 
 /// Tor's usual SOCKS port. See `docs/torrc.client.example`.
 pub const DEFAULT_SOCKS: &str = "127.0.0.1:9050";
 /// Said on stderr by `ona` when it starts the real model or the pool without Tor.
 pub const DIRECT_WARNING: &str =
-    "Tor is not configured (ONA_TOR_SOCKS is not set): the relay, the pool agent and the NEAR RPC nodes see this computer's IP address";
+    "Tor is not configured (ONA_TOR_SOCKS is not set): the relay, Intel's collateral service, the pool agent and the NEAR RPC nodes see this computer's IP address";
 /// Reaching the destination through Tor. The first connection to an onion service fetches its descriptor and builds
 /// a rendezvous circuit: measured at about a minute on 13/11/2026, and the first try went past 120 s.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(240);
@@ -186,6 +186,15 @@ impl Transport for TorTransport {
         let reply = response.body_mut().read_to_vec().map_err(|e| e.to_string())?;
         Ok((status, reply))
     }
+
+    fn get_with_headers(
+        &mut self,
+        path: &str,
+        headers: &[(String, String)],
+        wanted: &[&str],
+    ) -> Result<ResponseWithHeaders, String> {
+        crate::e2ee::ureq_get(&self.proxy.agent()?, &self.url(path)?, headers, wanted)
+    }
 }
 
 /// A NEAR RPC client whose reads and signed transactions all leave through Tor, with credentials of its own: one
@@ -284,6 +293,17 @@ impl Transport for NetTransport {
         match self {
             Self::Direct(t) => t.post(path, headers, body),
             Self::Tor(t) => t.post(path, headers, body),
+        }
+    }
+    fn get_with_headers(
+        &mut self,
+        path: &str,
+        headers: &[(String, String)],
+        wanted: &[&str],
+    ) -> Result<ResponseWithHeaders, String> {
+        match self {
+            Self::Direct(t) => t.get_with_headers(path, headers, wanted),
+            Self::Tor(t) => t.get_with_headers(path, headers, wanted),
         }
     }
 }

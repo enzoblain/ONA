@@ -20,6 +20,15 @@ fn sha(b: &[u8]) -> String {
     hex(&Sha256::digest(b))
 }
 
+/// Takes the reported model key without checking its quote: these tests are about the exchange around the key.
+/// The real check is tested in `tests/attestation.rs`.
+struct Unverified;
+impl ModelKeyVerifier for Unverified {
+    fn model_key(&mut self, report: &Value, nonce: &str) -> Result<[u8; 32], String> {
+        reported_model_key(report, nonce)
+    }
+}
+
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> &'a str {
     headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()).unwrap_or("")
 }
@@ -159,8 +168,8 @@ impl ClientKeyFor<'_> {
     }
 }
 
-fn client(attack: Attack) -> E2eeClient<FakeEnclave> {
-    E2eeClient::new(FakeEnclave::new(attack), MODEL, 100, 1000)
+fn client(attack: Attack) -> E2eeClient<FakeEnclave, Unverified> {
+    E2eeClient::new(FakeEnclave::new(attack), Unverified, MODEL, 100, 1000)
 }
 
 #[test]
@@ -174,7 +183,7 @@ fn a_chat_round_trips_through_the_enclave() {
 #[test]
 fn version_3_is_the_default() {
     let mut enclave = FakeEnclave::new(Attack::None);
-    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000);
+    let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
     assert_eq!(c.chat("bonjour").unwrap().content, "secret reply");
     assert_eq!(enclave.last_version, "3");
     assert_eq!(enclave.received_prompts, vec!["bonjour"]);
@@ -183,7 +192,7 @@ fn version_3_is_the_default() {
 #[test]
 fn version_2_needs_an_explicit_setting() {
     let mut enclave = FakeEnclave::new(Attack::None);
-    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000).with_encryption_version(EncryptionVersion::V2);
+    let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000).with_encryption_version(EncryptionVersion::V2);
     assert_eq!(c.chat("bonjour").unwrap().content, "secret reply");
     assert_eq!(enclave.last_version, "2");
 }
@@ -191,7 +200,7 @@ fn version_2_needs_an_explicit_setting() {
 /// The request never opens, nothing reaches the model, and the client does not try another version.
 fn assert_refused_without_downgrade(attack: Attack) {
     let mut enclave = FakeEnclave::new(attack);
-    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000);
+    let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
     assert!(c.chat("dossier Dupont").unwrap_err().contains("chat failed"));
     assert!(enclave.received_prompts.is_empty(), "the model must not see the prompt");
     assert_eq!(enclave.chats, 1, "a failure is not retried");
@@ -275,7 +284,7 @@ fn encryption_interoperates_with_a_client_key() {
 #[test]
 fn a_request_token_travels_in_its_header() {
     let mut enclave = FakeEnclave::new(Attack::None);
-    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000);
+    let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
     c.chat_with_token("x", "abc123").unwrap();
     assert_eq!(enclave.last_token, "abc123");
 }
@@ -283,7 +292,7 @@ fn a_request_token_travels_in_its_header() {
 #[test]
 fn a_token_limit_is_always_sent() {
     let mut enclave = FakeEnclave::new(Attack::None);
-    let mut c = E2eeClient::new(&mut enclave, MODEL, 77, 1000);
+    let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 77, 1000);
     c.chat("x").unwrap();
     let body: Value = serde_json::from_slice(&enclave.last_body).unwrap();
     assert_eq!(body["max_tokens"], 77);
@@ -294,7 +303,7 @@ fn a_token_limit_is_always_sent() {
 #[test]
 fn the_prompt_reaches_the_model_only_as_ciphertext() {
     let mut enclave = FakeEnclave::new(Attack::None);
-    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000);
+    let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
     c.chat("dossier Dupont").unwrap();
     assert_eq!(enclave.received_prompts, vec!["dossier Dupont"]);
     assert!(!String::from_utf8_lossy(&enclave.last_body).contains("Dupont"));
@@ -303,7 +312,7 @@ fn the_prompt_reaches_the_model_only_as_ciphertext() {
 #[test]
 fn the_budget_stops_calls_before_they_spend() {
     let mut enclave = FakeEnclave::new(Attack::None);
-    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 120);
+    let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 120);
     c.chat("x").unwrap();
     assert_eq!(c.chat("y").unwrap_err(), "token budget exhausted");
     assert_eq!(enclave.chats, 1, "the second call never left");
@@ -312,7 +321,7 @@ fn the_budget_stops_calls_before_they_spend() {
 #[test]
 fn a_replayed_attestation_is_refused_before_any_chat() {
     let mut enclave = FakeEnclave::new(Attack::ReplayNonce);
-    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000);
+    let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
     assert!(c.chat("x").unwrap_err().contains("nonce"));
     assert_eq!(enclave.chats, 0, "nothing is sent to an unproven key");
 }
@@ -335,10 +344,10 @@ fn a_signature_from_another_key_is_refused() {
 #[test]
 fn an_invalid_model_key_is_refused() {
     let report = json!({"model_attestations": [{"signing_public_key": "abcd", "request_nonce": "n"}]});
-    assert!(attested_model_key(&report, "n").unwrap_err().contains("32 bytes"));
-    assert!(attested_model_key(&json!({}), "n").is_err());
+    assert!(reported_model_key(&report, "n").unwrap_err().contains("32 bytes"));
+    assert!(reported_model_key(&json!({}), "n").is_err());
     let low_order = json!({"model_attestations": [{"signing_public_key": hex(&[0u8; 32]), "request_nonce": "n"}]});
-    assert!(attested_model_key(&low_order, "n").is_err(), "a weak key would make the encryption worthless");
+    assert!(reported_model_key(&low_order, "n").is_err(), "a weak key would make the encryption worthless");
 }
 
 #[test]
@@ -349,7 +358,7 @@ fn the_right_attestation_is_chosen_among_several() {
         {"signing_public_key": hex(&other), "request_nonce": "old"},
         {"signing_public_key": hex(&wanted), "request_nonce": "mine"},
     ]});
-    assert_eq!(attested_model_key(&report, "mine").unwrap(), wanted);
+    assert_eq!(reported_model_key(&report, "mine").unwrap(), wanted);
 }
 
 #[test]
