@@ -176,3 +176,45 @@ public enum PoolOutcome {
         return "Récupération : \(count("spent")) faites, \(count("held_again")) revenues, \(count("still_spending")) en attente\(agent)."
     }
 }
+
+/// The privacy figures of `pool_privacy` (docs/desktop/privacy.md): measured upper bounds, never percentages.
+public struct PoolPrivacy: Equatable, Sendable {
+    /// The smallest set among the wallet's notes: its weakest note. nil without notes.
+    public let smallestSet: Int?
+    /// Per vault: the smallest set an entry of the held cash would join, and the difference from the cash it spends.
+    public let vaults: [Int: (ifEntered: Int, gain: Int?)]
+
+    public init?(_ reply: [String: Any]) {
+        guard reply["ok"] as? Bool == true, let wallet = reply["wallet"] as? [String: Any] else { return nil }
+        smallestSet = (wallet["smallest_set"] as? NSNumber)?.intValue
+        var vaults: [Int: (ifEntered: Int, gain: Int?)] = [:]
+        for v in reply["vaults"] as? [[String: Any]] ?? [] {
+            guard let id = (v["vault"] as? NSNumber)?.intValue, let entered = (v["if_entered"] as? NSNumber)?.intValue else { continue }
+            vaults[id] = (entered, (v["gain"] as? NSNumber)?.intValue)
+        }
+        self.vaults = vaults
+    }
+
+    public static func == (a: PoolPrivacy, b: PoolPrivacy) -> Bool {
+        a.smallestSet == b.smallestSet && a.vaults.keys == b.vaults.keys
+            && a.vaults.allSatisfy { b.vaults[$0.key]?.ifEntered == $0.value.ifEntered && b.vaults[$0.key]?.gain == $0.value.gain }
+    }
+
+    /// The sentence of the panel.
+    public var line: String {
+        guard let smallestSet else { return "Aucun billet dans le pool pour l'instant." }
+        if smallestSet <= 1 {
+            return "Votre billet le moins protégé est seul de sa valeur à sa place : un observateur de la chaîne peut le suivre."
+        }
+        return "Votre billet le moins protégé se confond avec au plus \(smallestSet) billets de même valeur au même endroit."
+    }
+
+    public static let caveat = "Sans ONA, un dépôt direct en staking est lié à votre compte : 1. Chiffre maximal, compté sur la chaîne ; un observateur qui recoupe les dates et les montants peut en exclure certains."
+
+    /// "+ X" next to a vault offered for an entry.
+    public func label(vault: Int) -> String {
+        guard let v = vaults[vault] else { return "" }
+        let gain = v.gain.map { $0 >= 0 ? ", +\($0)" : ", \($0)" } ?? ""
+        return " — parmi \(v.ifEntered) billets\(gain)"
+    }
+}

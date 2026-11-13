@@ -375,7 +375,7 @@ public final class ChatEngine {
     private var releasingPools: [CoreQueue] = []
 
     /// The commands the pool window may send (docs/desktop/pool-commands.md).
-    public static let poolCommands: Set<String> = ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover"]
+    public static let poolCommands: Set<String> = ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover", "pool_privacy"]
 
     /// `makePoolCore` makes the pool's core; by default `makeCore`.
     public init(makeCore: @escaping () -> any MissionCore, makePoolCore: (() -> any MissionCore)? = nil) {
@@ -391,7 +391,7 @@ public final class ChatEngine {
         releasingPools.append(old)
     }
 
-    /// A pool command from the Mac's window: `pool_portfolio`, `pool_prepare`, `pool_execute` or `pool_recover`.
+    /// A pool command from the Mac's window: `pool_portfolio`, `pool_prepare`, `pool_execute`, `pool_recover` or `pool_privacy`.
     /// ona-core works on the pool core's queue: the main actor, which serves the window and the phone, is not held.
     /// Pool operations are confirmed on the Mac only, never from the phone.
     public func pool(_ request: [String: Any]) async -> [String: Any] {

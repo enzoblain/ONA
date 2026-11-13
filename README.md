@@ -144,7 +144,9 @@ payment; the escape exits did not run, because the node refused a long fast-forw
 
 ## Next steps (product direction, not built yet)
 
-**Privacy metrics in a side panel of the app.**
+**Privacy metrics in a side panel of the app.** A first version is built: `pool_privacy` counts, from the contract's public
+views, how many notes of the same value at the same place a note hides among, and the desktop apps show it in the Pool window
+and next to each vault offered for an entry (docs/desktop/privacy.md). The "with ONA / without ONA" comparison below is not built.
 - Show a privacy figure next to the chat, for example: "for similar amounts, your privacy is at X% with ONA and Y% without it".
 - When the agent recommends a vault or a placement, it states how much that choice raises the privacy figure (for example "+Z
   points").

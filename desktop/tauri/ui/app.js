@@ -383,6 +383,8 @@ async function drawPortfolio() {
       el("p", { class: "help" }, "Le pool se configure avec pool.json dans le dossier de l'app (voir docs/desktop/tauri.md)."));
     return;
   }
+  // The privacy figures (docs/desktop/privacy.md): read with the portfolio, shown only if the pool answers.
+  const privacy = await pool({ cmd: "pool_privacy" }).catch(() => null);
   const holding = (name, value, pending, ...buttons) => el("div", { class: "holding" },
     el("span", { class: "name" }, name, pending ? el("span", { class: "help" }, "  · opération en cours") : null),
     el("span", { class: "value" }, near(value)), ...buttons);
@@ -390,6 +392,7 @@ async function drawPortfolio() {
   body.replaceChildren(
     el("div", {}, el("p", { class: "help" }, "Valeur totale"), el("div", { class: "total" }, near(portfolio.total))),
     portfolio.mode === "mock" ? el("p", { class: "warn" }, "Simulation : pool fictif (mode mock).") : null,
+    privacy ? privacyCard(privacy) : null,
     el("div", {},
       holding("Cash", portfolio.cash.value, portfolio.cash.spending_value !== "0"),
       ...vaults.map((v) => holding(`Vault ${v.vault}${v.frozen ? " (gelé)" : ""}`, v.value,
@@ -397,17 +400,40 @@ async function drawPortfolio() {
         el("button", { class: "secondary", onclick: () => poolForm("switch", portfolio, v.vault) }, "Changer"),
         el("button", { class: "secondary", onclick: () => poolForm("exit", portfolio, v.vault) }, "Sortir")))),
     el("div", { class: "ops" },
-      el("button", { class: "primary", onclick: () => poolForm("enter", portfolio) }, "Placer du cash"),
+      el("button", { class: "primary", onclick: () => poolForm("enter", portfolio, undefined, privacy) }, "Placer du cash"),
       el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Payer vers un compte"),
       el("button", { class: "secondary", onclick: () => poolForm("deposit", portfolio) }, "Déposer"),
       el("button", { class: "secondary", onclick: recover }, "Récupérer les opérations en attente")),
   );
 }
 
+/** "Among at most N": a measured upper bound, never a percentage (docs/desktop/privacy.md). */
+function privacyCard(p) {
+  const smallest = p.wallet.smallest_set;
+  const line = smallest === null || smallest === undefined
+    ? "Aucun billet dans le pool pour l'instant."
+    : smallest <= 1
+      ? "Votre billet le moins protégé est seul de sa valeur à sa place : un observateur de la chaîne peut le suivre."
+      : `Votre billet le moins protégé se confond avec au plus ${smallest} billets de même valeur au même endroit.`;
+  return el("div", { class: "card privacy" },
+    el("h3", {}, "Confidentialité"),
+    el("p", {}, line),
+    el("p", { class: "help" }, `Sans ONA, un dépôt direct en staking est lié à votre compte : 1. Chiffre maximal, compté sur la chaîne ; un observateur qui recoupe les dates et les montants peut en exclure certains.`));
+}
+
+/** "+ X" next to a vault: how many more notes an entry would hide among than the cash it spends. */
+function gainLabel(v) {
+  if (v.if_entered === undefined) return "";
+  const gain = v.gain === undefined ? "" : v.gain >= 0 ? `, +${v.gain}` : `, ${v.gain}`;
+  return ` — parmi ${v.if_entered} billets${gain}`;
+}
+
 /** The form of one operation; on submit, `pool_prepare`, then the summary to confirm. */
-function poolForm(op, portfolio, vault) {
+function poolForm(op, portfolio, vault, privacy) {
+  const byVault = new Map((privacy?.vaults || []).map((v) => [v.vault, v]));
   const vaultOptions = (except) => Array.from({ length: portfolio.vault_count || 0 }, (_, i) => i)
-    .filter((i) => i !== except).map((i) => el("option", { value: i }, `Vault ${i}`));
+    .filter((i) => i !== except)
+    .map((i) => el("option", { value: i }, `Vault ${i}${op === "enter" && byVault.has(i) ? gainLabel(byVault.get(i)) : ""}`));
   const amountField = (label, all) => el("label", {}, label,
     el("input", { name: "amount", placeholder: all ? "en NEAR, ou « tout »" : "en NEAR", required: true }));
   const fields = {

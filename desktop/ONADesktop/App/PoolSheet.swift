@@ -10,6 +10,8 @@ struct PoolSheet: View {
     @State private var screen: Screen = .loading
     @State private var message: String?
     @State private var busy = false
+    /// `pool_privacy`, read with the portfolio; nil when the pool does not answer it.
+    @State private var privacy: PoolPrivacy?
 
     enum Screen {
         case loading
@@ -104,6 +106,15 @@ struct PoolSheet: View {
             if portfolio.mode == "mock" {
                 Label("Simulation : pool fictif (mode mock).", systemImage: "theatermasks").foregroundStyle(.orange)
             }
+            if let privacy {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Confidentialité", systemImage: "eye.slash").font(.headline)
+                    Text(privacy.line)
+                    Text(PoolPrivacy.caveat).font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(10)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+            }
             VStack(spacing: 0) {
                 holdingRow("Cash", portfolio.cash) { EmptyView() }
                 ForEach(portfolio.vaults) { vault in
@@ -169,7 +180,7 @@ struct PoolSheet: View {
             switch form.op {
             case .enter:
                 Picker("Vault", selection: binding.vault) {
-                    ForEach(vaults, id: \.self) { Text("Vault \($0)").tag(Int?.some($0)) }
+                    ForEach(vaults, id: \.self) { Text("Vault \($0)\(privacy?.label(vault: $0) ?? "")").tag(Int?.some($0)) }
                 }
                 TextField("Cash à placer (en NEAR, ou « tout »)", text: binding.amount)
             case .switch:
@@ -253,6 +264,7 @@ struct PoolSheet: View {
         if case .portfolio = screen {} else { screen = .loading }
         let reply = await run(["cmd": "pool_portfolio"])
         if reply["ok"] as? Bool == true, let portfolio = PoolPortfolio(reply) {
+            privacy = PoolPrivacy(await run(["cmd": "pool_privacy"]))
             screen = .portfolio(portfolio)
         } else {
             screen = .unavailable(reply["error"] as? String ?? "réponse illisible")

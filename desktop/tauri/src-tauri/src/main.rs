@@ -63,7 +63,7 @@ async fn confirm(worker: State<'_, Worker>, id: String, decision: String, firm: 
 /// the phone. Answered on the pool's own thread: a read through Tor does not hold the window or the phone.
 #[tauri::command]
 async fn pool(worker: State<'_, Worker>, request: Value) -> Reply {
-    if !matches!(request["cmd"].as_str(), Some("pool_portfolio" | "pool_prepare" | "pool_execute" | "pool_recover")) {
+    if !matches!(request["cmd"].as_str(), Some("pool_portfolio" | "pool_prepare" | "pool_execute" | "pool_recover" | "pool_privacy")) {
         return Err("commande du pool inconnue".into());
     }
     let sender = worker.call(|app| app.engine.pool_sender()).ok_or("ONA s'est arrêté")?;

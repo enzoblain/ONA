@@ -344,6 +344,11 @@ mod tests {
         let portfolio = ask(json!({"cmd": "pool_portfolio"}));
         assert_eq!(portfolio["ok"], true);
         assert_eq!(portfolio["cash"]["value"], "12000000000000000000000000", "the 12 NEAR deposited by --serve");
+        // Only this wallet's notes are in circulation: each hides among the notes of its value, its own included.
+        let privacy = ask(json!({"cmd": "pool_privacy"}));
+        assert_eq!(privacy["ok"], true);
+        assert!(privacy["wallet"]["smallest_set"].as_u64().is_some_and(|n| n >= 1), "{privacy}");
+        assert!(privacy["vaults"][0]["if_entered"].as_u64().is_some(), "{privacy}");
         let prepared = ask(json!({"cmd": "pool_prepare", "op": "enter", "vault": 0, "amount": "10000000000000000000000000"}));
         assert_eq!(prepared["ok"], true);
         let executed = ask(json!({"cmd": "pool_execute", "prepared_id": prepared["prepared_id"]}));

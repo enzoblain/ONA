@@ -1069,3 +1069,20 @@ struct OnionPublishedTests {
         #expect(WalletPage.Session(prepared: Self.prepared)?.account == "alice.testnet")
     }
 }
+
+@Suite struct PoolPrivacyTests {
+    @Test func readsTheFiguresAndSaysThemPlainly() {
+        let reply: [String: Any] = ["ok": true, "wallet": ["smallest_set": 3, "notes": []],
+            "vaults": [["vault": 0, "if_entered": 401, "gain": 398], ["vault": 1, "if_entered": 1, "gain": -2], ["vault": 2, "frozen": true]]]
+        let privacy = PoolPrivacy(reply)
+        #expect(privacy?.smallestSet == 3)
+        #expect(privacy?.line.contains("au plus 3 billets") == true)
+        #expect(privacy?.label(vault: 0) == " — parmi 401 billets, +398")
+        #expect(privacy?.label(vault: 1) == " — parmi 1 billets, -2")
+        #expect(privacy?.label(vault: 2) == "", "a frozen vault is not offered")
+        let alone = PoolPrivacy(["ok": true, "wallet": ["smallest_set": 1]])
+        #expect(alone?.line.contains("seul") == true)
+        #expect(PoolPrivacy(["ok": true, "wallet": ["smallest_set": NSNull()]])?.line.contains("Aucun billet") == true)
+        #expect(PoolPrivacy(["ok": false]) == nil)
+    }
+}
