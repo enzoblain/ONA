@@ -113,8 +113,10 @@ and next to each vault offered for an entry (docs/desktop/privacy.md). The "with
   mission's opening tag was recorded elsewhere, and it proves what the agent wrote, not that it is true.
 - One owner of the registry can replace the other after 30 days unless the other vetoes, so a stolen key is a threat as long as
   nobody watches for such proposals.
-- Chats are deleted after 24 hours only when the app runs: nothing purges while it is closed. Keys are in a local file outside the
-  chat folder until the keychain is wired in, and overwriting deleted files does not erase them on an SSD or on APFS.
+- The apps keep conversations in memory only: they are gone when the app quits. `ona-core` also has a vault that keeps a chat on
+  disk, encrypted, for 24 hours (`chat_save`), used by no app yet. If one uses it: chats are deleted after 24 hours only when the
+  app runs, nothing purges while it is closed; keys are in a local file outside the chat folder until the keychain is wired in,
+  and overwriting deleted files does not erase them on an SSD or on APFS.
 - Testnet only. The mint has no real-money deployment planned.
 - **A dishonest relay may still be able to read replies.** With encryption version 2, the relay controls which client key the reply is encrypted to.
   The client now uses version 3, which binds the reply key. The NEAR AI gateway accepted version 3 in one real call on 12/11/2026 (model

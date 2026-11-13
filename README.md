@@ -81,7 +81,9 @@ Real and tested:
   confirmed by digest;
 - the three apps (macOS, Windows/Linux with Tauri, iPhone) and their signed phone protocol; the phone reached the
   computer's onion service through Tor (Arti) on 11/11/2026;
-- builds of the four apps on GitHub's machines for every change, and a signed, notarized macOS release.
+- builds of the four apps on GitHub's machines for every change, and a signed, notarized macOS release;
+- conversations kept in memory only by the three apps, gone when the app quits: nothing about them is written to disk
+  (in the Tauri app, a test checks that a conversation's text is in no file of the app's folder).
 
 Simulated or not done (everything simulated says `mode: mock`):
 

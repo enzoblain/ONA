@@ -522,8 +522,23 @@ mod tests {
         let list = http(port, "/v1/chats/list", &json!({"token": token}), &key);
         assert_eq!(list["chats"][0]["title"], "Trouve un avocat");
         assert_eq!(worker.call(|app| app.view()["last_request"].clone()).unwrap(), "POST /v1/chats/list → 200");
+        // Conversations stay in memory: once the chat has run a little, its text is in no file of the data folder.
+        thread::sleep(Duration::from_millis(500));
+        for file in files_under(&dir) {
+            let bytes = std::fs::read(&file).unwrap();
+            assert!(!bytes.windows(b"avocat".len()).any(|w| w == b"avocat"), "the conversation reached {file:?}");
+        }
         worker.call(|app| app.stop()).unwrap();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() { found.extend(files_under(&path)) } else { found.push(path) }
+        }
+        found
     }
 
     /// A panicking job fails alone: the worker thread keeps answering.
