@@ -197,6 +197,11 @@ fn run(mut app: App, inbox: Receiver<Job>) {
                     let changed = app.setup.lock().map(|mut setup| std::mem::replace(&mut setup.core_socks, socks) != socks);
                     if changed.unwrap_or(false) {
                         app.engine.reset_pool(); // made again through the new port (or refusing without tor)
+                        if let (Some(socks), Ok(setup)) = (socks, app.setup.lock()) {
+                            if let Ok(Some(model)) = &setup.model {
+                                let _ = model.warm_up(socks); // in the background, result ignored
+                            }
+                        }
                     }
                     app.load_pairing();
                     if app.server.is_none() && app.secrets.is_none() {
