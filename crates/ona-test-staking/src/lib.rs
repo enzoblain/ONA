@@ -1,6 +1,7 @@
-//! `ona-test-staking`: a **test stand-in** for a NEAR staking pool, deployed only by `ona-sandbox-pool` on a local node so
-//! that `ona-pool` can place, unstake and withdraw against a real NEAR runtime. Never deploy it anywhere else: it
-//! stakes nothing with a validator and pays no reward unless a test asks (`add_reward`).
+//! `ona-test-staking`: a **test stand-in** for a NEAR staking pool, deployed by `ona-sandbox-pool` on a local node, and on
+//! testnet as the announced vault of the pool's test build, so that `ona-pool` can place, unstake and withdraw against a
+//! real NEAR runtime. Never on mainnet: it stakes nothing with a validator and pays no reward unless a test asks
+//! (`add_reward`), which anyone can call.
 //!
 //! Its methods carry the names `ona-pool` calls (`deposit_and_stake`, `unstake {amount}`, `withdraw {amount}`,
 //! `get_account_staked_balance`, `get_account_unstaked_balance`, `get_account_total_balance`, each view taking
