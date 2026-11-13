@@ -140,3 +140,4 @@ dialog.pool { width: min(560px, 94vw); }
 .pool label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
 .pool input, .pool select { font: inherit; padding: 7px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
 .pool .warn { color: var(--warn); font-size: 12.5px; margin: 0; }
+.pool .privacy p { margin: 0; }

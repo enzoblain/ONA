@@ -96,6 +96,8 @@ struct FakePool {
     signatures_down: bool,
     /// The escape is open on the cash and on every vault.
     escape_open: bool,
+    /// Notes `(issued, paid)` the contract shows per tier: `None` for the cash, `Some(vault)`. Absent: (0, 0).
+    counts: BTreeMap<(Option<usize>, usize), (u64, u64)>,
 }
 
 type Shared = Rc<RefCell<FakePool>>;
@@ -129,13 +131,19 @@ impl PoolChain for Chain {
         f.log.views.push(format!("{method} {args}"));
         match method {
             "get_config" => Ok(json!({"network": NETWORK, "vault_count": f.vaults.len()})),
-            "get_cash" => Ok(json!({"tiers": f.cash_keys.iter().zip(CASH).map(|(k, v)| json!({
-                "value": f.shown_cash.unwrap_or(v).to_string(), "pk_raw": raw(k)})).collect::<Vec<_>>(),
+            "get_cash" => Ok(json!({"tiers": f.cash_keys.iter().zip(CASH).enumerate().map(|(t, (k, v))| {
+                let (issued, paid) = f.counts.get(&(None, t)).copied().unwrap_or_default();
+                json!({"value": f.shown_cash.unwrap_or(v).to_string(), "pk_raw": raw(k), "issued": issued, "paid": paid})
+            }).collect::<Vec<_>>(),
                 "liquid": f.cash_liquid.to_string(), "open": f.escape_open})),
             "get_vault" => {
-                let v = &f.vaults[args["vault_id"].as_u64().unwrap() as usize];
+                let id = args["vault_id"].as_u64().unwrap() as usize;
+                let v = &f.vaults[id];
                 Ok(json!({
-                    "tiers": v.keys.iter().zip(SHARES).map(|(k, s)| json!({"shares": s.to_string(), "pk_raw": raw(k)})).collect::<Vec<_>>(),
+                    "tiers": v.keys.iter().zip(SHARES).enumerate().map(|(t, (k, s))| {
+                        let (issued, paid) = f.counts.get(&(Some(id), t)).copied().unwrap_or_default();
+                        json!({"shares": s.to_string(), "pk_raw": raw(k), "issued": issued, "paid": paid})
+                    }).collect::<Vec<_>>(),
                     "liquid": v.liquid.to_string(), "placed": "0", "fee_owed": "0", "orphan": v.orphan.to_string(),
                     "total_shares": v.total_shares.to_string(),
                     "share_price": v.shown_price.unwrap_or_else(|| price(v)).to_string(), "frozen": false,
@@ -389,6 +397,7 @@ impl World {
             refuse_after_first: false,
             signatures_down: false,
             escape_open: false,
+            counts: BTreeMap::new(),
         }));
         let mut w = Self { core: Core::new(), fake, now: Rc::new(Cell::new(1_000_000_000_000_000_000)), path };
         w.restart();
@@ -1009,6 +1018,49 @@ fn examples_for_the_docs() {
 
 fn b64_32(v: &Value) -> [u8; 32] {
     B64.decode(v.as_str().unwrap()).unwrap().try_into().unwrap()
+}
+
+/// The privacy figures: each note hides among the notes still in circulation of its value at its place; an entry joins
+/// the share tiers its amount splits into, and `gain` compares with the cash notes it spends.
+#[test]
+fn privacy_counts_the_notes_a_note_hides_among() {
+    let mut w = World::new("privacy");
+    let p = w.ok(json!({"cmd": "pool_prepare", "op": "deposit", "account": "alice.test", "amount": (11 * NEAR).to_string()}));
+    let attached: u128 = p["summary"]["wallet_call"]["attached"].as_str().unwrap().parse().unwrap();
+    w.user_deposits("alice.test", attached);
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"]}));
+    w.ok(json!({"cmd": "pool_execute", "prepared_id": p["prepared_id"], "depositor_signature": wallet_signature()}));
+    {
+        let mut f = w.fake.borrow_mut();
+        // Cash: 1 NEAR notes, 40 issued and 10 paid; 10 NEAR notes, 5 issued and 2 paid.
+        f.counts.insert((None, 1), (40, 10));
+        f.counts.insert((None, 2), (5, 2));
+        // Vault 0: many share notes of each tier; vault 1: a few of the largest only.
+        for t in 0..3 {
+            f.counts.insert((Some(0), t), (500, 100));
+        }
+        f.counts.insert((Some(1), 2), (3, 0));
+    }
+    let r = w.ok(json!({"cmd": "pool_privacy"}));
+    assert_eq!(r["without_ona"], 1);
+    assert_eq!(r["amount"], (11 * NEAR).to_string(), "the held cash by default");
+    assert_eq!(r["cash"]["smallest_set"], 3, "the 10 NEAR note hides among 3: its weakest point");
+    assert_eq!(r["wallet"]["smallest_set"], 3);
+    assert_eq!(r["wallet"]["notes"].as_array().unwrap().len(), 2);
+    let vault = |id: usize| r["vaults"].as_array().unwrap()[id].clone();
+    assert_eq!(vault(0)["if_entered"], 401, "joins 400 notes in circulation, plus itself");
+    assert_eq!(vault(0)["gain"], 398);
+    // 11 NEAR becomes eleven notes of the largest share tier, of which vault 1 has only 3 in circulation.
+    assert_eq!(vault(1)["if_entered"], 4);
+    assert_eq!(vault(1)["gain"], 1);
+    // 0.1 NEAR there needs the smallest tier, which vault 1 has none of: a set of one, worse than the cash.
+    let small = w.ok(json!({"cmd": "pool_privacy", "amount": (NEAR / 10).to_string()}));
+    assert_eq!(small["vaults"][1]["if_entered"], 1);
+    assert_eq!(small["vaults"][1]["gain"], -2);
+    // Another amount can be asked; a value that is not digits is refused.
+    let r = w.ok(json!({"cmd": "pool_privacy", "amount": NEAR.to_string()}));
+    assert_eq!(r["amount"], NEAR.to_string());
+    assert!(w.error(json!({"cmd": "pool_privacy", "amount": "1.5"})).contains("digits"));
 }
 
 #[test]

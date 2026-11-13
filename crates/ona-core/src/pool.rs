@@ -63,7 +63,8 @@ pub const REQUEST_LIFE_NS: u64 = 29 * 24 * 3_600_000_000_000;
 pub const REQUEST_FEE: u128 = 336 * 10_000_000_000_000_000_000;
 
 /// The commands this module answers. `pool_request_exit` and `pool_escape_exit` are `pool_prepare` with that `op`.
-pub const COMMANDS: [&str; 6] = ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover", "pool_request_exit", "pool_escape_exit"];
+pub const COMMANDS: [&str; 7] =
+    ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover", "pool_request_exit", "pool_escape_exit", "pool_privacy"];
 
 /// Read-only access to the pool contract.
 pub trait PoolChain {
@@ -739,6 +740,7 @@ impl PoolClient {
             }
             "pool_execute" => self.execute(request),
             "pool_recover" => self.recover(),
+            "pool_privacy" => self.privacy(request),
             other => Err(format!("unknown command {other}")),
         }?;
         reply["mode"] = json!(self.chain.mode());
@@ -786,6 +788,94 @@ impl PoolClient {
             "vaults": vaults,
             "vault_count": state.vaults.len(),
             "total": total.to_string(),
+        }))
+    }
+
+    /// The privacy figures of the side panel (docs/desktop/privacy.md), from the contract's public counts only.
+    ///
+    /// The measure: a note hides among the notes **still in circulation** of the same value at the same place (the cash,
+    /// or one vault): `issued - paid` of its tier, as `get_cash` and `get_vault` publish them. An observer of the chain
+    /// cannot tell it from the others of that set. The wallet's figure is its smallest set, its weakest note. For each
+    /// open vault, `if_entered` gives the smallest set the notes of an entry would join (the held cash, or `amount`),
+    /// and `gain` the difference from the cash notes spent: the "+ X" next to a recommendation.
+    ///
+    /// These are upper bounds: an observer who also uses deposit and exit times, amounts and batches can rule some
+    /// notes out (`ona-crowd` measures that on simulated crowds). Without ONA, a deposit straight into staking is tied
+    /// to its account: a set of one, `without_ona`.
+    fn privacy(&self, request: &Value) -> Result<Value, String> {
+        let state = self.state()?;
+        let live_counts = |view: &Value| -> Result<Vec<u64>, String> {
+            view["tiers"]
+                .as_array()
+                .ok_or("pool view without tiers")?
+                .iter()
+                .map(|t| {
+                    let issued = t["issued"].as_u64().ok_or("pool view without issued")?;
+                    let paid = t["paid"].as_u64().ok_or("pool view without paid")?;
+                    Ok(issued.saturating_sub(paid))
+                })
+                .collect()
+        };
+        let cash_live = live_counts(&self.chain.view("get_cash", json!({}))?)?;
+        let vault_live = (0..state.vaults.len())
+            .map(|id| self.chain.view("get_vault", json!({"vault_id": id})).and_then(|v| live_counts(&v)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let live = |vault: Option<u32>, tier: u8| -> u64 {
+            let counts = match vault {
+                None => Some(&cash_live),
+                Some(v) => vault_live.get(v as usize),
+            };
+            counts.and_then(|c| c.get(usize::from(tier))).copied().unwrap_or(0)
+        };
+
+        let held: Vec<PoolNote> = self.wallet.notes().into_iter().filter(|n| n.status == NoteStatus::Held).collect();
+        let notes: Vec<Value> = held
+            .iter()
+            .map(|n| json!({"vault": n.vault, "tier": n.token.denom_id, "set": live(n.vault, n.token.denom_id)}))
+            .collect();
+        let smallest = |sets: &mut dyn Iterator<Item = u64>| sets.min();
+        let wallet_min = smallest(&mut held.iter().map(|n| live(n.vault, n.token.denom_id)));
+        let cash_held: Vec<&PoolNote> = held.iter().filter(|n| n.vault.is_none()).collect();
+        let cash_min = smallest(&mut cash_held.iter().map(|n| live(None, n.token.denom_id)));
+
+        // What an entry would join: the held cash by default, or `amount` (yoctoNEAR).
+        let amount = match request["amount"].as_str() {
+            Some(a) => a.parse::<u128>().map_err(|_| "amount must be yoctoNEAR digits".to_string())?,
+            None => {
+                let mut total = 0u128;
+                for n in &cash_held {
+                    let tier = state.cash.get(usize::from(n.token.denom_id)).ok_or("a cash note of an unknown tier")?;
+                    plus(&mut total, tier.size)?;
+                }
+                total
+            }
+        };
+        let mut vaults = Vec::new();
+        for (id, v) in state.vaults.iter().enumerate() {
+            let id = id as u32;
+            let tiers: Vec<Value> = (0..v.tiers.len())
+                .map(|t| json!({"tier": t, "note_shares": v.tiers[t].size.to_string(), "live": live(Some(id), t as u8)}))
+                .collect();
+            let mut entry = json!({"vault": id, "frozen": v.frozen, "tiers": tiers});
+            if !v.frozen && amount > 0 {
+                let (outputs, _) = split(amount, &v.tiers, v.price_up)?;
+                // A new note joins its tier's set: the set it hides in counts it too.
+                let after = outputs.iter().map(|(t, _)| live(Some(id), *t).saturating_add(1)).min();
+                entry["if_entered"] = json!(after);
+                if let (Some(after), Some(before)) = (after, cash_min) {
+                    entry["gain"] = json!(after as i128 - before as i128);
+                }
+            }
+            vaults.push(entry);
+        }
+        Ok(json!({
+            "measure": "notes in circulation of the same value at the same place (upper bound)",
+            "wallet": {"smallest_set": wallet_min, "notes": notes},
+            "cash": {"smallest_set": cash_min,
+                     "tiers": cash_live.iter().enumerate().map(|(t, n)| json!({"tier": t, "live": n})).collect::<Vec<_>>()},
+            "vaults": vaults,
+            "amount": amount.to_string(),
+            "without_ona": 1,
         }))
     }
 

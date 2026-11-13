@@ -115,6 +115,14 @@ Every summary also has `op`, `amount`, `network`, `contract` and `expires_at`.
 succeeded (in a `switch` or with several notes), the reply has `complete: false`, the `error` and the steps already done. If the
 first step fails, the reply is an error.
 
+### `pool_privacy`
+
+Request: `{"cmd":"pool_privacy"}`, optionally with `amount` (yoctoNEAR) for the entry figures; the held cash otherwise.
+Reply: `measure`, `wallet` (`smallest_set`, `notes` with each held note's `vault`, `tier` and `set`), `cash` (`smallest_set`,
+and `live` notes per tier), `vaults` (per vault: `frozen`, `live` per tier, and for an open vault `if_entered` and `gain`),
+`amount`, `without_ona` (1). A note's set is the notes still in circulation (`issued - paid`) of its tier at its place. Read
+from the contract's public views only; upper bounds (docs/desktop/privacy.md).
+
 ### `pool_recover`
 
 Request: `{"cmd":"pool_recover"}`. To run after an interruption or an `outcome unknown` error, and at start-up.
