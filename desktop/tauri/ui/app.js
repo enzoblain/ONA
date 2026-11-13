@@ -9,13 +9,20 @@ let lastState = "";       // JSON of the last state, to redraw only on change
 let lastChat = "";
 let mode = "tor";
 const chosenFirm = {};    // pending id → firm picked in a recipient card
+const editedQueries = {}; // pending id → the research queries as edited here
+const recipients = {};    // "chat:index" → recipient typed for a suggested action
+const preparedActions = {}; // "chat:index" → the exact action from ona-core, awaiting the person's click
+const doneActions = {};   // "chat:index" → what research_action_do answered
 
 const STEP_LABELS = {
   search: "Recherche", read: "Lecture d'une page", compare: "Comparaison des offres",
   confirm_recipient: "Choix du destinataire (vous)", contact: "Prise de contact",
   prepare_payment: "Préparation du paiement", confirm_payment: "Confirmation du paiement (vous)", pay: "Paiement",
 };
-const OUTPUT_LABELS = { search: "Recherches envoyées", fetch: "Pages lues", contact: "Messages envoyés", pay: "Paiements" };
+const OUTPUT_LABELS = {
+  search: "Recherches envoyées", fetch: "Pages lues", contact: "Messages envoyés", pay: "Paiements",
+  message: "Messages remis à votre messagerie",
+};
 const STATUS_LABELS = { waiting: "À confirmer", working: "En cours" };
 const STATE_LABELS = { accepted: "Confirmé", rejected: "Refusé", expired: "Plus d'actualité" };
 
@@ -188,6 +195,8 @@ function item(entry) {
     case "activity": return el("div", { class: "activity" }, entry.text);
     case "confirmation": return confirmation(entry.pending, entry.state);
     case "exposure": return exposure(entry.exposure);
+    case "answer": return answer(entry);
+    case "action": return action(entry.action, entry.state);
     default: return el("div");
   }
 }
@@ -200,11 +209,31 @@ function confirmation(pending, state) {
         el("button", {
           class: "primary", disabled: pending.kind === "recipient" && !chosenFirm[pending.id],
           onclick: () => decide(pending, "accept"),
-        }, { plan: "Valider le plan", recipient: "Contacter ce cabinet", payment: "Confirmer le paiement" }[pending.kind]))
+        }, {
+          plan: "Valider le plan", recipient: "Contacter ce cabinet", payment: "Confirmer le paiement",
+          queries: "Lancer ces recherches",
+        }[pending.kind]))
     : el("div", { class: `state ${state}` }, STATE_LABELS[state] || state);
 
   let content;
-  if (pending.kind === "plan") {
+  if (pending.kind === "queries") {
+    // Editable here only; the phone accepts them as shown. An emptied field is dropped.
+    const shown = editedQueries[pending.id] || pending.queries;
+    content = [
+      el("h3", {}, "Recherches à lancer"),
+      el("div", { class: "sub" }, "Rien ne part sur le web avant votre accord. Ces recherches passeront par Tor, telles qu'écrites ici."),
+      el("div", { class: "queries" }, shown.map((query, i) => open
+        ? el("input", {
+            class: "field", value: query, maxlength: 120, "aria-label": `Recherche ${i + 1}`,
+            oninput: (event) => {
+              const list = [...(editedQueries[pending.id] || pending.queries)];
+              list[i] = event.target.value;
+              editedQueries[pending.id] = list;
+            },
+          })
+        : el("div", { class: "query" }, `« ${query} »`))),
+    ];
+  } else if (pending.kind === "plan") {
     content = [el("h3", {}, "Confirmation demandée"), el("ol", {}, pending.plan.map((s) => el("li", {}, STEP_LABELS[s] || s)))];
   } else if (pending.kind === "recipient") {
     content = [el("h3", {}, "Choisir le destinataire"), ...pending.offers.map((offer) => el("label", {
@@ -229,13 +258,14 @@ function confirmation(pending, state) {
 
 function exposure(report) {
   const outputs = Object.entries(report.outputs || {}).sort(([a], [b]) => a.localeCompare(b));
-  const firms = (report.firms_contacted || []).join(", ") || "aucun";
+  // A research contacts no firm: the row is shown for the lawyer mission's reports only.
+  const firms = (report.firms_contacted || []).join(", ");
   return el("div", { class: "card" },
     el("h3", {}, "Relevé d'exposition"),
     el("div", { class: "sub" }, "Ce qui est sorti de cet ordinateur pendant la mission."),
     el("div", { class: "row" }, el("span", {}, "Appels au modèle"), el("span", {}, report.model_calls ?? 0)),
     outputs.map(([name, count]) => el("div", { class: "row" }, el("span", {}, OUTPUT_LABELS[name] || name), el("span", {}, count))),
-    el("div", { class: "row" }, el("span", {}, "Cabinets contactés"), el("span", {}, firms)),
+    firms ? el("div", { class: "row" }, el("span", {}, "Cabinets contactés"), el("span", {}, firms)) : null,
     (report.payments || []).map((p) => el("div", { class: "row" }, el("span", {}, "Paiement"), el("span", {}, `${near(p.amount || "0")} → ${p.to || "?"}`))),
     report.mode !== "real" ? el("div", { class: "sub" }, "Relevé d'une simulation") : null);
 }
@@ -244,7 +274,118 @@ async function decide(pending, decision) {
   const args = { id: pending.id, decision, firm: null, digest: null };
   if (decision === "accept" && pending.kind === "recipient") args.firm = chosenFirm[pending.id];
   if (decision === "accept" && pending.kind === "payment") args.digest = pending.payment.digest;
+  if (decision === "accept" && pending.kind === "queries") {
+    args.queries = (editedQueries[pending.id] || pending.queries).map((q) => q.trim()).filter(Boolean);
+    if (args.queries.length === 0) return toast("Gardez au moins une recherche.");
+  }
   await run("confirm", args);
+  lastChat = "";
+  refresh();
+}
+
+/** The host of an address, shown next to a source; the address itself is text, never a link. */
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
+function answer(entry) {
+  const titles = Object.fromEntries((entry.sources || []).map((s) => [s.handle, s.title]));
+  const notes = entry.notes || [];
+  return el("div", { class: "card answer" },
+    el("h3", {}, "Réponse"),
+    el("p", { class: "answer-text" }, entry.answer),
+    notes.length ? el("h4", {}, "D'après les pages lues") : null,
+    notes.length ? el("ul", { class: "notes" }, notes.map((n) => el("li", {},
+      el("div", {}, n.claim),
+      el("div", { class: "quote" }, `« ${n.quote} »`),
+      el("div", { class: "sub" }, `Source ${n.source}${titles[n.source] ? ` — ${titles[n.source]}` : ""}`)))) : null,
+    el("h4", {}, "Sources"),
+    (entry.sources || []).length
+      ? el("ol", { class: "sources" }, entry.sources.map((s) => el("li", {},
+          el("div", {}, `${s.handle} — ${s.title}`, el("span", { class: "sub" }, `  ${hostOf(s.url)}`)),
+          el("div", { class: "mono" }, s.url))))
+      : el("div", { class: "sub" }, "Aucune source lue."),
+    el("div", { class: "sub" }, "Les adresses sont affichées pour information : ONA ne les ouvre pas."));
+}
+
+/** A suggested action: the person types the recipient, sees the exact action, then carries it out here. */
+function action(a, state) {
+  const key = `${selected}:${a.index}`;
+  const isMessage = a.kind === "message";
+  const card = el("div", { class: "card action" },
+    el("h3", {}, isMessage ? "Message proposé" : "Paiement proposé"),
+    el("div", { class: "sub" }, a.purpose),
+    isMessage ? el("div", { class: "message-text" }, a.text)
+      : el("div", { class: "row" }, el("span", {}, "Montant"), el("span", {}, near(a.amount || "0"))));
+  const done = doneActions[key];
+  if (state === "done") {
+    card.append(el("div", { class: "state accepted" }, isMessage ? "Remis à votre messagerie" : "Payé"));
+    if (done?.done === "message" && !done.opened) {
+      card.append(el("p", { class: "help" }, "La messagerie ne s'est pas ouverte. Adresse à copier dans votre messagerie :"),
+        el("div", { class: "mono" }, done.mailto));
+    }
+    if (done?.done === "payment") card.append(el("div", { class: "sub mono" }, `Transaction : ${done.tx}`));
+    return card;
+  }
+  const prepared = preparedActions[key];
+  if (prepared) {
+    card.append(...[
+      el("h4", {}, "Action exacte"),
+      el("div", { class: "row" }, el("span", {}, "Destinataire"), el("span", { class: "mono" }, prepared.to)),
+      prepared.kind === "message"
+        ? el("div", { class: "message-text" }, prepared.content)
+        : el("div", { class: "row" }, el("span", {}, "Montant"), el("span", {}, near(prepared.content))),
+      prepared.seen_in_pages
+        ? el("p", { class: "warn" }, "Cette adresse figure dans une page lue : vérifiez qu'elle est bien la bonne.")
+        : null,
+      prepared.kind === "message"
+        ? el("p", { class: "help" }, "Le message s'ouvre dans votre messagerie : c'est vous qui l'envoyez.")
+        : null,
+      el("div", { class: "actions" },
+        el("button", { class: "secondary", onclick: () => { delete preparedActions[key]; lastChat = ""; refresh(); } }, "Modifier"),
+        el("button", { class: "primary", onclick: () => doAction(key, prepared) },
+          prepared.kind === "message" ? "Envoyer depuis ma messagerie" : "Payer")),
+    ].filter(Boolean));
+    return card;
+  }
+  const input = el("input", {
+    class: "field", value: recipients[key] || "",
+    placeholder: isMessage ? "Adresse e-mail du destinataire" : "Compte NEAR du destinataire (nom.testnet)",
+    "aria-label": "Destinataire",
+    oninput: (event) => { recipients[key] = event.target.value; },
+  });
+  card.append(el("label", { class: "recipient" }, "Destinataire", input),
+    el("div", { class: "actions" },
+      el("button", { class: "primary", onclick: () => prepareAction(key, a.index) }, "Préparer")));
+  return card;
+}
+
+async function prepareAction(key, index) {
+  const to = (recipients[key] || "").trim();
+  if (!to) return toast("Indiquez le destinataire.");
+  try {
+    const prepared = await run("research_action_prepare", { chat: selected, index, to });
+    // ona-core holds one prepared action at a time: another one shown for this chat would no longer match.
+    for (const other of Object.keys(preparedActions)) if (other.startsWith(`${selected}:`)) delete preparedActions[other];
+    preparedActions[key] = prepared;
+  } catch {
+    return; // the reason is in the toast
+  }
+  lastChat = "";
+  refresh();
+}
+
+async function doAction(key, prepared) {
+  try {
+    doneActions[key] = await run("research_action_do", { chat: selected, digest: prepared.digest });
+  } catch {
+    // The reason is in the toast; the action is prepared again from the start.
+  }
+  delete preparedActions[key];
   lastChat = "";
   refresh();
 }
