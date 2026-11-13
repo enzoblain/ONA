@@ -565,8 +565,9 @@ fn new_onion_auth() -> Vec<u8> {
     secret.to_vec()
 }
 
-/// Writes a file readable by the current user only (0600 on Unix; per-user AppData on Windows), atomically: a
-/// temporary file is written, flushed, renamed over the old one, and the folder is flushed.
+/// Writes a file readable by the current user only (0600 on Unix; on Windows it takes the access list of the per-user
+/// AppData folder, neither set nor checked here), atomically: a temporary file is written, flushed, renamed over the
+/// old one, and the folder is flushed.
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
@@ -588,9 +589,16 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()?;
     drop(file);
     std::fs::rename(&temporary, path)?;
-    // The rename itself reaches the disk only when the folder is flushed (Unix).
-    #[cfg(unix)]
+    // The rename itself reaches the disk only when the folder is flushed. On Windows a folder opens only with
+    // FILE_FLAG_BACKUP_SEMANTICS, and flushes only with write access.
     if let Some(dir) = path.parent() {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            std::fs::OpenOptions::new().write(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(dir)?.sync_all()?;
+        }
+        #[cfg(not(windows))]
         std::fs::File::open(dir)?.sync_all()?;
     }
     Ok(())

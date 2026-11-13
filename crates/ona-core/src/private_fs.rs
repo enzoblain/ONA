@@ -1,12 +1,10 @@
 //! Private files on every system the apps run on.
 //!
 //! On Unix a file is created with mode 600 and refused when its mode lets another account in. Windows has no such
-//! mode: a file takes the access list of its folder, and the apps keep their files in the user's profile, which other
-//! standard accounts cannot open. There the mode check has nothing to read and passes.
+//! mode: a file takes the access list (ACL) of its folder, and the apps keep their files in the user's profile. No
+//! access list is set or checked there: the mode check has nothing to read and passes.
 
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::{Metadata, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::path::Path;
 
 pub(crate) trait OwnerOnly {
@@ -51,12 +49,31 @@ pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Flushes a folder, so a rename in it reaches the disk. Unix only: Windows cannot open a folder as a file, so there
-/// the rename is not flushed and a crash right after it may undo it.
+/// Flushes a folder, so a rename in it reaches the disk. On Windows a folder opens only with
+/// `FILE_FLAG_BACKUP_SEMANTICS`, and its buffers flush only with write access.
 pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    File::open(dir)?.sync_all()?;
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        OpenOptions::new().write(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(dir)?.sync_all()
+    }
+    #[cfg(not(windows))]
+    File::open(dir)?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Run on each system by the release workflow: on Windows, a folder must open and flush.
+    #[test]
+    fn a_folder_is_flushed_after_a_rename() {
+        let dir = std::env::temp_dir().join(format!("ona-sync-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.tmp"), b"x").unwrap();
+        std::fs::rename(dir.join("a.tmp"), dir.join("a")).unwrap();
+        sync_dir(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

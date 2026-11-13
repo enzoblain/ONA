@@ -1,4 +1,5 @@
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -71,10 +72,14 @@ fn nothing_readable_is_left_on_disk() {
     v.put("c1", SECRET, T0).unwrap();
     let raw = fs::read(p.chat("c1")).unwrap();
     assert!(!raw.windows(7).any(|w| w == b"dossier"), "the text is encrypted");
-    for path in [p.keys_file(), p.chat("c1")] {
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "{path:?}");
+    // The modes exist on Unix only (`private_fs`).
+    #[cfg(unix)]
+    {
+        for path in [p.keys_file(), p.chat("c1")] {
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "{path:?}");
+        }
+        assert_eq!(fs::metadata(p.dir()).unwrap().permissions().mode() & 0o777, 0o700);
     }
-    assert_eq!(fs::metadata(p.dir()).unwrap().permissions().mode() & 0o777, 0o700);
 }
 
 /// The key is not next to the file. The vault refuses a key file in its directory.

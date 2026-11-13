@@ -3,6 +3,7 @@
 //! web, payments and relay.
 
 use std::cell::RefCell;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -412,6 +413,7 @@ fn tokens_path(name: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tokens");
     std::fs::write(&path, "tok-1\ntok-2\ntok-3\n").unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     path
 }
@@ -443,6 +445,8 @@ fn tokens_are_read_again_under_the_lock() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "tok-1 and tok-2, spent elsewhere, did not come back");
 }
 
+// Unix only: Windows has no mode to check (`private_fs`).
+#[cfg(unix)]
 #[test]
 fn a_tokens_file_other_accounts_can_read_is_refused() {
     let path = tokens_path("open");
@@ -466,6 +470,7 @@ fn the_rewritten_tokens_file_stays_private_and_leaves_no_copy() {
     net.0.borrow_mut().attestation_status = 200;
     let mut model = RemoteModel::new(net, Box::new(Unverified), file_config(&path)).unwrap();
     let _ = model.plan("m");
+    #[cfg(unix)]
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     let names: Vec<String> = std::fs::read_dir(path.parent().unwrap())
         .unwrap()

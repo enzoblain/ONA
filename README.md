@@ -95,7 +95,10 @@ Simulated or not done (everything simulated says `mode: mock`):
   binds that key and the request, on the one NEAR AI machine setup observed so far; the real NEAR AI quote (report of 10/11/2026)
   passed it once on 13/11/2026 with Intel's live collateral (fetched directly, not through Tor); the NVIDIA GPU evidence is not checked;
 - **not run**: the iPhone on a real device, the Tauri app on real Windows and Linux machines, a deposit from a real
-  wallet.
+  wallet;
+- **Windows file permissions**: the secret files (onion key, model settings, request tokens) get mode 600 on macOS and
+  Linux, and a file other accounts can read is refused; on Windows no access list is set or checked, so they rely on
+  the user's profile folder.
 
 Per-component state, what each was tested on, and the known limitations: [docs/STATUS.md](docs/STATUS.md) and
 [docs/DESIGN.md](docs/DESIGN.md).

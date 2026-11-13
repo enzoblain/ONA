@@ -111,7 +111,7 @@ Nothing selects this mode by default: without the word `real`, or with any requi
 | `ONA_REAL_MODEL` | model name, which the relay must allow |
 | `ONA_REAL_MAX_TOKENS` | ceiling on the reply tokens of one call, at most the relay's own limit. The prompt counts on top of it |
 | `ONA_REAL_TOKEN_BUDGET` | most tokens in total for this run of `ona`, prompts and replies, at least one call's ceiling |
-| `ONA_REAL_TOKENS_FILE` | optional, a file with one request token per line, one spent per call and removed from the file before it is sent. Refused if empty or readable by other accounts (`chmod 600`). Only one `ona real` can use a file at a time: a lock file `<file>.lock` is created next to it. `ona-relay` refuses a chat without one |
+| `ONA_REAL_TOKENS_FILE` | optional, a file with one request token per line, one spent per call and removed from the file before it is sent. Refused if empty or readable by other accounts (`chmod 600`); on Windows this check is not made, since there is no mode to read: the file relies on its folder's access list. Only one `ona real` can use a file at a time: a lock file `<file>.lock` is created next to it. `ona-relay` refuses a chat without one |
 
 On 13/11/2026 a mission ran this way with `z-ai/glm-5.3-flash`, through Tor to the team's test relay (an onion service with
 client authorization): the plan and both page readings came from the model, 3 calls, 4,187 tokens. With `ONA_REAL_MAX_TOKENS=512`

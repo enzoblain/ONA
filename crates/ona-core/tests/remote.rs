@@ -594,12 +594,15 @@ fn attestation_and_signature_requests_show_the_token_of_their_chat() {
 }
 
 fn tokens_file(name: &str, content: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("ona-remote-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tokens");
     std::fs::write(&path, content).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     path
 }
 
@@ -651,6 +654,8 @@ fn a_token_stays_in_the_file_when_nothing_was_sent() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "aa\nbb\n");
 }
 
+// Unix only: a read-only folder is made with its mode.
+#[cfg(unix)]
 #[test]
 fn nothing_is_sent_if_the_spent_token_cannot_be_recorded() {
     use std::os::unix::fs::PermissionsExt;
