@@ -292,6 +292,10 @@ impl<T> Recording<T> {
 }
 
 impl<T: Transport> Transport for Recording<T> {
+    fn new_call(&mut self) -> Result<(), String> {
+        self.inner.new_call()
+    }
+
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
         // Counted first: a request that fails may still have reached the relay.
         self.requests += 1;
@@ -472,8 +476,8 @@ impl<T: Transport> Model for RemoteModel<T> {
     }
 }
 
-/// The model used by `Core` in real mode, reaching the relay through `network`: through Tor, each request has its own
-/// circuit; an onion relay without Tor, or a local relay through Tor, is refused before anything is sent.
+/// The model used by `Core` in real mode, reaching the relay through `network`: through Tor, each model call has its own
+/// circuit, shared by its three requests; an onion relay without Tor, or a local relay through Tor, is refused before anything is sent.
 pub fn http_model(config: RemoteConfig, network: &Network) -> Result<RemoteModel<NetTransport>, String> {
     let transport = network.transport(&config.relay_url).map_err(|e| format!("relay URL: {e}"))?;
     RemoteModel::new(transport, config)

@@ -6,7 +6,10 @@
 //! connection the request fails, and nothing is tried another way. Every request gets its own random SOCKS username and
 //! password: with Tor's `IsolateSOCKSAuth` (on by default) streams with different credentials use different circuits,
 //! so no two requests, and in particular no two operations of the pool (a cash issue naming an account, an entry into
-//! a vault), share a circuit. This is Tor's documented behaviour, not verified here on the real network. No
+//! a vault), share a circuit. One exception: the three requests of one model call to the relay (attestation,
+//! completion, signature) share theirs, since the relay already ties them together (the signature is asked for with
+//! the reply's id); the next call gets a new one. This is Tor's documented behaviour, not verified here on the real
+//! network. No
 //! `User-Agent` header is sent, no redirect is followed, no proxy is read from the environment.
 
 use std::net::{IpAddr, SocketAddr};
@@ -143,16 +146,18 @@ impl TorProxy {
 }
 
 /// The encrypted model client's transport, through Tor. Compression stays off, as in `HttpTransport`, because the
-/// reply signature covers the exact bytes. Each request draws new SOCKS credentials, so each has its own circuit.
+/// reply signature covers the exact bytes. Each model call (`new_call`) draws new SOCKS credentials, so its requests
+/// share one circuit, and only that call's. Without `new_call`, every request uses the credentials of the last one.
 pub struct TorTransport {
     base: String,
     proxy: TorProxy,
+    agent: Agent,
 }
 
 impl TorTransport {
     pub fn new(base: &str, proxy: &TorProxy) -> Result<Self, String> {
         check_destination(base)?;
-        Ok(Self { base: base.trim_end_matches('/').to_string(), proxy: proxy.clone() })
+        Ok(Self { base: base.trim_end_matches('/').to_string(), proxy: proxy.clone(), agent: proxy.agent()? })
     }
 
     /// A path not starting with `/` could extend the host name once appended to the base.
@@ -166,7 +171,7 @@ impl TorTransport {
 
 impl Transport for TorTransport {
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
-        let mut request = self.proxy.agent()?.get(self.url(path)?);
+        let mut request = self.agent.get(self.url(path)?);
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -177,7 +182,7 @@ impl Transport for TorTransport {
     }
 
     fn post(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String> {
-        let mut request = self.proxy.agent()?.post(self.url(path)?);
+        let mut request = self.agent.post(self.url(path)?);
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -185,6 +190,11 @@ impl Transport for TorTransport {
         let status = response.status().as_u16();
         let reply = response.body_mut().read_to_vec().map_err(|e| e.to_string())?;
         Ok((status, reply))
+    }
+
+    fn new_call(&mut self) -> Result<(), String> {
+        self.agent = self.proxy.agent()?;
+        Ok(())
     }
 }
 
@@ -200,7 +210,7 @@ pub fn near_client(url: &str, key: SigningKey, proxy: &TorProxy) -> Result<ona_n
 pub enum Network {
     /// Straight to each destination. An onion address is refused: resolving it here would leak the name.
     Direct,
-    /// Everything through this local Tor SOCKS port, each request on its own circuit.
+    /// Everything through this local Tor SOCKS port, each request on its own circuit (a model call's on one).
     Tor(TorProxy),
 }
 
@@ -286,6 +296,12 @@ impl Transport for NetTransport {
             Self::Tor(t) => t.post(path, headers, body),
         }
     }
+    fn new_call(&mut self) -> Result<(), String> {
+        match self {
+            Self::Direct(t) => t.new_call(),
+            Self::Tor(t) => t.new_call(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -339,7 +355,7 @@ mod tests {
     }
 
     fn unchecked(port: u16, proxy: &TorProxy) -> TorTransport {
-        TorTransport { base: format!("https://localhost:{port}"), proxy: proxy.clone() }
+        TorTransport { base: format!("https://localhost:{port}"), proxy: proxy.clone(), agent: proxy.agent().unwrap() }
     }
 
     #[test]

@@ -148,16 +148,22 @@ fn each_rpc_read_has_its_own_circuit() {
     assert_ne!(seen[0].user, seen[1].user);
 }
 
-// The relay's calls go through Tor too, each request on its own circuit.
+// The relay's calls go through Tor too: the requests of one model call share a circuit, the next call gets another.
 #[test]
-fn the_relay_is_reached_through_tor_one_circuit_per_request() {
+fn the_relay_is_reached_through_tor_one_circuit_per_model_call() {
     let (network, log) = fake_tor("{}".into());
     let mut transport = network.transport(&format!("http://{ONION}:8787")).unwrap();
-    transport.get("/v1/attestation", &[]).unwrap();
-    transport.post("/v1/chat", &[], b"{}").unwrap();
+    for _ in 0..2 {
+        transport.new_call().unwrap();
+        transport.get("/v1/attestation", &[]).unwrap();
+        transport.post("/v1/chat", &[], b"{}").unwrap();
+        transport.get("/v1/signature/1", &[]).unwrap();
+    }
     let seen = seen(&log);
-    assert_eq!(seen.len(), 2);
-    assert_ne!(seen[0].user, seen[1].user);
+    assert_eq!(seen.len(), 6);
+    assert!(seen[..3].iter().all(|s| s.user == seen[0].user), "one circuit for a call: {seen:?}");
+    assert!(seen[3..].iter().all(|s| s.user == seen[3].user), "one circuit for a call: {seen:?}");
+    assert_ne!(seen[0].user, seen[3].user, "a new circuit for the next call");
     let config = RemoteConfig {
         relay_url: format!("http://{ONION}"),
         model: "m".into(),

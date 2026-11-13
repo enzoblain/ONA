@@ -2,7 +2,7 @@
 
 `ona_core::tor` (re-exported by `crates/ona-tor`) sends the client's traffic through a local `tor` daemon. `ona` uses it when
 `ONA_TOR_SOCKS` is set: the relay (`ona real`), the pool agent and the NEAR RPC reads of the pool commands all go through Tor, each
-request on its own circuit, and nothing goes directly (docs/INSTALL.md, "Go through Tor"). Without it `ona` says at start that it
+request on its own circuit (the three requests of one model call share one), and nothing goes directly (docs/INSTALL.md, "Go through Tor"). Without it `ona` says at start that it
 connects directly; `ONA_REQUIRE_TOR=1` makes it refuse to start. The desktop and phone apps do not set it yet.
 
 **Publishing the relay as an onion service.** `ona-relay` serves 32 connections at a time and keeps 256 waiting (docs/INSTALL.md,
@@ -38,7 +38,8 @@ run against a fake SOCKS5 server on localhost.
   IP addresses (also written as names: `127.1`, `0x7f.1`, `2130706433`), `localhost` and `*.localhost`, names without a dot, a port that
   is not plain digits (`:+443`), and a query or fragment in the base address are refused.
 - Redirects are not followed. No `User-Agent` header is sent.
-- Every request of a `TorTransport`, and each `near_client`, gets its own random SOCKS username and password; `ona`'s RPC reads make a
+- Each model call of a `TorTransport` (`new_call`: attestation, completion and signature) gets its own random SOCKS username
+  and password, shared by its requests; the relay already links them by the reply's id. Each `near_client` gets its own too; `ona`'s RPC reads make a
   new client each. Tor's `IsolateSOCKSAuth`, on by default according to the Tor manual, puts streams with different credentials on
   different circuits; this is not verified on the real network. A cash issue and a vault entry therefore never share a circuit.
 - Without Tor, `ona` refuses an onion address, so the name never reaches the local resolver.

@@ -141,7 +141,9 @@ Through Tor:
 - host names go to Tor unresolved (SOCKS5 with remote resolution); nothing is looked up on this machine;
 - every request gets its own random SOCKS user name and password, so with Tor's `IsolateSOCKSAuth` (on by default) each request has
   its own circuit: a cash issue, which names the depositing account, and an entry into a vault never share one, nor do two RPC
-  reads. This is Tor's documented behaviour, not verified on the real Tor network;
+  reads. One exception: the three requests of one model call (attestation, completion, signature) share a circuit, since the relay
+  already ties them together by the reply's id; the next call gets a new one. This is Tor's documented behaviour, not verified on
+  the real Tor network;
 - if Tor is down or refuses a connection the request fails: nothing is retried directly. Proxy variables of the environment are
   ignored and redirects are not followed;
 - destinations must be `https` to a public host name or `http` to a version 3 onion service: a local address (`127.0.0.1`,

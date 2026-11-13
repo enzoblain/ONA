@@ -247,6 +247,11 @@ pub trait Transport {
     /// Returns the status and the exact bytes of the body.
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String>;
     fn post(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String>;
+    /// Called before the requests of one model call (attestation, completion, signature). Through Tor, they then share
+    /// one circuit, and the next call gets a new one. Nothing to do elsewhere.
+    fn new_call(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl<T: Transport> Transport for &mut T {
@@ -255,6 +260,9 @@ impl<T: Transport> Transport for &mut T {
     }
     fn post(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String> {
         (**self).post(path, headers, body)
+    }
+    fn new_call(&mut self) -> Result<(), String> {
+        (**self).new_call()
     }
 }
 
@@ -420,6 +428,7 @@ impl<T: Transport> E2eeClient<T> {
         if self.spent.saturating_add(reserved) > self.token_budget {
             return Err("token budget exhausted".into());
         }
+        self.transport.new_call()?;
         let model_key = self.fetch_model_key(token)?;
         let client = ClientKey::generate();
         let aad = match self.version {

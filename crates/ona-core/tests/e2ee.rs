@@ -49,6 +49,8 @@ struct FakeEnclave {
     last_token: String,
     last_version: String,
     chats: usize,
+    /// In order: `call` for each `new_call`, then each request's path, up to its `?`.
+    sequence: Vec<String>,
 }
 
 impl FakeEnclave {
@@ -64,6 +66,7 @@ impl FakeEnclave {
             last_token: String::new(),
             last_version: String::new(),
             chats: 0,
+            sequence: vec![],
         }
     }
 
@@ -77,7 +80,13 @@ impl FakeEnclave {
 }
 
 impl Transport for FakeEnclave {
+    fn new_call(&mut self) -> Result<(), String> {
+        self.sequence.push("call".into());
+        Ok(())
+    }
+
     fn get(&mut self, path: &str, _headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
+        self.sequence.push(path.split('?').next().unwrap_or_default().into());
         if path.starts_with("/v1/attestation/report") {
             let nonce = path.rsplit("nonce=").next().unwrap_or_default();
             let answered = if self.attack == Attack::ReplayNonce { "old-nonce" } else { nonce };
@@ -99,7 +108,8 @@ impl Transport for FakeEnclave {
         Ok((200, signature.to_string().into_bytes()))
     }
 
-    fn post(&mut self, _path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String> {
+    fn post(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<(u16, Vec<u8>), String> {
+        self.sequence.push(path.into());
         self.chats += 1;
         self.last_token = header(headers, "X-Ona-Token").to_string();
         self.last_request = body.to_vec();
@@ -178,6 +188,17 @@ fn version_3_is_the_default() {
     assert_eq!(c.chat("bonjour").unwrap().content, "secret reply");
     assert_eq!(enclave.last_version, "3");
     assert_eq!(enclave.received_prompts, vec!["bonjour"]);
+}
+
+// Through Tor, `new_call` gives the three requests of one model call a circuit of their own: it comes before them, once.
+#[test]
+fn each_model_call_starts_with_new_call() {
+    let mut enclave = FakeEnclave::new(Attack::None);
+    let mut c = E2eeClient::new(&mut enclave, MODEL, 100, 1000);
+    c.chat("un").unwrap();
+    c.chat("deux").unwrap();
+    let one = ["call", "/v1/attestation/report", "/v1/chat/completions", "/v1/signature/reply-1"];
+    assert_eq!(enclave.sequence, [one, one].concat());
 }
 
 #[test]

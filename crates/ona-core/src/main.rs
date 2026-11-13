@@ -72,7 +72,7 @@ fn main() {
     }
     match network.warning() {
         Some(warning) if online => eprintln!("warning: {warning}"),
-        _ if online => eprintln!("network: every connection goes through Tor, each request on its own circuit"),
+        _ if online => eprintln!("network: every connection goes through Tor, each request on its own circuit (a model call's three on one)"),
         _ => {}
     }
     if let Err(e) = serve(&mut core, io::stdin().lock(), io::stdout().lock()) {

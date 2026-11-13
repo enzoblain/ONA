@@ -57,7 +57,7 @@ with the content, but the account, the network address, the payment and the agen
 
 | Component | Role | Language |
 |---|---|---|
-| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Reaches the relay, the pool agent and the NEAR RPC nodes through a local `tor` over SOCKS5 when `ONA_TOR_SOCKS` is set, one circuit per request; otherwise directly, and says so at start | Rust |
+| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Reaches the relay, the pool agent and the NEAR RPC nodes through a local `tor` over SOCKS5 when `ONA_TOR_SOCKS` is set, one circuit per request (per model call for the relay); otherwise directly, and says so at start | Rust |
 | Desktop app | Connects a NEAR wallet for deposits, starts missions, asks for confirmations, shows the exposure report | Swift (SwiftUI) on macOS; Rust + Tauri with HTML/JavaScript on Windows and Linux; both on `ona-core` (to be confirmed) |
 | iOS app | Remote control of the computer over Tor: mission progress and confirmations. Holds no tokens and no pseudonym table | Swift |
 | `ona-server` | Thin relay in a TEE (Phala dstack): holds the NEAR AI Cloud key, enforces a flat request size, submits transactions | Rust |
