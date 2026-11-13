@@ -58,7 +58,7 @@ struct NewChatPane: View {
             Spacer()
             Image(systemName: "sparkles").font(.system(size: 44)).foregroundStyle(.tint)
             Text("Que dois-je faire pour vous ?").font(.title.weight(.semibold))
-            Text("L'agent travaille sur cet ordinateur. Il demandera votre accord, ici ou sur votre téléphone, avant de contacter quelqu'un ou de payer.")
+            Text("Posez une question : l'agent cherche sur le web via Tor, après votre accord sur ses recherches, et répond avec ses sources. S'il suggère un message ou un paiement, c'est vous qui le faites, sur cet ordinateur.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 460)
@@ -155,13 +155,18 @@ private struct ItemView: View {
                 Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(.green)
             }
         case .confirmation(let pending):
-            ConfirmationCard(pending: pending, state: chat.state(of: pending)) { decision, firm, digest in
-                if let failure = engine.confirm(id: pending.id, decision: decision, firm: firm, digest: digest) {
+            ConfirmationCard(pending: pending, state: chat.state(of: pending)) { decision, firm, digest, queries in
+                if let failure = engine.confirm(id: pending.id, decision: decision, firm: firm, digest: digest,
+                                                queries: queries) {
                     error = failure
                 }
             }
         case .exposure(let data):
             ExposureCard(data: data)
+        case .answer(let answer):
+            AnswerCard(answer: answer)
+        case .action(let action):
+            ActionCard(itemID: item.id, action: action, chat: chat, engine: engine, error: $error)
         }
     }
 
@@ -182,8 +187,10 @@ private struct ItemView: View {
 private struct ConfirmationCard: View {
     let pending: Pending
     let state: ConfirmationState
-    let answer: (_ decision: String, _ firm: String?, _ digest: String?) -> Void
+    let answer: (_ decision: String, _ firm: String?, _ digest: String?, _ queries: [String]?) -> Void
     @State private var firm: String?
+    /// The queries as edited here.
+    @State private var edited: [String] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -205,20 +212,23 @@ private struct ConfirmationCard: View {
                 LabeledContent("Montant", value: Self.near(amount))
                 LabeledContent("Destinataire", value: to)
                 Text(screen).font(.caption.monospaced()).foregroundStyle(.secondary)
+            case .queries(let queries):
+                QueriesEditor(queries: queries, editable: state == .pending, edited: $edited)
             }
             switch state {
             case .pending:
                 HStack {
                     Button(acceptTitle) {
                         switch pending.request {
-                        case .plan: answer("accept", nil, nil)
-                        case .recipient: answer("accept", firm, nil)
-                        case .payment(_, _, _, let digest, _): answer("accept", nil, digest)
+                        case .plan: answer("accept", nil, nil, nil)
+                        case .recipient: answer("accept", firm, nil, nil)
+                        case .payment(_, _, _, let digest, _): answer("accept", nil, digest, nil)
+                        case .queries: answer("accept", nil, nil, edited)
                         }
                     }
                     .buttonStyle(.glassProminent)
                     .disabled(isRecipient && firm == nil)
-                    Button("Refuser", role: .destructive) { answer("reject", nil, nil) }
+                    Button("Refuser", role: .destructive) { answer("reject", nil, nil, nil) }
                         .buttonStyle(.glass)
                     Spacer()
                     Text("ou sur le téléphone").font(.caption).foregroundStyle(.secondary)
@@ -243,6 +253,7 @@ private struct ConfirmationCard: View {
         case .plan: "Valider le plan"
         case .recipient: "Choisir le destinataire"
         case .payment: "Confirmer le paiement"
+        case .queries: "Valider les recherches"
         }
     }
 
@@ -251,6 +262,7 @@ private struct ConfirmationCard: View {
         case .plan: "list.bullet.clipboard"
         case .recipient: "person.crop.circle.badge.checkmark"
         case .payment: "creditcard"
+        case .queries: "magnifyingglass"
         }
     }
 
@@ -259,6 +271,7 @@ private struct ConfirmationCard: View {
         case .plan: "Valider le plan"
         case .recipient: "Contacter ce cabinet"
         case .payment: "Confirmer le paiement"
+        case .queries: "Lancer les recherches"
         }
     }
 
@@ -300,8 +313,9 @@ private struct ExposureCard: View {
             ForEach(outputs.sorted(by: { $0.key < $1.key }), id: \.key) { name, count in
                 LabeledContent(Self.label(name), value: "\(count)")
             }
-            LabeledContent("Cabinets contactés",
-                           value: (report["firms_contacted"] as? [String] ?? []).joined(separator: ", ").ifEmpty("aucun"))
+            if let firms = report["firms_contacted"] as? [String], !firms.isEmpty {
+                LabeledContent("Cabinets contactés", value: firms.joined(separator: ", "))
+            }
             ForEach(Array(payments.enumerated()), id: \.offset) { _, payment in
                 LabeledContent("Paiement", value: "\(ConfirmationCard.near(payment["amount"] ?? "0")) → \(payment["to"] ?? "?")")
             }
@@ -319,11 +333,9 @@ private struct ExposureCard: View {
         case "search": "Recherches envoyées"
         case "fetch": "Pages lues"
         case "contact": "Messages envoyés"
+        case "message": "Messages remis à votre messagerie"
         default: name
         }
     }
 }
 
-private extension String {
-    func ifEmpty(_ other: String) -> String { isEmpty ? other : self }
-}
