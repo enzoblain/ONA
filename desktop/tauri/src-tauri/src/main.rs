@@ -12,6 +12,7 @@ mod real;
 mod router;
 mod server;
 mod tor;
+mod wallet;
 mod worker;
 
 use serde_json::Value;
@@ -73,6 +74,13 @@ async fn pool(worker: State<'_, Worker>, request: Value) -> Reply {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// A deposit prepared in the pool window goes to the person's own NEAR wallet: the wallet page opens in the browser.
+/// Returns its address (also shown in the window, in case no browser opened).
+#[tauri::command]
+async fn wallet_open(worker: State<'_, Worker>, prepared: Value) -> Reply {
+    call(&worker, move |app| app.open_wallet(&prepared).map(Value::String))
 }
 
 /// The person saw the same 6-digit code on both screens.
@@ -141,7 +149,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            state, chat, create_chat, post_message, delete_chat, confirm, confirm_code, forget_phone, set_mode, pool
+            state, chat, create_chat, post_message, delete_chat, confirm, confirm_code, forget_phone, set_mode, pool, wallet_open
         ])
         .build(tauri::generate_context!())
         .expect("ONA could not start");

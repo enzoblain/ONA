@@ -85,11 +85,17 @@ pub struct Response {
     pub json: Value,
     /// The computer's signature over `protocol::reply_message(nonce, method, path, status, json.to_string())`.
     pub signature: Option<String>,
+    /// A file sent as it is instead of JSON (the wallet page): its content type and bytes.
+    pub asset: Option<(&'static str, &'static [u8])>,
 }
 
 impl Response {
     pub fn new(status: u16, json: Value) -> Self {
-        Self { status, json, signature: None }
+        Self { status, json, signature: None, asset: None }
+    }
+
+    pub fn asset(content_type: &'static str, bytes: &'static [u8]) -> Self {
+        Self { status: 200, json: Value::Null, signature: None, asset: Some((content_type, bytes)) }
     }
 
     /// The body as sent: `{"reply": "<reply JSON as text>", "signature": "…"}` when signed, the JSON itself otherwise.
@@ -112,14 +118,19 @@ impl Response {
             503 => "Service Unavailable",
             _ => "Error",
         };
-        let body = self.body();
+        let json = self.body();
+        let (content_type, body) = match self.asset {
+            Some((content_type, bytes)) => (content_type, bytes),
+            None => ("application/json; charset=utf-8", json.as_bytes()),
+        };
         let mut out = format!(
-            "HTTP/1.0 {} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n\
-             Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+            "HTTP/1.0 {} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
+             Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\
+             Connection: close\r\n\r\n",
             self.status,
             body.len()
         ).into_bytes();
-        out.extend_from_slice(body.as_bytes());
+        out.extend_from_slice(body);
         out
     }
 }

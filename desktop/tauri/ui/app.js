@@ -462,16 +462,33 @@ function showSummary(prepared) {
     ...summaryRows(summary), ...fees, ...warnings,
     el("p", { class: "help" }, `Réseau ${summary.network}, contrat ${summary.contract}. Valable jusqu'à ${expires}.`));
   if (summary.op === "deposit") {
-    // The deposit is sent and signed by the person's own NEAR wallet: no wallet is connected to this app yet.
-    card.append(el("p", { class: "warn" }, "Le dépôt s'envoie avec votre propre portefeuille NEAR, puis ce portefeuille signe un message. La connexion d'un portefeuille à l'app n'existe pas encore : ce dépôt ne peut pas être fait ici."),
-      el("div", { class: "row" }, el("span", {}, "Appel à envoyer"), el("span", { class: "mono" }, JSON.stringify(summary.wallet_call))),
-      el("div", { class: "card-actions actions" }, el("button", { class: "secondary", onclick: drawPortfolio }, "Retour")));
+    // Sent and signed by the person's own NEAR wallet, on a page the app opens in the browser (docs/desktop/wallet.md).
+    card.append(el("p", { class: "help" }, "Votre portefeuille NEAR envoie ce dépôt, puis signe un message pour l'agent du pool. ONA ne voit jamais ses clés."),
+      el("div", { class: "card-actions actions" },
+        el("button", { class: "secondary", onclick: drawPortfolio }, "Annuler"),
+        el("button", { class: "primary", onclick: () => openWallet(prepared) }, "Ouvrir mon portefeuille")));
   } else {
     card.append(el("div", { class: "card-actions actions" },
       el("button", { class: "secondary", onclick: drawPortfolio }, "Annuler"),
       el("button", { class: "primary", onclick: () => execute(prepared.prepared_id) }, "Confirmer")));
   }
   $("pool-body").replaceChildren(card);
+}
+
+/** Opens the wallet page in the browser; the deposit then goes on there. */
+async function openWallet(prepared) {
+  let url;
+  try {
+    url = await run("wallet_open", { prepared });
+  } catch {
+    return;
+  }
+  $("pool-body").replaceChildren(el("div", { class: "card" },
+    el("h3", {}, "Dépôt en cours dans votre navigateur"),
+    el("p", { class: "help" }, "La page de votre portefeuille s'est ouverte. Si ce n'est pas le cas, ouvrez cette adresse dans votre navigateur :"),
+    el("p", { class: "mono" }, url),
+    el("p", { class: "help" }, "Une fois la page terminée, actualisez : les billets apparaissent quand l'agent du pool les a émis."),
+    el("div", { class: "card-actions actions" }, el("button", { class: "primary", onclick: drawPortfolio }, "Actualiser"))));
 }
 
 async function execute(preparedId) {

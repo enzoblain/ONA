@@ -8,11 +8,13 @@
 
 /* Begin PBXBuildFile section */
 		DD0000000000000000000101 /* OnaCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000201 /* OnaCore.xcframework */; };
+		DD0000000000000000000102 /* dist in Resources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000202 /* dist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		DD0000000000000000000200 /* ONA.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ONA.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DD0000000000000000000201 /* OnaCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = OnaCore.xcframework; path = ../OnaCoreBridge/OnaCore.xcframework; sourceTree = SOURCE_ROOT; };
+		DD0000000000000000000202 /* dist */ = {isa = PBXFileReference; lastKnownFileType = folder; name = dist; path = "../wallet-page/dist"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -54,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				DD0000000000000000000201 /* OnaCore.xcframework */,
+				DD0000000000000000000202 /* dist */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -116,6 +119,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DD0000000000000000000102 /* dist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

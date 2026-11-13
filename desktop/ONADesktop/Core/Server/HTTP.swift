@@ -93,10 +93,20 @@ public struct HTTPResponse: Sendable {
     /// The reply as JSON text. When `signature` is set it travels inside `{"reply": "<text>", "signature": "…"}`.
     public let reply: Data
     public var signature: String?
+    /// `application/json` for replies; a file's own type for the wallet page.
+    public let contentType: String
 
     public init(status: Int, json: [String: Any]) {
         self.status = status
         reply = (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])) ?? Data("{}".utf8)
+        contentType = "application/json; charset=utf-8"
+    }
+
+    /// A file sent as it is (the wallet page).
+    public init(asset: Data, contentType: String) {
+        status = 200
+        reply = asset
+        self.contentType = contentType
     }
 
     /// What is sent: the signed envelope, or the reply itself when unsigned.
@@ -120,8 +130,9 @@ public struct HTTPResponse: Sendable {
         }
         let body = self.body
         var out = Data("HTTP/1.0 \(status) \(reason)\r\n".utf8)
-        out.append(Data("Content-Type: application/json; charset=utf-8\r\nContent-Length: \(body.count)\r\n".utf8))
-        out.append(Data("Cache-Control: no-store\r\nConnection: close\r\n\r\n".utf8))
+        out.append(Data("Content-Type: \(contentType)\r\nContent-Length: \(body.count)\r\n".utf8))
+        out.append(Data("Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n".utf8))
+        out.append(Data("Connection: close\r\n\r\n".utf8))
         out.append(body)
         return out
     }
