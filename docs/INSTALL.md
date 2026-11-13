@@ -113,6 +113,11 @@ Nothing selects this mode by default: without the word `real`, or with any requi
 | `ONA_REAL_TOKEN_BUDGET` | most tokens in total for this run of `ona`, prompts and replies, at least one call's ceiling |
 | `ONA_REAL_TOKENS_FILE` | optional, a file with one request token per line, one spent per call and removed from the file before it is sent. Refused if empty or readable by other accounts (`chmod 600`). Only one `ona real` can use a file at a time: a lock file `<file>.lock` is created next to it. `ona-relay` refuses a chat without one |
 
+On 13/11/2026 a mission ran this way with `z-ai/glm-5.3-flash`, through Tor to the team's test relay (an onion service with
+client authorization): the plan and both page readings came from the model, 3 calls, 4,187 tokens. With `ONA_REAL_MAX_TOKENS=512`
+the page readings failed: the model spent the whole ceiling thinking and replied with no content; 2048 was enough. The first
+connection to the relay's onion service took about a minute, longer than `ona`'s timeout, and the next ones were quick.
+
 **Until the enclave quotes are verified in this client, the relay can read the content of a mission and make up replies. Do not run a
 sensitive mission in this mode.** Proxy variables of the environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) are ignored and
 redirects are not followed. `ona real` connects to the relay directly unless `ONA_TOR_SOCKS` is set (see "Go through Tor").
