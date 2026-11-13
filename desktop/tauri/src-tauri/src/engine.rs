@@ -909,8 +909,12 @@ fn step_research(chat: &mut Chat) -> Option<String> {
                         r.sources.push((s["handle"].as_str().unwrap_or_default().to_owned(),
                                         s["site"].as_str().unwrap_or("?").to_owned()));
                     }
-                    activity("search", format!("Recherche « {} » : {}", reply["query"].as_str().unwrap_or_default(),
-                                               plural(sources.len(), "source")))
+                    let query = reply["query"].as_str().unwrap_or_default();
+                    match reply["error"].as_str() {
+                        // One query failed; the others go on (ona-core stops only when none gave a page).
+                        Some(failure) => activity("search", format!("Recherche « {query} » : échec ({failure})")),
+                        None => activity("search", format!("Recherche « {query} » : {}", plural(sources.len(), "source"))),
+                    }
                 }
                 "read" => {
                     r.read += 1;

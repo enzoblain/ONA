@@ -136,6 +136,8 @@ pub struct Research<M, W, P> {
     proposed: Vec<String>,
     queries: Vec<String>,
     searched: usize,
+    /// Why the last search failed, if one did: reported when no search gave a page to read.
+    search_failure: Option<String>,
     /// Sources: the pages to read, in order, with their handle (`s1`, `s2`…).
     sources: Vec<SearchResult>,
     read: usize,
@@ -189,6 +191,7 @@ impl<M: Model, W: OpenWeb, P: Payments> Research<M, W, P> {
             proposed: Vec::new(),
             queries: Vec::new(),
             searched: 0,
+            search_failure: None,
             sources: Vec::new(),
             read: 0,
             seen: Vec::new(),
@@ -330,6 +333,9 @@ impl<M: Model, W: OpenWeb, P: Payments> Research<M, W, P> {
         if self.read < self.sources.len() {
             return self.read_next();
         }
+        if let (true, Some(failure)) = (self.sources.is_empty(), &self.search_failure) {
+            return Err(format!("search failed: {failure}"));
+        }
         self.write_answer()
     }
 
@@ -341,7 +347,14 @@ impl<M: Model, W: OpenWeb, P: Payments> Research<M, W, P> {
         let fingerprint = self.journal.fingerprint(query.as_bytes());
         self.journal.append(Kind::ToolCommit, json!({"tool": "search", "party": engine, "bytes_sent": query.len(),
             "query": fingerprint, "results": results.as_ref().map_or(0, Vec::len), "mode": self.web.mode()}));
-        let results = results.map_err(|e| format!("search failed: {e}"))?;
+        // One query that fails does not stop the others; `step` reports it if no query gave a page.
+        let results = match results {
+            Ok(results) => results,
+            Err(e) => {
+                self.search_failure = Some(e.clone());
+                return Ok(json!({"done": false, "event": "searched", "query": query, "sources": [], "error": e, "mode": self.web.mode()}));
+            }
+        };
         // The first results of each query, one per site, never a site already chosen, at most MAX_PAGES in all.
         let mut sites: BTreeSet<String> = self.sources.iter().filter_map(|s| host(&s.url)).collect();
         let mut added = Vec::new();
@@ -762,58 +775,52 @@ fn decode_entities(text: &str) -> String {
     out
 }
 
-/// Results from DuckDuckGo's HTML page (`result__a` links), redirect links decoded (`uddg=`).
-pub fn parse_duckduckgo(html: &str) -> Vec<SearchResult> {
+/// Results from Brave Search's page: each web result is a block marked `data-type="web"`, holding the result's link
+/// (the first `<a href>`) and its title (the `title` attribute of `search-snippet-title`, else the link's text). Links
+/// to Brave itself are left out.
+pub fn parse_brave(html: &str) -> Vec<SearchResult> {
+    const MARK: &str = "data-type=\"web\"";
     let mut results = Vec::new();
     let mut rest = html;
-    while let Some(at) = rest.find("result__a") {
-        rest = &rest[at..];
-        let Some(href_at) = rest.find("href=\"") else { break };
-        let after = &rest[href_at + 6..];
-        let Some(href_end) = after.find('"') else { break };
-        let href = decode_entities(&after[..href_end]);
-        let Some(text_start) = after.find('>') else { break };
-        let body = &after[text_start + 1..];
-        let Some(text_end) = body.find("</a>") else { break };
-        let title = html_to_text(&body[..text_end]);
-        rest = &body[text_end..];
-        let url = match href.split_once("uddg=") {
-            Some((_, encoded)) => unpercent(encoded.split('&').next().unwrap_or_default()),
-            None if href.starts_with("//") => format!("https:{href}"),
-            None => href,
-        };
-        if url.starts_with("https://") || url.starts_with("http://") {
+    while let Some(at) = rest.find(MARK) {
+        rest = &rest[at + MARK.len()..];
+        let block = &rest[..rest.find("data-type=\"").unwrap_or(rest.len())];
+        let Some(href_at) = block.find("<a href=\"") else { continue };
+        let after = &block[href_at + 9..];
+        let Some(href_end) = after.find('"') else { continue };
+        let url = decode_entities(&after[..href_end]);
+        let title = attribute_after(block, "search-snippet-title", "title=\"")
+            .or_else(|| {
+                let body = &after[after.find('>')? + 1..];
+                Some(html_to_text(&body[..body.find("</a>")?]))
+            })
+            .unwrap_or_default();
+        let host = url.split_once("://").map_or("", |(_, r)| r.split(['/', '?', '#']).next().unwrap_or(""));
+        let brave = host == "brave.com" || host.ends_with(".brave.com");
+        if (url.starts_with("https://") || url.starts_with("http://")) && !brave {
             results.push(SearchResult { url, title });
         }
     }
     results
 }
 
-fn unpercent(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(&text[i + 1..i + 3], 16) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+/// The value of the first `attribute` (ending with `="`) after `marker` in `html`, entities decoded.
+fn attribute_after(html: &str, marker: &str, attribute: &str) -> Option<String> {
+    let from = &html[html.find(marker)?..];
+    let tag_end = from.find('>')?;
+    let value = &from[from[..tag_end].find(attribute)? + attribute.len()..];
+    Some(decode_entities(&value[..value.find('"')?]))
 }
 
-/// DuckDuckGo's onion service: reached only through Tor, so the search engine sees neither this computer's address nor
-/// a Tor exit.
-pub const DUCKDUCKGO_ONION: &str = "http://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion";
-const DUCKDUCKGO_DIRECT: &str = "https://html.duckduckgo.com";
+/// Brave Search's results page. DuckDuckGo (its onion service included) answered every request through Tor with a
+/// bot challenge and no results on 13/11/2026; Brave Search answered with results, three times out of three.
+pub const BRAVE_SEARCH: &str = "https://search.brave.com";
+/// Requests for one search through Tor, each on its own circuit, before giving up.
+const SEARCH_TRIES: usize = 3;
 
-/// The open web through `network`: through Tor (the apps), searches go to DuckDuckGo's onion service and every page
-/// to its site, each request on its own circuit; directly (`ona` without `ONA_TOR_SOCKS`), to DuckDuckGo's HTML page.
+/// The open web through `network`: through Tor (the apps), searches go to Brave Search and every page to its site,
+/// each request on its own circuit, so the search engine sees a Tor exit, not this computer; directly (`ona` without
+/// `ONA_TOR_SOCKS`), the same, from this computer's address.
 pub struct TorWeb {
     network: crate::tor::Network,
 }
@@ -839,9 +846,18 @@ impl TorWeb {
 
 impl OpenWeb for TorWeb {
     fn search(&mut self, query: &str) -> Result<Vec<SearchResult>, String> {
-        let base = if self.network.is_tor() { DUCKDUCKGO_ONION } else { DUCKDUCKGO_DIRECT };
-        let html = self.get(&format!("{base}/html/?q={}", percent(query)))?;
-        Ok(parse_duckduckgo(&html))
+        // Through Tor, a refusal (Brave Search answers 429 to some Tor exits) is tried again on a new circuit, which
+        // usually leaves by another exit: SEARCH_TRIES requests in all, each counted in the journal as one search.
+        let url = format!("{BRAVE_SEARCH}/search?q={}", percent(query));
+        let tries = if self.network.is_tor() { SEARCH_TRIES } else { 1 };
+        let mut failure = String::new();
+        for _ in 0..tries {
+            match self.get(&url) {
+                Ok(html) => return Ok(parse_brave(&html)),
+                Err(e) => failure = e,
+            }
+        }
+        Err(failure)
     }
 
     fn fetch(&mut self, url: &str) -> Result<String, String> {
@@ -852,7 +868,7 @@ impl OpenWeb for TorWeb {
     }
 
     fn engine(&self) -> &'static str {
-        "search engine (DuckDuckGo)"
+        "search engine (Brave Search)"
     }
 
     fn mode(&self) -> &'static str {
@@ -1028,18 +1044,69 @@ mod tests {
         assert!(searched["sources"].as_array().unwrap().is_empty(), "{searched}");
     }
 
+    /// The demo web, but every search whose query holds `failing` fails as Brave Search does to some Tor exits.
+    struct Flaky(MockOpenWeb, &'static str);
+
+    impl OpenWeb for Flaky {
+        fn search(&mut self, query: &str) -> Result<Vec<SearchResult>, String> {
+            if query.contains(self.1) {
+                return Err("HTTP 429".into());
+            }
+            self.0.search(query)
+        }
+        fn fetch(&mut self, url: &str) -> Result<String, String> {
+            self.0.fetch(url)
+        }
+        fn engine(&self) -> &'static str {
+            "search engine (demo)"
+        }
+    }
+
+    fn flaky(failing: &'static str, queries: &[&str]) -> Research<MockModel, Flaky, MockPayments> {
+        let web = Flaky(MockOpenWeb::demo(), failing);
+        let mut r = Research::open(MockModel::default(), web, MockPayments::default(), demo_policy(), [7u8; 32], "Plombier à Lyon ?").unwrap();
+        r.propose().unwrap();
+        r.accept(&queries.iter().map(|q| q.to_string()).collect::<Vec<_>>()).unwrap();
+        r
+    }
+
     #[test]
-    fn html_becomes_text_and_duckduckgo_results_are_read() {
+    fn one_failed_search_does_not_stop_the_others() {
+        let mut r = flaky("panne", &["panne plombier", "plombier Lyon"]);
+        let first = r.step().unwrap();
+        assert_eq!((first["event"].as_str(), first["error"].as_str()), (Some("searched"), Some("HTTP 429")), "{first}");
+        assert!(first["sources"].as_array().unwrap().is_empty());
+        let mut last = Value::Null;
+        for _ in 0..10 {
+            last = r.step().unwrap();
+            if last["done"] == true {
+                break;
+            }
+        }
+        assert_eq!(last["done"], true, "{last}");
+    }
+
+    #[test]
+    fn a_research_whose_every_search_failed_stops_with_the_reason() {
+        let mut r = flaky("plombier", &["plombier Lyon", "tarif plombier"]);
+        assert!(r.step().unwrap()["error"].is_string());
+        assert!(r.step().unwrap()["error"].is_string());
+        assert_eq!(r.step().unwrap_err(), "search failed: HTTP 429");
+    }
+
+    #[test]
+    fn html_becomes_text_and_brave_results_are_read() {
         let html = "<html><head><style>p{}</style><script>alert(1)</script></head><body><p>Prix&nbsp;: 40&#8364; &amp; plus</p></body></html>";
         assert_eq!(html_to_text(html), "Prix : 40€ & plus");
-        let ddg = r#"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fa%3Fb%3D1&amp;rut=x">Un <b>titre</b></a>
-            <a class="result__a" href="https://example.net/c">Deux</a>"#;
-        let results = parse_duckduckgo(ddg);
-        assert_eq!(results, vec![
-            SearchResult { url: "https://example.org/a?b=1".into(), title: "Un titre".into() },
-            SearchResult { url: "https://example.net/c".into(), title: "Deux".into() },
+        // The shape of Brave Search's page on 13/11/2026, cut down.
+        let brave = r#"<div class="snippet svelte-jmfu5f" data-pos="0" data-type="web"><a href="https://example.org/a?b=1&amp;c=2" class="l1"><div class="site-name">Example</div><div class="title search-snippet-title svelte-14r20fy" title="Un titre &amp; plus">Un titre &amp; plus</div></a><div class="generic-snippet">Texte.</div></div>
+            <div class="snippet" data-pos="1" data-type="cluster"><a href="https://cluster.example/">Ignoré</a></div>
+            <div class="snippet" data-pos="2" data-type="web"><a href="https://search.brave.com/help">Aide</a></div>
+            <div class="snippet" data-pos="3" data-type="web"><a href="https://example.net/c">Deux <b>mots</b></a></div>"#;
+        assert_eq!(parse_brave(brave), vec![
+            SearchResult { url: "https://example.org/a?b=1&c=2".into(), title: "Un titre & plus".into() },
+            SearchResult { url: "https://example.net/c".into(), title: "Deux mots".into() },
         ]);
-        assert!(crate::tor::is_onion_v3(DUCKDUCKGO_ONION.trim_start_matches("http://")));
         assert_eq!(near_to_yocto("1.5"), Some(15 * 10u128.pow(23)));
         assert_eq!(near_to_yocto("1e3"), None);
     }
@@ -1070,13 +1137,13 @@ mod tests {
         assert_eq!(ask(json!({"cmd": "open", "mission": "Trouve un avocat"}))["opened"], true);
     }
 
-    /// Through a real Tor (or directly without `ONA_TOR_SOCKS`): a search on DuckDuckGo, then the first public result
+    /// Through a real Tor (or directly without `ONA_TOR_SOCKS`): a search on Brave Search, then the first public result
     /// read. Run by hand:
     /// `ONA_TOR_SOCKS=127.0.0.1:9050 cargo test -p ona-core --lib -- --ignored tor_web_live --nocapture`.
     #[test]
     #[ignore]
     fn tor_web_live() {
-        // Without ONA_TOR_SOCKS, straight from this machine (DuckDuckGo's HTML page): only to check the parsing.
+        // Without ONA_TOR_SOCKS, straight from this machine: only to check the parsing.
         let socks = std::env::var("ONA_TOR_SOCKS").ok();
         let mut web = TorWeb::new(crate::tor::Network::from_values(socks.as_deref(), None).unwrap());
         let results = web.search("NEAR protocol blockchain").unwrap();

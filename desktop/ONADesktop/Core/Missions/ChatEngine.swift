@@ -795,7 +795,12 @@ public final class ChatEngine {
             }
             research.sources += found
             let query = event["query"] as? String ?? "?"
-            chat.add(.activity(tool: "search", text: "Recherche « \(query) » : \(found.count) source\(found.count > 1 ? "s" : "")"))
+            if let failure = event["error"] as? String {
+                // One query failed; the others go on (ona-core stops only when none gave a page).
+                chat.add(.activity(tool: "search", text: "Recherche « \(query) » : échec (\(failure))"))
+            } else {
+                chat.add(.activity(tool: "search", text: "Recherche « \(query) » : \(found.count) source\(found.count > 1 ? "s" : "")"))
+            }
         case "read":
             research.looked += 1
             let notes = event["notes"] as? Int ?? 0
