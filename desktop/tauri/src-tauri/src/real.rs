@@ -105,6 +105,16 @@ impl ModelSettings {
         ona_core::tor::is_onion_v3(host).then(|| host.trim_end_matches(".onion").to_owned())
     }
 
+    /// Once tor runs, opens one connection to an onion relay in the background, so the person's first message does
+    /// not wait about a minute for tor to find the service (docs/desktop/tauri.md, "Real model"). Nothing for a relay
+    /// that is not an onion service. The result is ignored: a failure here is met again, with its reason, by the
+    /// first message.
+    pub fn warm_up(&self, core_socks: u16) -> Option<std::thread::JoinHandle<Result<u16, String>>> {
+        self.relay_onion()?;
+        let url = self.relay_url.trim_end_matches('/').to_owned();
+        Some(std::thread::spawn(move || ona_core::tor::TorProxy::new(&format!("127.0.0.1:{core_socks}"))?.warm_up(&url)))
+    }
+
     fn lookup(&self, name: &str) -> Option<String> {
         Some(match name {
             "ONA_REAL_RELAY_URL" => self.relay_url.clone(),
@@ -294,6 +304,17 @@ mod tests {
         assert_eq!((reply["ok"].clone(), reply["mode"].clone()), (json!(false), json!("real")));
         assert!(reply["error"].as_str().unwrap().contains("wallet key"), "{reply}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_an_onion_relay_is_warmed_up_and_only_through_tor() {
+        let mut settings = settings(PathBuf::from("/nonexistent"));
+        settings.relay_url = "https://relay.example.org".into();
+        assert!(settings.warm_up(9).is_none());
+        settings.relay_url = "http://sjhetbu5onalbe2fviq2xbtxrzni3km4bygbqmo33ac5ap2t5yepolyd.onion/".into();
+        // Nothing listens on this port: the warm-up fails, with no direct attempt.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert!(settings.warm_up(port).unwrap().join().unwrap().is_err());
     }
 
     #[test]

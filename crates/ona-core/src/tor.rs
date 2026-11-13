@@ -25,7 +25,11 @@ pub const DEFAULT_SOCKS: &str = "127.0.0.1:9050";
 /// Said on stderr by `ona` when it starts the real model or the pool without Tor.
 pub const DIRECT_WARNING: &str =
     "Tor is not configured (ONA_TOR_SOCKS is not set): the relay, the pool agent and the NEAR RPC nodes see this computer's IP address";
-const TIMEOUT: Duration = Duration::from_secs(120);
+/// Reaching the destination through Tor. The first connection to an onion service fetches its descriptor and builds
+/// a rendezvous circuit: measured at about a minute on 13/11/2026, and the first try went past 120 s.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(240);
+/// Each later step of a request: sending it, waiting for the reply (a model thinking), reading the reply.
+const STEP_TIMEOUT: Duration = Duration::from_secs(120);
 const ONION_V3_LEN: usize = 56;
 
 /// A version 3 onion address (56 base32 characters, then `.onion`), in lowercase.
@@ -106,6 +110,15 @@ impl TorProxy {
         Ok(Self { addr })
     }
 
+    /// Opens one connection to `url` through Tor and returns the HTTP status, reading no body. Meant for an onion
+    /// service about to be used (the relay): Tor then has its descriptor and introduction circuits ready, so the first
+    /// real request does not wait about a minute for them. Sends a bare `GET` with no header the caller chose.
+    pub fn warm_up(&self, url: &str) -> Result<u16, String> {
+        check_destination(url)?;
+        let response = self.agent()?.get(url).call().map_err(|e| e.to_string())?;
+        Ok(response.status().as_u16())
+    }
+
     /// Redirects are off: following one could send a request somewhere the caller did not check.
     /// New random SOCKS credentials for each agent, so Tor keeps its streams on their own circuit.
     fn agent(&self) -> Result<Agent, String> {
@@ -119,7 +132,11 @@ impl TorProxy {
             .user_agent(AutoHeaderValue::None)
             .http_status_as_error(false)
             .max_redirects(0)
-            .timeout_global(Some(TIMEOUT))
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_send_request(Some(STEP_TIMEOUT))
+            .timeout_send_body(Some(STEP_TIMEOUT))
+            .timeout_recv_response(Some(STEP_TIMEOUT))
+            .timeout_recv_body(Some(STEP_TIMEOUT))
             .build()
             .into())
     }
@@ -343,6 +360,37 @@ mod tests {
         thread::sleep(Duration::from_millis(100));
         assert_eq!(connections.load(Ordering::SeqCst), 1, "a refusal must not be retried another way");
         assert_untouched(&listener);
+    }
+
+    const ONION: &str = "http://sjhetbu5onalbe2fviq2xbtxrzni3km4bygbqmo33ac5ap2t5yepolyd.onion";
+
+    #[test]
+    fn the_first_connection_to_an_onion_may_take_longer_than_one_step() {
+        let timeouts = dead_proxy().agent().unwrap().config().timeouts();
+        assert_eq!(timeouts.global, None, "a global limit would also cover the connection");
+        assert_eq!(timeouts.connect, Some(CONNECT_TIMEOUT));
+        assert!(CONNECT_TIMEOUT > STEP_TIMEOUT);
+        for step in [timeouts.send_request, timeouts.send_body, timeouts.recv_response, timeouts.recv_body] {
+            assert_eq!(step, Some(STEP_TIMEOUT), "every step after the connection stays bounded");
+        }
+    }
+
+    #[test]
+    fn a_warm_up_goes_through_tor_only() {
+        let (proxy, connections) = socks(&[5, 0], true);
+        assert!(proxy.warm_up(ONION).is_err());
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        assert!(dead_proxy().warm_up(ONION).is_err(), "no direct fallback when tor is down");
+    }
+
+    #[test]
+    fn a_warm_up_refuses_what_tor_cannot_carry_privately() {
+        let (proxy, connections) = socks(&[5, 0], true);
+        for url in ["http://example.com", "https://127.0.0.1", "http://localhost:8080"] {
+            assert!(proxy.warm_up(url).is_err(), "{url}");
+        }
+        assert_eq!(connections.load(Ordering::SeqCst), 0, "refused before anything is sent");
     }
 
     #[test]
