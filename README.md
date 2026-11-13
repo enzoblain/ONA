@@ -58,8 +58,8 @@ Each step: what to run, and what you should see. Requirements: Rust 1.99.1 ([doc
 4. **The pool on a local NEAR node.** With a `near-sandbox` 2.13.4 binary you checked:
    `NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox cargo run -p ona-sandbox --bin ona-sandbox-pool`
    → deployment, a deposit and its cash issue, an entry, the placement, a leave and a payment, each step named as it
-   passes, then the gas of every transaction. Last run on 12/11/2026: it passed up to the escape step, where the node
-   failed a long clock jump ([docs/INSTALL.md](docs/INSTALL.md)). Add `-- --serve` to keep the node running for a
+   passes, then the escape exits without the agent and the gas of every transaction. Last run on 13/11/2026: every step
+   passed, 34 checks ([SPEC](SPEC.md#ona-pool-cratesona-pool)). Add `-- --serve` to keep the node running for a
    desktop app.
 5. **The apps.**
    - macOS (Apple silicon): `desktop/OnaCoreBridge/build.sh`, then open `desktop/ONADesktop/ONADesktop.xcodeproj` and

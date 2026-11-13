@@ -208,11 +208,13 @@ Tested on the mocked NEAR VM only; the wasm build of this version is not verifie
 The account that holds the funds the agent places. Never deployed on testnet or mainnet, tested on the mocked NEAR VM with notes made
 by `ona-token`, and once on a local node. No real staking pool has been called. `ona-sandbox-pool` (docs/INSTALL.md, "The pool and its
 agent on a local node") runs the pool's test build, the agent and `ona-core`'s pool commands on a local node against `ona-test-staking`.
-**Run on 12/11/2026** (near-sandbox 2.13.4, Apple Silicon Mac): 25 checks passed, from deployment through deposit, cash issue, entry,
-placement, reward and sync, leave to cash (unstake and withdraw by the planner) and payment to the depositor, up to the agent being
-stopped and `pool_recover` finding the note unspent; it then stopped while fast-forwarding one day for the escape (the node answered
-HTTP 500 to a fast-forward of 200,000 blocks), so the escape exits did not run on a node. A stand-in proves nothing about the standard
-staking pool. Gas burnt per transaction, receipts included, measured in that run (one call each unless stated):
+**Run to the end on 13/11/2026** (near-sandbox 2.13.4, Apple Silicon Mac, escape delay 2 hours, owner signatures valid 1 hour):
+34 checks passed, "every step passed": deployment, deposit and cash issue, entry, placement, reward and sync, leave to cash (unstake and
+withdraw by the planner), payment to the depositor; then, the agent stopped, the escape opening after its silence, the note held again
+once its signature expired, a cash note paid by anyone without the agent, a listed cash note paid and removed from the list, the vault's
+funds brought back by anyone (forced unstake and withdraw) and a share note paid without the agent; the pool solvent after each step.
+A first run on 12/11 stopped before the escape (the node answered HTTP 500 to a fast-forward of 200,000 blocks). A stand-in proves
+nothing about the standard staking pool. Gas burnt per transaction, receipts included, measured on 13/11 (one call each unless stated):
 
 | Operation | Calls | Tgas |
 |---|---|---|
@@ -226,7 +228,14 @@ staking pool. Gas burnt per transaction, receipts included, measured in that run
 | agent `unstake` | 1 | 7.0 |
 | agent `withdraw` | 1 | 7.7 |
 | agent `leave` | 1 | 10.6 |
-| agent `pay_exit` | 1 | 13.5 |
+| agent `pay_exit` | 1 | 13.4 |
+| escape_exit (cash note, by anyone) | 1 | 13.4 |
+| request_exit (cash note) | 1 | 10.5 |
+| escape_exit (listed cash note) | 1 | 16.3 |
+| unstake (amount fixed by the contract, by anyone) | 1 | 12.9 |
+| withdraw (amount fixed by the contract, by anyone) | 1 | 12.0 |
+| sync (by anyone, reading over an hour old) | 1 | 6.8 |
+| escape_exit (share note, by anyone) | 1 | 14.2 |
 
 The test staking pool's own calls (deploy 24.9, `add_reward` 1.9) are left out. Each figure is per call; a row with two calls shows one figure
 because both burnt the same within 0.05 Tgas.
