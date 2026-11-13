@@ -1388,6 +1388,8 @@ mod tests {
     #[test]
     fn actions_are_prepared_confirmed_and_done_once() {
         let mut engine = ChatEngine::with_ona_core(Default::default());
+        // The person allows this recipient (payees.txt); without it the payment is refused (next test).
+        engine.payees = vec!["lyon".into()];
         let chat = engine.create(QUESTION).unwrap();
         // Not before the answer.
         assert!(engine.action_prepare(&chat, 0, "devis@plomberie.example").is_err());
@@ -1431,6 +1433,17 @@ mod tests {
         // A new question in the chat: the old answer's actions are no longer available.
         engine.post("Et à Paris ?", &chat).unwrap();
         assert!(engine.action_prepare(&chat, 1, "lyon").is_err());
+    }
+
+    #[test]
+    fn a_payment_to_a_recipient_not_allowed_is_refused() {
+        let mut engine = ChatEngine::with_ona_core(Default::default());
+        let chat = engine.create(QUESTION).unwrap();
+        let pending = pending_of(&engine, &chat);
+        engine.confirm(pending["id"].as_str(), Some("accept"), None, None).unwrap();
+        run_until_idle(&mut engine, &chat);
+        let refused = engine.action_prepare(&chat, 1, "lyon").unwrap_err();
+        assert!(refused.contains("not in the list"), "{refused}");
     }
 
     /// A slow research step (the model or Tor) does not hold the worker thread.
