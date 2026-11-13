@@ -103,7 +103,8 @@ and next to each vault offered for an entry (docs/desktop/privacy.md). The "with
 - **The model key is trusted on Intel's word and on observed values.** Since 13/11/2026 the client uses a model key only if its Intel
   TDX quote is signed by Intel (checked with `dcap-qvl`), binds the key and the request, and shows the system and deployment seen in one
   report of 10/11/2026 (SPEC.md, "Model key check"). Not checked: the NVIDIA GPU evidence, which is not bound to that quote, and what the
-  deployment's code does with the prompt. The check has not yet run against Intel's real collateral. Every exposure report with a real
+  deployment's code does with the prompt. The real NEAR AI quote of 10/11/2026 passed the check once on 13/11/2026 with Intel's live
+collateral (fetched directly, not through Tor). Every exposure report with a real
   call says what is and is not checked.
 - The payment confirmation is a digest bound to the network, the contract, the mission, a random nonce, the recipient and the amount
   of the chosen offer; it proves the caller saw these fields, not that a human did, since it is not signed by a separate device.

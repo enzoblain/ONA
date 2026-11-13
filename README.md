@@ -89,10 +89,11 @@ Simulated or not done (everything simulated says `mode: mock`):
   through Tor and the team's test relay on 13/11/2026 ([docs/INSTALL.md](docs/INSTALL.md), [docs/research.md](docs/research.md));
 - **the web through Tor**: one research ran end to end through Tor with the real model on 13/11/2026 (Brave Search, 4
   pages chosen, 1 read, about 12 minutes), not yet in the apps;
-- **payments**: simulated in missions and actions; the mint and the pool are not on testnet;
+- **payments**: simulated in missions and actions; the mint is not on testnet; the pool was deployed on testnet on 13/11/2026
+  (test build with a 2-minute admin delay, a test staking pool as vault 0), not yet used from an app;
 - **enclave quotes**: since 13/11/2026 the client uses a model key only if Intel's signature over its quote checks out and the quote
-  binds that key and the request, on the one NEAR AI machine setup observed so far; this has not yet run against Intel's real
-  collateral, and the NVIDIA GPU evidence is not checked;
+  binds that key and the request, on the one NEAR AI machine setup observed so far; the real NEAR AI quote (report of 10/11/2026)
+  passed it once on 13/11/2026 with Intel's live collateral (fetched directly, not through Tor); the NVIDIA GPU evidence is not checked;
 - **not run**: the iPhone on a real device, the Tauri app on real Windows and Linux machines, a deposit from a real
   wallet.
 

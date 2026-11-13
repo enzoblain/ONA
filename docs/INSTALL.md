@@ -118,8 +118,8 @@ client authorization): the plan and both page readings came from the model, 3 ca
 the page readings failed: the model spent the whole ceiling thinking and replied with no content; 2048 was enough. The first
 connection to the relay's onion service took about a minute, longer than `ona`'s timeout, and the next ones were quick.
 
-**The model key is used only if an Intel-signed TDX quote binds it to the request (SPEC, "Model key check"); this check had not
-yet run against Intel's live collateral on 13/11/2026, and the NVIDIA GPU evidence is not checked.** Proxy variables of the environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) are ignored and
+**The model key is used only if an Intel-signed TDX quote binds it to the request (SPEC, "Model key check"); the real NEAR AI
+quote passed it once on 13/11/2026 with Intel's live collateral; the NVIDIA GPU evidence is not checked.** Proxy variables of the environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) are ignored and
 redirects are not followed. `ona real` connects to the relay directly unless `ONA_TOR_SOCKS` is set (see "Go through Tor").
 
 ```

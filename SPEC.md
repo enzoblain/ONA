@@ -533,8 +533,7 @@ Stated as of 13/11/2026. For each request, `attestation::near_ai_verifier` takes
    `/tdx/certification/v4/tcb`, `/tdx/certification/v4/qe/identity`, `update=standard`), and the root CA CRL from the address in Intel's
    root certificate (`https://certificates.trustedservices.intel.com/IntelSGXRootCA.der`). These requests go through the client's
    `Network`, so through Tor (one circuit each) when `ONA_TOR_SOCKS` is set; the relay is not involved. Collateral is reused for one hour.
-   **Not run against Intel yet:** on 13/11/2026 Intel's host could not be reached from the development machine, so this fetch has never been tried for real;
-   the code follows `dcap-qvl`'s own client;
+   Run for real once, on 13/11/2026, directly (not through Tor), by the ignored test below; the code follows `dcap-qvl`'s own client;
 2. verifies with `dcap-qvl` 0.7.1 (`ring` backend, Intel's root certificate built into the crate) the quote's signature, the QE report,
    the PCK chain to Intel's root, the CRLs, the signatures and validity dates of the TCB info and QE identity, and the TCB level.
    `dcap-qvl` also refuses a debug, migratable or profiling TD and a `Revoked` platform. The verified TD report body must be the quote's;
@@ -559,8 +558,9 @@ Tested offline on 13/11/2026 (`tests/attestation.rs`): a real TDX quote and its 
 2025-06-19) pass as `UpToDate`; a changed byte of the quote (header, measurements, `report_data`, signature, attestation key, QE report,
 PCK certificates), changed collateral, and collateral judged after its `nextUpdate` or before its `issueDate` are refused. On the NEAR AI
 report, with Intel's check replaced by one accepting only that exact quote (no collateral for it could be fetched): the report passes, and
-another valid key, a changed quote byte and another nonce are refused. **Not verified:** the NEAR AI quote against Intel's real
-collateral (`the_real_near_ai_quote_passes_with_live_collateral`, ignored, needs the network), so its real TCB status is unknown.
+another valid key, a changed quote byte and another nonce are refused. With the network, on 13/11/2026: the NEAR AI quote of that report
+passed with Intel's live collateral, fetched directly from Intel's hosts (`the_real_near_ai_quote_passes_with_live_collateral`, ignored by
+default, run by hand once). Not verified: the fetch through Tor, and a quote of any other NEAR AI machine.
 
 **The GPU evidence is not bound to the TDX quote:** its nonce shows it is fresh, but a relay can copy a genuine payload from another
 machine. The client does not check it and does not contact NVIDIA; `quote::check_gpu_evidence` exists for that check alone. Nothing here
