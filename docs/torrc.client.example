@@ -4,5 +4,8 @@
 SocksPort 127.0.0.1:9050
 SocksPort 127.0.0.1:9052
 
+# The first connection to an onion relay can take longer than tor's default 120 s; ona-core waits 240 s.
+SocksTimeout 240
+
 # Refuses any SOCKS request that carries an IP address instead of a host name.
 SafeSocks 1

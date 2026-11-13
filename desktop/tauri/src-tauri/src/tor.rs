@@ -181,9 +181,10 @@ impl TorService {
         // 127.0.0.1 only: the app uses it to check that its onion address answers before showing the QR code.
         // OnionTrafficOnly keeps other local programs from using it as a general anonymous proxy; ExtendedErrors makes
         // tor say "missing client authorization" for a restricted service it found (see `reach_through_socks`). The second port is
-        // ona-core's: the relay and the NEAR RPC nodes are ordinary host names, so it cannot be onion-only.
+        // ona-core's: the relay and the NEAR RPC nodes are ordinary host names, so it cannot be onion-only. SocksTimeout
+        // matches ona-core's connection limit: the first connection to an onion relay can wait past tor's default 120 s.
         std::fs::write(&torrc, format!(
-            "SocksPort 127.0.0.1:{} OnionTrafficOnly ExtendedErrors\nSocksPort 127.0.0.1:{}\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
+            "SocksPort 127.0.0.1:{} OnionTrafficOnly ExtendedErrors\nSocksPort 127.0.0.1:{}\nSocksTimeout 240\nDataDirectory \"{}\"\nHiddenServiceDir \"{}\"\nHiddenServicePort 80 127.0.0.1:{port}\n\
              __OwningControllerProcess {}\nLog notice stdout\n{relay_auth}",
             self.socks_port, self.core_socks_port, escape(&data), escape(&hs), std::process::id()
         ))?;

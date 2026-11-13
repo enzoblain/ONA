@@ -126,7 +126,8 @@ up this way got HTTP 200 from a service restricted to its key. Not checked again
   or an `http` onion address: an IP address is refused by ona-core.
 - With an onion relay, once tor runs the app opens one connection to the relay in the background, so the first message
   does not wait for tor to find the service (about a minute on 13/11/2026, from `ona real`). Through Tor, ona-core
-  allows 240 s to connect, then 120 s for each later step of a request (sending, waiting for the reply, reading it).
+  allows 240 s to connect, then 120 s for each later step of a request (sending, waiting for the reply, reading it);
+  the app's tor waits as long (`SocksTimeout 240`; its default, 120 s, would give up first).
 - An unreadable `model.json`, or settings ona-core refuses, give a core that refuses every command with the reason: the
   app never falls back to the fake model in silence.
 - The NEAR AI key is not in the app: the relay holds it (docs/INSTALL.md, "Run the relay").

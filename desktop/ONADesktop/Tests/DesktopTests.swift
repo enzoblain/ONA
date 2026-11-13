@@ -614,6 +614,8 @@ struct SettingsTests {
                                      coreSocksPort: 50124)
         #expect(torrc.contains("__OwningControllerProcess 4242"))
         #expect(torrc.contains("SocksPort 127.0.0.1:50123 OnionTrafficOnly ExtendedErrors\n"))
+        // ona-core allows 240 s to connect through Tor: tor must not give up first, at its default 120 s.
+        #expect(torrc.contains("SocksTimeout 240\n"))
         #expect(torrc.contains("SocksPort 127.0.0.1:50124\n"))
         #expect(torrc.contains("HiddenServicePort 80 127.0.0.1:49152"))
         #expect(torrc.contains(#"HiddenServiceDir "/a\"b/hs""#))

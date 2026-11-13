@@ -60,6 +60,7 @@ public final class TorService {
         return """
         SocksPort 127.0.0.1:\(socksPort) OnionTrafficOnly ExtendedErrors
         SocksPort 127.0.0.1:\(coreSocksPort)
+        SocksTimeout 240
         DataDirectory \(quoted(data))
         HiddenServiceDir \(quoted(hs))
         HiddenServicePort 80 127.0.0.1:\(port)
