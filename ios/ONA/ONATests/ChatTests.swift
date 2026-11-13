@@ -425,3 +425,35 @@ enum PoolFixtures {
         "total": "8395000000000000000000000",
     ]
 }
+
+@MainActor
+@Suite("Free research")
+struct ResearchTests {
+    /// Same vector as the desktop apps (computed independently from docs/research.md).
+    @Test func queriesDigest() {
+        #expect(SignedFields.queriesDigest(id: "c-0123456789abcdef0123456789abcdef",
+                                           queries: ["plombier Lyon", "tarif déplacement plombier"])
+                == "8174711c622fea16bd82439613d544f31d2c2d8c3fb4bc1e22414a092a7cb01c")
+    }
+
+    @Test func readsTheResearchItems() throws {
+        let json = #"""
+        {"mode":"mock","chat":{"id":"chat-1","title":"t","status":"waiting","working":null,"items":[
+          {"id":"i1","at":1,"kind":"confirmation","state":"pending","pending":{"id":"c-1","kind":"queries","queries":["plombier Lyon"],"content":"x"}},
+          {"id":"i2","at":2,"kind":"answer","answer":"Entre 40 et 80 euros.","notes":[{"source":"s1","claim":"40 à 80 €","quote":"entre 40 et 80 euros"}],"sources":[{"handle":"s1","title":"Guide","url":"https://guide.example.org/"}]},
+          {"id":"i3","at":3,"kind":"action","action":{"index":0,"kind":"payment","purpose":"Acompte","amount":"100000000000000000000000"},"state":"done"}
+        ]}}
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let view = try decoder.decode(ChatReply.self, from: Data(json.utf8))
+        let items = view.chat.items
+        guard case .confirmation(let pending, .pending) = items[0].content else { Issue.record("queries"); return }
+        #expect(pending.request == .queries(["plombier Lyon"]))
+        #expect(RemoteModel.content(of: pending) == SignedFields.queriesDigest(id: "c-1", queries: ["plombier Lyon"]))
+        guard case .answer(let answer) = items[1].content else { Issue.record("answer"); return }
+        #expect(answer.notes.first?.quote == "entre 40 et 80 euros" && answer.sources.first?.handle == "s1")
+        guard case .action(let action, let done) = items[2].content else { Issue.record("action"); return }
+        #expect(action.kind == "payment" && action.amount == "100000000000000000000000" && done)
+    }
+}

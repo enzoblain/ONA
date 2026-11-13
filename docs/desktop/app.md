@@ -18,7 +18,8 @@ sécurité, voir `docs/ios/protocol-draft.md`).
   1,5 s (`open`, `propose_plan`, `search`, `read`, `compare`, `contact`, `prepare_payment`, `pay`, `close`,
   `exposure`) et s'arrête aux trois confirmations. Modèle, web et paiements sont les faux d'`ona-core` (`mode: mock`),
   d'où le bandeau « Simulation ». La recherche utilise le modèle de recherche `lawyer` / `paris` de la politique de
-  démonstration d'`ona-core`, quelle que soit la demande.
+  démonstration d'`ona-core`, quelle que soit la demande. Depuis le 2026-11-13, une nouvelle conversation est une
+  recherche libre (voir « Free research » plus bas) ; la mission avocat n'est plus lancée que par ses tests.
 - **Confirmations** : depuis le Mac (boutons dans la conversation) ou depuis le téléphone (signées). Le paiement est
   confirmé par `confirm_payment(digest)` : c'est le garde-fou d'`ona-core` qui compare l'empreinte.
 - **Appairage** : le Mac garde sa clé P-256 et le téléphone appairé (clé publique, jeton, dernier compteur, identifiants
@@ -154,3 +155,36 @@ sheet ("Clé pour le relais"). Tested with unit tests; the same file layout reac
 
 **A local test node** (development builds only): same `"local_node": true` as the Tauri app; the Swift side passes it to the
 bridge as `pool_direct` in Debug builds and refuses it in Release. Tested with unit tests only.
+
+## Free research
+
+A new conversation is now a free research (docs/research.md), not the lawyer mission; the lawyer mission's code is kept
+and reached from its tests only (`ChatEngine(…, newChats: .mission)`). Each conversation's research has its own
+ona-core on its `CoreQueue`, moved on at each tick without waiting: `research_open`, `research_propose`, then a
+confirmation of the queries, then `research_step` until `done` (one activity item per event: `search`, `read`,
+`think`), then `research_result` (one `answer` item, one `action` item per suggested action) and `research_exposure`
+(the exposure item). Status: `working`, `waiting` on the queries, `idle` once answered.
+
+- **Queries.** Shown in editable fields on the Mac (an emptied field drops that query); accepted as shown from the phone
+  with the usual signed confirmation, whose content is `ProtocolBytes.queriesDigest` (`ona/queries/v1`, shared test
+  vector with the Tauri and iPhone apps). ona-core checks the final list (1 to 3, 120 characters, protected terms); a
+  refused list leaves the confirmation pending. Refusing stops the research before any search.
+- **Answer.** The text, the notes with their quote and the site they come from, the sources with title, host and URL as
+  selectable text (no link opens).
+- **Actions, on the Mac only.** The person types the recipient (e-mail address or NEAR account), "Préparer" shows the
+  exact action (`research_action_prepare`) with a warning when the recipient is written in a page read, then
+  "Envoyer depuis ma messagerie" or "Payer" confirms it by its digest and carries it out once
+  (`research_action_confirm`, `research_action_do`). A message's `mailto:` URL is opened with `NSWorkspace`: the person
+  sends it from their mail program. The item is then marked done (`state: "done"` for the phone) and the exposure item is
+  updated in place. The phone has no route for actions.
+
+Tested (`swift test`, against the real ona-core with its fake model and demo web): the queries digest vector; a new
+chat waits on its queries and nothing is searched before; edited queries searched as edited, the activity texts, the
+answer with notes and sources, two actions, the exposure counts and the phone's JSON view; a query list ona-core refuses
+keeps the confirmation; refusing; a message (bad address refused, wrong digest refused, `mailto:` URL, not twice) and a
+payment (mock transaction) with the exposure updated; the phone accepting the queries by a signed confirmation, and
+refused when signed over other queries. The app builds (`xcodebuild`, Debug).
+
+Not verified: the SwiftUI views were not looked at in the running app; opening the `mailto:` URL in a mail program; the
+"seen in pages" warning (the demo pages hold no address; ona-core's own tests cover the flag); the real model and the
+web through Tor (see docs/research.md, "Not tested"); the iPhone app's display of these items.

@@ -14,6 +14,7 @@ public enum ProtocolBytes {
     public static let deleteDomain = "ona/delete/v1"
     public static let planDomain = "ona/plan/v1"
     public static let offersDomain = "ona/offers/v1"
+    public static let queriesDomain = "ona/queries/v1"
     public static let payDomain = "ona/pay/v2"
     public static let payloadPrefix = "ona-pair:"
 
@@ -103,6 +104,12 @@ public enum ProtocolBytes {
 
     public static func planDigest(id: String, steps: [String]) -> String {
         sha256Hex(encode([.text(planDomain), .text(id), .text(String(steps.count))] + steps.map { .text($0) }))
+    }
+
+    /// Search queries of a free research (docs/research.md): `SHA-256(fields("ona/queries/v1", id, q1, q2, …))`, no
+    /// count. Same as `protocol::queries_digest` in the Tauri app.
+    public static func queriesDigest(id: String, queries: [String]) -> String {
+        sha256Hex(encode([.text(queriesDomain), .text(id)] + queries.map { .text($0) }))
     }
 
     /// Offers: firm, price (cents) and delay (days) as decimal text, then the quoted spans.

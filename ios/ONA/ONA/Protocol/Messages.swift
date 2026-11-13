@@ -75,11 +75,13 @@ struct Pending: Decodable, Sendable, Identifiable, Equatable {
         case plan([Step])
         case recipient([Offer])
         case payment(PaymentRequest)
+        /// Free research: the search queries, before anything leaves (docs/research.md).
+        case queries([String])
         case unknown(String)
     }
 
     private enum Keys: String, CodingKey {
-        case id, kind, plan, offers, payment, content
+        case id, kind, plan, offers, payment, content, queries
     }
 
     init(from decoder: Decoder) throws {
@@ -91,6 +93,7 @@ struct Pending: Decodable, Sendable, Identifiable, Equatable {
         case "plan": .plan(try c.decode([Step].self, forKey: .plan))
         case "recipient": .recipient(try c.decode([Offer].self, forKey: .offers))
         case "payment": .payment(try c.decode(PaymentRequest.self, forKey: .payment))
+        case "queries": .queries(try c.decode([String].self, forKey: .queries))
         default: .unknown(kind)
         }
     }

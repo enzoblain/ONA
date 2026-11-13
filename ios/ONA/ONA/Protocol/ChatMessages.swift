@@ -72,6 +72,10 @@ struct ChatItem: Decodable, Sendable, Identifiable {
         case confirmation(Pending, ConfirmationState)
         /// The exposure report at the end of a mission.
         case exposure(Exposure)
+        /// Free research: the answer with its notes and sources.
+        case answer(ResearchAnswer)
+        /// Free research: an action the answer suggests, completed on the computer only.
+        case action(SuggestedAction, done: Bool)
         case unknown(String)
     }
 
@@ -80,7 +84,7 @@ struct ChatItem: Decodable, Sendable, Identifiable {
     }
 
     private enum Keys: String, CodingKey {
-        case id, at, kind, text, tool, pending, state, exposure
+        case id, at, kind, text, tool, pending, state, exposure, answer, notes, sources, action
     }
 
     init(from decoder: Decoder) throws {
@@ -96,7 +100,41 @@ struct ChatItem: Decodable, Sendable, Identifiable {
         case "confirmation": .confirmation(try c.decode(Pending.self, forKey: .pending),
                                            (try? c.decode(ConfirmationState.self, forKey: .state)) ?? .expired)
         case "exposure": .exposure(try c.decode(Exposure.self, forKey: .exposure))
+        case "answer": .answer(ResearchAnswer(text: try c.decode(String.self, forKey: .answer),
+                                              notes: (try? c.decode([ResearchAnswer.Note].self, forKey: .notes)) ?? [],
+                                              sources: (try? c.decode([ResearchAnswer.Source].self, forKey: .sources)) ?? []))
+        case "action": .action(try c.decode(SuggestedAction.self, forKey: .action),
+                               done: (try? c.decode(String.self, forKey: .state)) == "done")
         default: .unknown(kind)
         }
     }
+}
+
+/// The answer of a free research (docs/research.md): written from notes whose quotes were found in the pages.
+struct ResearchAnswer: Sendable, Equatable {
+    let text: String
+    let notes: [Note]
+    let sources: [Source]
+
+    struct Note: Decodable, Sendable, Equatable {
+        let source: String
+        let claim: String
+        let quote: String
+    }
+
+    struct Source: Decodable, Sendable, Equatable {
+        let handle: String
+        let title: String
+        let url: String
+    }
+}
+
+/// An action a research answer suggests. Its recipient is given on the computer, never by the agent.
+struct SuggestedAction: Decodable, Sendable, Equatable {
+    let index: Int
+    let kind: String
+    let purpose: String
+    let text: String?
+    /// yoctoNEAR, for a payment.
+    let amount: String?
 }

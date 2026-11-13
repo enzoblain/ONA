@@ -213,3 +213,11 @@ reached the service (25 s to connect, a signed reply); without it, Arti refused 
 authentication". Not confirmed in the app on the simulator: two pairing attempts there ended with "Impossible de joindre
 l'ordinateur par Tor" and the detail could not be read; the simulator's input then stopped responding. To do again,
 then on a real iPhone.
+
+## Free research (2026-11-13)
+
+The phone shows a research conversation (docs/research.md): the queries to confirm before anything leaves (accepted as
+shown, signed over `SignedFields.queriesDigest`; editing them is done on the computer), the answer with its quoted notes
+and its sources (as text: the phone never opens the pages), and the suggested actions, read only, with "À faire sur
+l'ordinateur" (their recipient is given and confirmed there). Tested with Swift tests (decoding, the digest vector shared
+with the desktop apps); not yet against a desktop app running a research.

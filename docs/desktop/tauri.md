@@ -11,7 +11,7 @@ Protocole téléphone v1 depuis le 2026-11-11 (`docs/ios/protocol-draft.md`).
 | `desktop/tauri/src-tauri/` | Crate Rust `ona-desktop` (Tauri 2), hors du workspace racine. `Cargo.lock` part de celui de la racine : `ona-core` et ses dépendances gardent les mêmes versions. |
 | `src/protocol.rs` | Octets signés (v1), engagement, code à 6 chiffres, condensés du contenu affiché et du paiement v2, texte du QR, signature et vérification ECDSA P-256 low-s (`p256`). Mêmes vecteurs de test que l'app Mac. |
 | `src/pairing.rs` | Appairage : clé P-256 de l'ordinateur, QR à usage unique valable 10 min, 5 codes faux au plus, engagement puis révélation, code à comparer, jeton, compteur et identifiants déjà utilisés. Fichier `pairing.json` écrit atomiquement (fichier temporaire, renommage, dossier synchronisé), droits 0600 sous Linux à chaque écriture ; rien n'est écrit avant la comparaison des codes (5 min pour comparer) ; un échec d'écriture est affiché ; un fichier illisible n'est jamais écrasé (erreur affichée, appairage désactivé). |
-| `src/engine.rs` | Conversations : un `ona-core` par conversation, une étape toutes les 1,5 s, arrêt aux trois confirmations. Identifiants aléatoires (16 octets). Même comportement et même JSON que le `ChatEngine` Swift. |
+| `src/engine.rs` | Conversations : un `ona-core` par conversation, une étape toutes les 1,5 s. Une nouvelle conversation est une recherche libre (section « Free research ») ; la mission avocat (arrêt aux trois confirmations) n'est plus atteinte que par les tests. Identifiants aléatoires (16 octets). Même JSON que le `ChatEngine` Swift. |
 | `src/http.rs`, `src/router.rs`, `src/server.rs` | Serveur pour le téléphone : routes v1 de `docs/ios/protocol-draft.md`, réponses signées, `Host` vérifié, requêtes de navigateur refusées ; 16 connexions au plus, 10 s par requête. Port choisi par le système en mode Tor. |
 | `src/tor.rs` | Lance le programme `tor` installé (d'abord `/usr/bin/tor`, `/usr/sbin/tor`, `/usr/local/bin/tor`, `/opt/homebrew/bin/tor`, `C:\Program Files\Tor\tor.exe`, puis le PATH) avec un service `.onion`, seulement une fois le serveur à l'écoute. `__OwningControllerProcess` : tor s'arrête avec l'app, même après un plantage. |
 | `src/worker.rs` | Un seul fil possède tout (`ona-core` n'est pas `Send`) ; la fenêtre et le serveur lui envoient des tâches. |
@@ -30,7 +30,7 @@ Rust (essayé avec 1.97.1), puis :
 
 ```bash
 cd desktop/tauri/src-tauri
-cargo test --locked     # 45 tests, avec le vrai ona-core
+cargo test --locked     # 74 tests (13/11/2026), avec le vrai ona-core
 cargo run --locked      # l'app (build debug)
 ```
 
@@ -136,6 +136,43 @@ Tested with unit tests only (settings, refusals, a core set up through a SOCKS p
 Conversations are kept in memory only and are gone when the app quits; nothing about them is written to disk. Nothing
 marks the app's data folder (onion key, `pairing.json`, `model.json`) as excluded from backups on Windows or Linux:
 there is no single mechanism every backup tool follows there.
+
+## Free research
+
+Since 13/11/2026 a new conversation, from this window or the phone, is a free research (docs/research.md), run by
+ona-core's `research_*` commands on the conversation's own core thread:
+
+1. `research_open`, then `research_propose`: the chat waits (`status: waiting`) on a confirmation of kind `queries`,
+   whose content digest is `protocol::queries_digest` (SHA-256 of `fields("ona/queries/v1", id, query_1, …)`, no
+   count). Test vector, shared with the Mac and iPhone tests: id `c-0123456789abcdef0123456789abcdef`, queries
+   `plombier Lyon` and `tarif déplacement plombier` →
+   `8174711c622fea16bd82439613d544f31d2c2d8c3fb4bc1e22414a092a7cb01c`.
+2. Accepted on the phone (signed confirmation over that digest, queries as shown) or in this window, where each query
+   is an editable field (`confirm` with `queries`); `research_accept` gets the final list. Refusing closes the research:
+   nothing was searched.
+3. `research_step` until `done`, polled without waiting (a model call or a Tor fetch does not hold the window or the
+   phone): one activity per event (`search`: « Recherche « … » : N sources », `read`: « Lecture de <site> : N notes » or
+   why the page was not read, `think` for the answer).
+4. `research_result`: one `answer` item (answer, notes with their quote and source, sources with title and address,
+   shown as text and never opened), one `action` item per suggested action (`state` `suggested`, then `done`), then
+   `research_exposure`: the exposure item. The chat is then `idle`.
+5. Actions, in this window only (the phone has no route for them): the person types the recipient (an e-mail address or
+   a NEAR account) and clicks **Préparer** (`research_action_prepare`); the exact action is shown, with a warning when
+   the recipient is also written in a page read; **Envoyer depuis ma messagerie** or **Payer** sends
+   `research_action_confirm` with the action's digest, then `research_action_do`. A message is opened as a `mailto:`
+   address with the system's own command (the person sends it from their mail program; if nothing opened, the address
+   is shown to copy); the exposure item is read again. A new message in the same conversation starts a new research,
+   and the previous answer's actions are no longer available.
+
+Tested (unit tests with the real ona-core on its demo web: fake model, `MockOpenWeb`): the whole flow, queries edited
+here (exactly those are searched; one with a protected term is refused and the queries still wait), refusal, a slow
+`research_step` not blocking the engine, actions (wrong digest refused, done once, flagged recipient, item `done`,
+exposure counting the message), the phone accepting the queries over the router with its signature (and a signature
+over other queries refused). The window was checked in a browser with a fake bridge and a view produced by the engine:
+the queries card with edited fields (the `confirm` call carries them), the answer card, the action cards with the
+warning, and the « not opened » fallback. Not tested: the clicks in the real Tauri window, opening a `mailto:` address
+(on any system), a research through Tor or with the real model (docs/research.md, "Not tested"). Payments of a
+research go through ona-core's mock payments (`MockPayments`): nothing is paid on a network.
 
 ## Pool
 

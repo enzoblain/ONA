@@ -14,6 +14,7 @@ pub mod pseudonym;
 pub mod quote;
 pub mod reader;
 pub mod remote;
+pub mod research;
 pub mod tor;
 pub mod vault;
 
@@ -149,6 +150,22 @@ pub trait Model {
     fn plan(&mut self, mission: &str) -> Result<ModelReply, ModelFailure>;
     fn read_page(&mut self, page: &str) -> Result<ModelReply, ModelFailure>;
 
+    /// Free research (`research`): proposes search queries for a question. Each role is its own call, with no shared
+    /// context; a model that does not do research refuses.
+    fn research_queries(&mut self, _question: &str) -> Result<ModelReply, ModelFailure> {
+        Err(research::unsupported())
+    }
+
+    /// Free research: notes from one page, each with a quote copied from it. `input` holds the question and the page.
+    fn research_read(&mut self, _input: &str) -> Result<ModelReply, ModelFailure> {
+        Err(research::unsupported())
+    }
+
+    /// Free research: the answer, from the checked notes only (never a page), and up to two suggested actions.
+    fn research_answer(&mut self, _input: &str) -> Result<ModelReply, ModelFailure> {
+        Err(research::unsupported())
+    }
+
     /// Says whether a call could be made now, so a page is not fetched for nothing.
     fn ready(&self) -> Result<(), ModelFailure> {
         Ok(())
@@ -160,6 +177,18 @@ pub trait Model {
 }
 
 impl Model for Box<dyn Model> {
+    fn research_queries(&mut self, question: &str) -> Result<ModelReply, ModelFailure> {
+        (**self).research_queries(question)
+    }
+
+    fn research_read(&mut self, input: &str) -> Result<ModelReply, ModelFailure> {
+        (**self).research_read(input)
+    }
+
+    fn research_answer(&mut self, input: &str) -> Result<ModelReply, ModelFailure> {
+        (**self).research_answer(input)
+    }
+
     fn plan(&mut self, mission: &str) -> Result<ModelReply, ModelFailure> {
         (**self).plan(mission)
     }
@@ -368,17 +397,24 @@ impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
     }
 
     fn call_data(data: &mut Value, call: &RealCall) {
-        data["model"] = json!(call.model);
-        data["response_id"] = json!(call.response_id);
-        data["tokens_used"] = json!(call.tokens_used);
-        data["relay"] = json!(call.relay);
-        data["requests"] = json!(call.requests);
-        data["bytes_sent"] = json!(call.bytes_sent);
-        data["bytes_received"] = json!(call.bytes_received);
-        data["prompt_sent"] = json!(call.prompt_sent);
-        data["prompt_bytes"] = json!(call.prompt_bytes);
+        call_data(data, call)
     }
+}
 
+/// The journal fields of a real call: never any content.
+pub(crate) fn call_data(data: &mut Value, call: &RealCall) {
+    data["model"] = json!(call.model);
+    data["response_id"] = json!(call.response_id);
+    data["tokens_used"] = json!(call.tokens_used);
+    data["relay"] = json!(call.relay);
+    data["requests"] = json!(call.requests);
+    data["bytes_sent"] = json!(call.bytes_sent);
+    data["bytes_received"] = json!(call.bytes_received);
+    data["prompt_sent"] = json!(call.prompt_sent);
+    data["prompt_bytes"] = json!(call.prompt_bytes);
+}
+
+impl<M: Model, W: Web, P: Payments> Mission<M, W, P> {
     fn commit_llm(&mut self, role: &str, input: &str, replaced: usize, reply: &ModelReply) {
         self.error_mode = Some(reply.mode);
         let response = self.journal.fingerprint(reply.text.as_bytes());
@@ -834,6 +870,45 @@ impl Model for MockModel {
             .to_string();
         Ok(ModelReply { text, mode: MODE, call: None })
     }
+
+    /// The demo's research: the question itself as the one query.
+    fn research_queries(&mut self, question: &str) -> Result<ModelReply, ModelFailure> {
+        let query: String = question.chars().take(research::MAX_QUERY_CHARS).collect();
+        Ok(ModelReply { text: json!({"queries": [query.trim()]}).to_string(), mode: MODE, call: None })
+    }
+
+    /// The demo's reader: the page's first sentence long enough, quoted as it is.
+    fn research_read(&mut self, input: &str) -> Result<ModelReply, ModelFailure> {
+        let page = input.split_once("\n\nPage:\n").map_or("", |(_, p)| p);
+        let notes: Vec<Value> = page
+            .split_inclusive(['.', '!', '?'])
+            .map(str::trim)
+            .filter(|s| (research::MIN_QUOTE_CHARS..=research::MAX_NOTE_CHARS).contains(&s.chars().count()))
+            .take(2)
+            .map(|s| json!({"claim": s, "quote": s}))
+            .collect();
+        Ok(ModelReply { text: json!({"notes": notes}).to_string(), mode: MODE, call: None })
+    }
+
+    /// The demo's answer: the notes put together; a message when the question asks to write, a payment of 0.1 NEAR
+    /// when it asks to pay.
+    fn research_answer(&mut self, input: &str) -> Result<ModelReply, ModelFailure> {
+        let (question, notes) = input.split_once("\n\nNotes:\n").unwrap_or((input, "[]"));
+        let notes: Vec<Value> = serde_json::from_str(notes).unwrap_or_default();
+        let claims: Vec<&str> = notes.iter().filter_map(|n| n["claim"].as_str()).collect();
+        let answer = if claims.is_empty() { "Aucune source lue ne répond à la question.".to_string() } else { claims.join(" ") };
+        let lower = question.to_lowercase();
+        let mut actions = Vec::new();
+        if ["écri", "ecri", "contact", "message"].iter().any(|w| lower.contains(w)) {
+            actions.push(json!({"kind": "message", "purpose": "Demande de devis",
+                "text": "Bonjour, je souhaite un devis. Pouvez-vous me dire vos disponibilités et votre tarif ? Merci."}));
+        }
+        if ["paie", "payer", "paye", "acompte"].iter().any(|w| lower.contains(w)) {
+            actions.push(json!({"kind": "payment", "purpose": "Acompte", "amount_near": "0.1"}));
+        }
+        let cites: Vec<usize> = (1..=notes.len()).collect();
+        Ok(ModelReply { text: json!({"answer": answer, "cites": cites, "actions": actions}).to_string(), mode: MODE, call: None })
+    }
 }
 
 pub struct MockWeb {
@@ -930,6 +1005,10 @@ pub type DemoMission = Mission<MockModel, MockWeb, MockPayments>;
 /// so its token budget covers all of them.
 pub struct Core {
     mission: Option<CoreMission>,
+    /// A free research (`research_*` commands, `research`), which uses the same model.
+    research: Option<CoreResearch>,
+    /// How the real model reaches the network: the research's web goes the same way. None: the demo web.
+    web: Option<tor::Network>,
     vault: Option<vault::Vault>,
     pool: Option<pool::PoolClient>,
     model: Option<Box<dyn Model>>,
@@ -937,6 +1016,7 @@ pub struct Core {
 }
 
 type CoreMission = Mission<Box<dyn Model>, MockWeb, MockPayments>;
+type CoreResearch = research::Research<Box<dyn Model>, Box<dyn research::OpenWeb>, MockPayments>;
 
 fn unix_now() -> Result<u64, String> {
     std::time::SystemTime::now()
@@ -953,7 +1033,15 @@ impl Default for Core {
 
 impl Core {
     pub fn new() -> Self {
-        Self { mission: None, vault: None, pool: None, model: Some(Box::new(MockModel::default())), model_mode: MODE }
+        Self {
+            mission: None,
+            research: None,
+            web: None,
+            vault: None,
+            pool: None,
+            model: Some(Box::new(MockModel::default())),
+            model_mode: MODE,
+        }
     }
 
     pub fn with_vault(vault: vault::Vault) -> Self {
@@ -967,7 +1055,7 @@ impl Core {
 
     /// Replaces the model. Refused during a mission, whose plan was made with the previous one.
     pub fn set_model(&mut self, model: Box<dyn Model>) -> Result<(), String> {
-        if self.mission.is_some() {
+        if self.mission.is_some() || self.research.is_some() {
             return Err("cannot change the model after a mission was opened".into());
         }
         self.model_mode = model.mode();
@@ -977,7 +1065,84 @@ impl Core {
 
     /// Switches to the real model. Only an explicit call with a full configuration does this.
     pub fn use_real_model(&mut self, config: remote::RemoteConfig, network: &tor::Network) -> Result<(), String> {
-        self.set_model(Box::new(remote::http_model(config, network)?))
+        self.set_model(Box::new(remote::http_model(config, network)?))?;
+        self.web = Some(network.clone());
+        Ok(())
+    }
+
+    /// The model, freed from a closed mission or research: it moves from one to the next, so its token budget covers
+    /// all of them. Refused while one is still open.
+    fn free_model(&mut self) -> Result<Box<dyn Model>, String> {
+        if self.mission.as_ref().is_some_and(|m| m.phase() != Phase::Closed)
+            || self.research.as_ref().is_some_and(|r| r.phase() != research::ResearchPhase::Closed)
+        {
+            return Err("close the current mission first".into());
+        }
+        if let Some(previous) = self.mission.take() {
+            return Ok(previous.model);
+        }
+        if let Some(previous) = self.research.take() {
+            return Ok(previous.model);
+        }
+        self.model.take().ok_or_else(|| "no model configured".to_string())
+    }
+
+    fn research_command(&mut self, cmd: &str, request: &Value) -> Reply {
+        let text = |key: &str| -> Result<String, String> {
+            request[key].as_str().map(String::from).ok_or_else(|| format!("missing field {key}"))
+        };
+        if cmd == "research_open" {
+            let question = text("question")?;
+            // Checked before the model is freed: a refused question keeps it where it was.
+            if question.trim().is_empty() || question.trim().len() > research::MAX_QUESTION_BYTES {
+                return Err(format!("the question must have 1 to {} bytes", research::MAX_QUESTION_BYTES));
+            }
+            let mut policy = demo_policy();
+            if let Some(items) = request["protected"].as_array() {
+                let terms: Vec<String> = items.iter().filter_map(|v| v.as_str()).map(|t| t.trim().to_string()).collect();
+                if terms.len() != items.len() || terms.iter().any(|t| !(MIN_TERM_CHARS..=MAX_TERM_CHARS).contains(&pseudonym::term_len(t))) {
+                    return Err(format!("protected terms must be strings of {MIN_TERM_CHARS} to {MAX_TERM_CHARS} characters"));
+                }
+                if policy.protected_terms.len() + terms.len() > MAX_TERMS {
+                    return Err(format!("at most {MAX_TERMS} protected terms"));
+                }
+                policy.protected_terms.extend(terms);
+            }
+            let model = self.free_model()?;
+            let web: Box<dyn research::OpenWeb> = match &self.web {
+                Some(network) => Box::new(research::TorWeb::new(network.clone())),
+                None => Box::new(research::MockOpenWeb::demo()),
+            };
+            let web_mode = web.mode();
+            let mut salt = [0u8; 32];
+            OsRng.fill_bytes(&mut salt);
+            self.research = Some(research::Research::open(model, web, MockPayments::default(), policy, salt, &question)?);
+            return Ok(json!({"opened": true, "mode": self.model_mode, "web": web_mode}));
+        }
+        let r = self.research.as_mut().ok_or("no open research")?;
+        match cmd {
+            "research_propose" => r.propose(),
+            "research_accept" => {
+                let queries: Vec<String> = request["queries"]
+                    .as_array()
+                    .ok_or("missing field queries")?
+                    .iter()
+                    .map(|q| q.as_str().map(String::from).ok_or_else(|| "queries must be strings".to_string()))
+                    .collect::<Result<_, _>>()?;
+                r.accept(&queries)
+            }
+            "research_step" => r.step(),
+            "research_result" => r.result(),
+            "research_action_prepare" => {
+                let index = request["index"].as_u64().and_then(|i| usize::try_from(i).ok()).ok_or("missing field index")?;
+                r.prepare_action(index, &text("to")?)
+            }
+            "research_action_confirm" => r.confirm_action(&text("digest")?),
+            "research_action_do" => r.do_action(),
+            "research_close" => r.close(),
+            "research_exposure" => Ok(r.exposure()),
+            other => Err(format!("unknown command {other}")),
+        }
     }
 
     fn run(&mut self, request: &Value) -> Reply {
@@ -1005,8 +1170,13 @@ impl Core {
                 _ => Ok(json!({"forgotten": vault.forget(&id)?, "mode": MODE})),
             };
         }
+        if cmd.starts_with("research_") {
+            return self.research_command(&cmd, request);
+        }
         if cmd == "open" {
-            if self.mission.as_ref().is_some_and(|m| m.phase() != Phase::Closed) {
+            if self.mission.as_ref().is_some_and(|m| m.phase() != Phase::Closed)
+                || self.research.as_ref().is_some_and(|r| r.phase() != research::ResearchPhase::Closed)
+            {
                 return Err("close the current mission first".into());
             }
             let mission = text("mission")?;
@@ -1021,10 +1191,7 @@ impl Core {
             // Random, so that someone holding the journal cannot test a guessed mission against it.
             let mut salt = [0u8; 32];
             OsRng.fill_bytes(&mut salt);
-            let model = match self.mission.take() {
-                Some(previous) => previous.model,
-                None => self.model.take().ok_or("no model configured")?,
-            };
+            let model = self.free_model()?;
             let mut opened = Mission::open(model, MockWeb::demo(), MockPayments::default(), demo_policy(), salt, &mission);
             let declared = if protected.is_empty() { Ok(Value::Null) } else { opened.protect(&protected) };
             self.mission = Some(opened);

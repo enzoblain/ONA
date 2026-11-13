@@ -141,3 +141,15 @@ dialog.pool { width: min(560px, 94vw); }
 .pool input, .pool select { font: inherit; padding: 7px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
 .pool .warn { color: var(--warn); font-size: 12.5px; margin: 0; }
 .pool .privacy p { margin: 0; }
+
+/* Free research: queries, answer, actions */
+.card h4 { font-size: 12.5px; color: var(--muted); font-weight: 600; margin: 4px 0 0; }
+.field { font: inherit; padding: 7px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); width: 100%; }
+.queries { display: flex; flex-direction: column; gap: 6px; }
+.query { padding: 4px 0; }
+.answer-text { margin: 0; line-height: 1.5; white-space: pre-wrap; }
+.card ul.notes, .card ol.sources { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; line-height: 1.45; }
+.quote { color: var(--muted); font-style: italic; }
+.message-text { white-space: pre-wrap; line-height: 1.45; padding: 8px 10px; border-radius: 10px; background: var(--line); }
+.recipient { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.card .warn { color: var(--warn); font-size: 12.5px; margin: 0; }

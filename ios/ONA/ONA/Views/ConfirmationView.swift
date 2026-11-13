@@ -16,6 +16,8 @@ struct ConfirmationView: View {
                     RecipientConfirmation(offers: offers, model: model, pending: pending)
                 case .payment(let request):
                     PaymentConfirmation(request: request, model: model, pending: pending)
+                case .queries(let queries):
+                    QueriesConfirmation(queries: queries, model: model, pending: pending)
                 case .unknown(let kind):
                     ContentUnavailableView(
                         "Confirmation inconnue",
@@ -102,6 +104,35 @@ private struct PlanConfirmation: View {
         .safeAreaInset(edge: .bottom) {
             DecisionButtons(acceptTitle: "Valider le plan", canAccept: true, model: model, pending: pending) {
                 await model.acceptPlan(pending)
+            }
+        }
+    }
+}
+
+// MARK: - Research queries
+
+/// The searches a research wants to send, before anything leaves. Accepted as shown; editing is done on the computer.
+private struct QueriesConfirmation: View {
+    let queries: [String]
+    let model: RemoteModel
+    let pending: Pending
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(Array(queries.enumerated()), id: \.offset) { _, query in
+                    Label(query, systemImage: "magnifyingglass").textSelection(.enabled)
+                }
+            } header: {
+                Text("Recherches proposées")
+            } footer: {
+                Text("Elles partiront par Tor vers un moteur de recherche, telles qu'elles sont écrites. Pour les modifier, faites-le sur l'ordinateur.")
+            }
+        }
+        .navigationTitle("Valider les recherches")
+        .safeAreaInset(edge: .bottom) {
+            DecisionButtons(acceptTitle: "Lancer ces recherches", canAccept: !queries.isEmpty, model: model, pending: pending) {
+                await model.acceptQueries(pending)
             }
         }
     }

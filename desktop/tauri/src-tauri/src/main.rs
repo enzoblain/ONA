@@ -51,11 +51,33 @@ async fn delete_chat(worker: State<'_, Worker>, id: String) -> Reply {
     call(&worker, move |app| app.engine.delete(&id).map(|_| Value::Null).map_err(|e| e.code().into()))
 }
 
-/// A decision taken on this computer, on the same confirmation the phone sees.
+/// A decision taken on this computer, on the same confirmation the phone sees. `queries`: the research queries as the
+/// person edited them here (the phone accepts them as shown).
 #[tauri::command]
-async fn confirm(worker: State<'_, Worker>, id: String, decision: String, firm: Option<String>, digest: Option<String>) -> Reply {
+async fn confirm(worker: State<'_, Worker>, id: String, decision: String, firm: Option<String>, digest: Option<String>,
+                 queries: Option<Vec<String>>) -> Reply {
+    call(&worker, move |app| match (decision.as_str(), queries) {
+        ("accept", Some(queries)) => app.engine.accept_queries(&id, queries).map(|_| Value::Null),
+        _ => app.engine.confirm(Some(&id), Some(&decision), firm.as_deref(), digest.as_deref()).map(|_| Value::Null),
+    })
+}
+
+/// A research's suggested action with the person's recipient: the exact action to confirm (computer only).
+#[tauri::command]
+async fn research_action_prepare(worker: State<'_, Worker>, chat: String, index: u64, to: String) -> Reply {
+    call(&worker, move |app| app.engine.action_prepare(&chat, index, &to))
+}
+
+/// The prepared action, confirmed by its digest, carried out once. A message opens in the person's own mail program
+/// (`mailto:`): the person sends it from there. `opened` says whether the system took the address.
+#[tauri::command]
+async fn research_action_do(worker: State<'_, Worker>, chat: String, digest: String) -> Reply {
     call(&worker, move |app| {
-        app.engine.confirm(Some(&id), Some(&decision), firm.as_deref(), digest.as_deref()).map(|_| Value::Null)
+        let mut done = app.engine.action_do(&chat, &digest)?;
+        if let Some(mailto) = done["mailto"].as_str().map(String::from) {
+            done["opened"] = Value::Bool(wallet::open_in_browser(&mailto).is_ok());
+        }
+        Ok(done)
     })
 }
 
@@ -149,7 +171,8 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            state, chat, create_chat, post_message, delete_chat, confirm, confirm_code, forget_phone, set_mode, pool, wallet_open
+            state, chat, create_chat, post_message, delete_chat, confirm, research_action_prepare, research_action_do,
+            confirm_code, forget_phone, set_mode, pool, wallet_open
         ])
         .build(tauri::generate_context!())
         .expect("ONA could not start");
