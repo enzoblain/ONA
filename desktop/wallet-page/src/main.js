@@ -66,8 +66,40 @@ function returned() {
   return {};
 }
 
+/** "Connect wallet" in the app: no deposit, the page only tells the app which account the wallet uses. */
+async function connect(state) {
+  document.title = "ONA — connect your wallet";
+  $("title").textContent = "Connect your NEAR wallet to ONA";
+  $("details").hidden = true;
+  $("help").textContent = "ONA only learns your account name. Every deposit is still sent and signed by your wallet, which asks you each time. ONA never sees your wallet's keys.";
+  const selector = await setupWalletSelector({
+    network: state.network === "mainnet" ? "mainnet" : "testnet",
+    modules: [setupMyNearWallet(), setupMeteorWallet(), setupHereWallet(), setupIntearWallet()],
+  });
+  const modal = setupModal(selector, { description: "Choose your wallet (Meteor, for example)." });
+  const signedInAs = () => selector.store.getState().accounts.find((a) => a.active)?.accountId;
+  const report = async (account) => {
+    const reply = await app("connected", { account });
+    show(`Connected as ${reply.account}. You can close this page and go back to ONA.`, "ok");
+    $("go").disabled = true;
+  };
+  const run = (work) => work().catch((e) => show(`Interrupted: ${e.message}`, "error"));
+  $("go").textContent = "Connect my wallet";
+  $("go").onclick = () => modal.show();
+  selector.on("signedIn", () => run(async () => {
+    const account = signedInAs();
+    if (account) await report(account);
+  }));
+  // A wallet already connected in this browser (NEAR Wallet Selector remembers it for this address).
+  const already = signedInAs();
+  if (already) return run(() => report(already));
+  $("go").disabled = false;
+  show("Choose your wallet.");
+}
+
 async function main() {
   let state = await app("state");
+  if (state.step === "connect") return connect(state);
   $("account").textContent = state.account;
   $("amount").textContent = near(state.wallet_call.attached);
   $("receiver").textContent = state.wallet_call.receiver;
@@ -144,7 +176,12 @@ async function main() {
   if (back.tx && state.step === "deposit") return run(() => deposited(back.tx));
   if (back.signed && state.step === "sign") return run(() => finish(back.signed));
   $("go").disabled = false;
-  show(state.step === "sign" ? "The pool agent's message still needs your signature." : "Connect the wallet of the depositing account.");
+  if (state.step === "sign") return show("The pool agent's message still needs your signature.");
+  if (signedInAs() === state.account) {
+    $("go").textContent = "Send the deposit with my wallet";
+    return show(`Your wallet is connected as ${state.account}. Click to send the deposit: your wallet asks you to confirm it.`);
+  }
+  show("Connect the wallet of the depositing account.");
 }
 
 main().catch((e) => show(`Error: ${e.message}`, "error"));

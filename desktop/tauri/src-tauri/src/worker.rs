@@ -110,6 +110,7 @@ impl Worker {
                 engine: {
                     let mut engine = ChatEngine::with_ona_core(setup.clone());
                     engine.payees = crate::real::load_payees(&data_dir);
+                    engine.wallet_account = load_wallet_account(&data_dir);
                     engine
                 },
                 tor,
@@ -156,6 +157,17 @@ fn read_secret_store() -> Result<(SystemStore, Option<Vec<u8>>), String> {
     Ok((store, got))
 }
 
+/// The file of the data folder that remembers the connected wallet's account (its name only: no key).
+pub const WALLET_ACCOUNT_FILE: &str = "wallet_account";
+/// The wallet page's port, tried first so that the browser keeps the wallet connected across restarts (NEAR Wallet
+/// Selector remembers it per address); another one chosen by the system when it is taken.
+const WALLET_PORT: u16 = 8797;
+
+fn load_wallet_account(data_dir: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(data_dir.join(WALLET_ACCOUNT_FILE)).ok()?;
+    Some(text.trim().to_owned()).filter(|a| crate::wallet::is_account(a))
+}
+
 /// What a wallet page request needs.
 enum WalletWork {
     Reply(http::Response),
@@ -192,6 +204,11 @@ fn run(mut app: App, inbox: Receiver<Job>) {
             Err(RecvTimeoutError::Timeout) => {
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     app.engine.tick();
+                    // Deposits asked in a chat (pool requests): the same wallet page as the Pool screen's.
+                    for (chat, card, prepared) in app.engine.take_wallet_requests() {
+                        let opened = app.open_wallet_for(&prepared, Some((chat.clone(), card.clone())));
+                        app.engine.pool_wallet_opened(&chat, &card, opened);
+                    }
                     app.pairing.tick();
                     app.tor.poll();
                     if app.mode == Mode::Tor && app.server.is_some() && app.pairing.onion_client_auth() != app.tor_auth {
@@ -299,11 +316,42 @@ impl App {
     /// Opens the wallet page for a deposit prepared in the pool window (its `pool_prepare` reply), and returns its
     /// address. One deposit at a time: a new one replaces the previous page.
     pub fn open_wallet(&mut self, prepared: &Value) -> Result<String, String> {
-        let session = crate::wallet::Session::from_prepared(prepared)?;
+        self.open_wallet_for(prepared, None)
+    }
+
+    /// The same, for a deposit asked in a chat (`chat`: the chat and its card), whose steps the chat reports.
+    pub fn open_wallet_for(&mut self, prepared: &Value, chat: Option<(String, String)>) -> Result<String, String> {
+        let mut session = crate::wallet::Session::from_prepared(prepared)?;
+        session.chat = chat;
+        self.open_session(session)
+    }
+
+    /// Opens the wallet page to connect a wallet (no deposit): the page tells the app the account, which the app
+    /// remembers and shows. Returns the page's address.
+    pub fn open_wallet_connect(&mut self) -> Result<String, String> {
+        let network = match self.setup.lock().ok().and_then(|s| s.pool.as_ref().ok().cloned().flatten()) {
+            Some(pool) if pool.pool.ends_with(".near") => "mainnet",
+            _ => "testnet",
+        };
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or_default();
+        self.open_session(crate::wallet::Session::connect(network, now))
+    }
+
+    /// Forgets the connected wallet's account (the browser may still keep its own connection).
+    pub fn forget_wallet(&mut self) -> Result<(), String> {
+        self.engine.wallet_account = None;
+        match std::fs::remove_file(self.data_dir.join(WALLET_ACCOUNT_FILE)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("not forgotten on disk: {e}")),
+            _ => Ok(()),
+        }
+    }
+
+    fn open_session(&mut self, session: crate::wallet::Session) -> Result<String, String> {
         if self.wallet_server.is_none() {
             let worker = Worker { jobs: self.jobs.clone() };
             let handler: server::Handler = Arc::new(move |request: http::Request| wallet_request(&worker, request));
-            let server = PhoneServer::start(Exposure::Localhost, 0, handler, server::Limits::default())
+            let server = PhoneServer::start(Exposure::Localhost, WALLET_PORT, handler.clone(), server::Limits::default())
+                .or_else(|_| PhoneServer::start(Exposure::Localhost, 0, handler, server::Limits::default()))
                 .map_err(|e| format!("wallet page: {e}"))?;
             self.wallet_server = Some(server);
         }
@@ -311,8 +359,10 @@ impl App {
         // Ends with "/": the page loads wallet.js and wallet.css next to it.
         let url = format!("http://127.0.0.1:{port}/wallet/{}/", session.token);
         self.wallet = Some(session);
-        // The address is also shown in the window, in case no browser opens.
-        let _ = crate::wallet::open_in_browser(&url);
+        // The address is also shown in the window, in case no browser opens. Tests open no browser.
+        if !cfg!(test) {
+            let _ = crate::wallet::open_in_browser(&url);
+        }
         Ok(url)
     }
 
@@ -331,14 +381,26 @@ impl App {
             Ok(ask) => ask,
             Err(response) => return WalletWork::Reply(response),
         };
+        // A connect page: the account is remembered, nothing is run.
+        let ask = match ask {
+            Ask::Connected { account } if session.step == Step::Connect => {
+                session.step = Step::Done;
+                session.account = account.clone();
+                let state = session.state();
+                self.remember_wallet(account);
+                return WalletWork::Reply(http::Response::new(200, state));
+            }
+            other => other,
+        };
         let execute = match (ask, &session.step) {
             (Ask::Asset(content_type, bytes), _) => return WalletWork::Reply(http::Response::asset(content_type, bytes)),
             (Ask::State, _) => return WalletWork::Reply(http::Response::new(200, session.state())),
             (Ask::Deposited, Step::Deposit) => json!({"cmd": "pool_execute", "prepared_id": session.prepared_id}),
             (Ask::Signed { public_key, signature }, Step::Sign(_)) => json!({"cmd": "pool_execute", "prepared_id": session.prepared_id,
                 "depositor_signature": {"public_key": public_key, "signature": signature}}),
-            // Sent twice (a page reloaded): the current state, nothing run again.
-            (Ask::Deposited | Ask::Signed { .. }, _) => return WalletWork::Reply(http::Response::new(200, session.state())),
+            // Sent twice (a page reloaded), or not this page's step: the current state, nothing run again.
+            (Ask::Deposited | Ask::Signed { .. } | Ask::Connected { .. }, _) =>
+                return WalletWork::Reply(http::Response::new(200, session.state())),
         };
         if session.executing {
             return reply(409, "the previous step is still running");
@@ -348,11 +410,26 @@ impl App {
         WalletWork::Execute { sender: self.engine.pool_sender(), request: execute, second, token: session.token.clone() }
     }
 
+    /// The account connected on the wallet page: shown in the window, used by the chat's pool requests, and kept in
+    /// the data folder (its name only) for the next start.
+    fn remember_wallet(&mut self, account: String) {
+        let _ = std::fs::create_dir_all(&self.data_dir)
+            .and_then(|_| std::fs::write(self.data_dir.join(WALLET_ACCOUNT_FILE), &account));
+        self.engine.wallet_account = Some(account);
+    }
+
     fn wallet_after(&mut self, token: &str, second: bool, reply: &Value) -> http::Response {
         let Some(session) = self.wallet.as_mut().filter(|s| s.token == token) else {
             return http::Response::new(410, json!({"ok": false, "error": "this deposit is no longer in progress"}));
         };
         session.executing = false;
+        // A deposit asked in a chat: the chat reports each step.
+        if let Some((chat, card)) = session.chat.clone() {
+            self.engine.pool_wallet_step(&chat, &card, second, reply);
+        }
+        let Some(session) = self.wallet.as_mut().filter(|s| s.token == token) else {
+            return http::Response::new(410, json!({"ok": false, "error": "this deposit is no longer in progress"}));
+        };
         let next = if second { crate::wallet::after_second_execute(reply) } else { crate::wallet::after_first_execute(reply) };
         match next {
             Ok(step) => {
@@ -431,6 +508,7 @@ impl App {
             "tor": {"state": tor_state, "message": tor_message},
             "last_request": self.last_request,
             "relay_client": relay_client,
+            "wallet_account": self.engine.wallet_account,
             "chats": self.engine.list_json(),
         })
     }
@@ -540,6 +618,42 @@ mod tests {
         let worker = Worker::start("PC".into(), dir.clone(), 18795);
         assert_eq!(worker.call(|_| -> u8 { panic!("inside a job") }), None);
         assert_eq!(worker.call(|app| app.pairing.name.clone()), Some("PC".to_owned()));
+        worker.call(|app| app.stop()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// "Connect wallet": the page reports the account, the app shows it and remembers it across a restart.
+    #[test]
+    fn the_wallet_page_connects_an_account() {
+        let dir = std::env::temp_dir().join(format!("ona-worker-wallet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mode"), "local").unwrap(); // no tor in a test
+        let worker = Worker::start("PC".into(), dir.clone(), 18797);
+        let url = worker.call(|app| app.open_wallet_connect()).unwrap().unwrap();
+        let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+        let (port, path) = rest.split_once('/').unwrap();
+        let post = |step: &str, body: &str| -> (u16, Value) {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+            write!(stream, "POST /{path}{step} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n\
+                            Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            (reply[9..12].parse().unwrap(), serde_json::from_str(reply.split("\r\n\r\n").nth(1).unwrap()).unwrap())
+        };
+        assert_eq!(post("state", "{}").1["step"], "connect");
+        assert_eq!(post("deposited", "{}").1["step"], "connect", "no deposit on a connect page");
+        assert_eq!(post("connected", r#"{"account":"Not An Account"}"#).0, 400);
+        let (status, state) = post("connected", r#"{"account":"alice.testnet"}"#);
+        assert_eq!((status, state["step"].as_str(), state["account"].as_str()), (200, Some("done"), Some("alice.testnet")));
+        assert_eq!(worker.call(|app| app.view()["wallet_account"].clone()).unwrap(), "alice.testnet");
+        // Once done, the page cannot change the account.
+        post("connected", r#"{"account":"mallory.testnet"}"#);
+        assert_eq!(worker.call(|app| app.engine.wallet_account.clone()).unwrap().as_deref(), Some("alice.testnet"));
+        assert_eq!(load_wallet_account(&dir).as_deref(), Some("alice.testnet"));
+        worker.call(|app| app.forget_wallet()).unwrap().unwrap();
+        assert!(worker.call(|app| app.view()["wallet_account"].is_null()).unwrap());
+        assert_eq!(load_wallet_account(&dir), None);
         worker.call(|app| app.stop()).unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }

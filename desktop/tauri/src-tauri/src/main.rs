@@ -7,6 +7,7 @@
 mod engine;
 mod http;
 mod pairing;
+mod pool_chat;
 mod protocol;
 mod real;
 mod router;
@@ -38,12 +39,31 @@ async fn chat(worker: State<'_, Worker>, id: String) -> Reply {
 
 #[tauri::command]
 async fn create_chat(worker: State<'_, Worker>, text: String) -> Reply {
-    call(&worker, move |app| app.engine.create(&text).map(Value::String).map_err(|e| e.code().into()))
+    call(&worker, move |app| app.engine.create_here(&text).map(Value::String).map_err(|e| e.code().into()))
 }
 
+/// A message typed in this window: a pool request ("place 1 NEAR in vault 0") or a free research.
 #[tauri::command]
 async fn post_message(worker: State<'_, Worker>, id: String, text: String) -> Reply {
-    call(&worker, move |app| app.engine.post(&text, &id).map(|_| Value::Null).map_err(|e| e.code().into()))
+    call(&worker, move |app| app.engine.post_here(&text, &id).map(|_| Value::Null).map_err(|e| e.code().into()))
+}
+
+/// Yes or No on a pool card of a chat (this computer only).
+#[tauri::command]
+async fn pool_card(worker: State<'_, Worker>, chat: String, card: String, accept: bool) -> Reply {
+    call(&worker, move |app| app.engine.pool_decide(&chat, &card, accept).map(|_| Value::Null))
+}
+
+/// Opens the wallet page to connect the person's NEAR wallet (Meteor and the others of NEAR Wallet Selector).
+#[tauri::command]
+async fn wallet_connect(worker: State<'_, Worker>) -> Reply {
+    call(&worker, |app| app.open_wallet_connect().map(Value::String))
+}
+
+/// Forgets the connected wallet's account.
+#[tauri::command]
+async fn wallet_forget(worker: State<'_, Worker>) -> Reply {
+    call(&worker, |app| app.forget_wallet().map(|_| Value::Null))
 }
 
 #[tauri::command]
@@ -85,7 +105,7 @@ async fn research_action_do(worker: State<'_, Worker>, chat: String, digest: Str
 /// the phone. Answered on the pool's own thread: a read through Tor does not hold the window or the phone.
 #[tauri::command]
 async fn pool(worker: State<'_, Worker>, request: Value) -> Reply {
-    if !matches!(request["cmd"].as_str(), Some("pool_portfolio" | "pool_prepare" | "pool_execute" | "pool_recover" | "pool_privacy")) {
+    if !matches!(request["cmd"].as_str(), Some("pool_portfolio" | "pool_prepare" | "pool_execute" | "pool_recover" | "pool_privacy" | "pool_info")) {
         return Err("unknown pool command".into());
     }
     let sender = worker.call(|app| app.engine.pool_sender()).ok_or("ONA has stopped")?;
@@ -172,7 +192,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             state, chat, create_chat, post_message, delete_chat, confirm, research_action_prepare, research_action_do,
-            confirm_code, forget_phone, set_mode, pool, wallet_open
+            confirm_code, forget_phone, set_mode, pool, wallet_open, pool_card, wallet_connect, wallet_forget
         ])
         .build(tauri::generate_context!())
         .expect("ONA could not start");

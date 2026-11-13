@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use crate::pairing::ProtocolError;
+use crate::pool_chat::{self, Intent, VaultRef, near_text};
 use crate::protocol::{self, parse_payment_screen};
 
 /// Something that runs ona-core commands (`Core::dispatch`).
@@ -260,6 +261,10 @@ enum Content {
     Answer(Value),
     /// A suggested action of the research run `run` (its number in the chat): ona-core's view of it.
     Action { run: u64, action: Value, done: bool },
+    /// A pool request's card (`pool_chat`): what it would do, answered on this computer only. `state`: `pending`,
+    /// `accepted`, `rejected`, `failed`, or `info` for a read-only card (the portfolio). Not a confirmation of the
+    /// phone protocol: the phone sees an item kind it does not know, and cannot answer it.
+    Pool { card: String, view: Value, state: &'static str },
 }
 
 struct Item {
@@ -309,6 +314,69 @@ enum Kind {
     Mission,
 }
 
+/// Where a pool request of a chat is (`pool_chat`, docs/desktop/tauri.md "Pool requests in the chat").
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PoolStage {
+    /// `pool_info`: the vaults (kind, target), the cash tiers and cap, the recommended deposits.
+    Info,
+    /// `pool_privacy` with the amount: how many notes the entry would blend in with.
+    Privacy,
+    /// `pool_prepare`, to show its summary on the card (and refuse at once what ona-core refuses).
+    CardPrepare,
+    /// The card waits for Yes or No.
+    Card,
+    /// After Yes: `pool_prepare` again, for a fresh 5 minutes.
+    Prepare,
+    /// The deposit is in the person's wallet, on the wallet page in the browser.
+    Wallet,
+    /// The cash issue was queued by the agent: `pool_recover` from time to time until the cash notes are signed.
+    Recover,
+    EnterPrepare,
+    EnterExecute,
+    /// A cash payout to the connected account, after Yes.
+    Execute,
+    Portfolio,
+    PortfolioPrivacy,
+    Done,
+}
+
+/// How many `pool_recover` a queued cash issue gets before the chat hands over to the Pool screen, and how many ticks
+/// (1.5 s each) between two: about four minutes in all.
+const RECOVER_TRIES: u32 = 40;
+const RECOVER_PAUSE: u32 = 3;
+/// The deposit's preparation lives 5 minutes (ona-core); a little more before the chat says the wallet step is over.
+const WALLET_WAIT_SECS: u64 = 330;
+
+struct PoolFlow {
+    card: String,
+    intent: Intent,
+    stage: PoolStage,
+    /// The connected wallet's account when the request was read: the depositing account, and the only payout account.
+    account: Option<String>,
+    amount: u128,
+    vault: Option<u32>,
+    mode: String,
+    info: Value,
+    privacy: Value,
+    portfolio: Value,
+    prepared_id: Option<String>,
+    pause: u32,
+    recover_left: u32,
+    wallet_since: u64,
+    /// The first `pool_execute` of the deposit ran (the wallet page reported the deposit sent).
+    deposit_seen: bool,
+}
+
+impl PoolFlow {
+    /// Stages the engine's tick moves on (the card waits for the person; the wallet stage only watches the clock).
+    fn ticking(&self) -> bool {
+        !matches!(self.stage, PoolStage::Card | PoolStage::Done)
+    }
+}
+
+/// A deposit the worker opens on the wallet page: (chat, card, `pool_prepare` reply).
+pub type WalletRequest = (String, String, Value);
+
 struct Run {
     core: CoreThread,
     /// The run's number in its chat: an action item belongs to one run.
@@ -334,6 +402,8 @@ pub struct Chat {
     items: Vec<Item>,
     decisions: Vec<(String, &'static str)>,
     run: Option<Run>,
+    /// The pool request of this chat, if one was typed here.
+    pool: Option<PoolFlow>,
     kind: Kind,
     runs: u64,
     item_count: u32,
@@ -343,6 +413,9 @@ pub struct Chat {
 
 impl Chat {
     pub fn status(&self) -> &'static str {
+        if let Some(flow) = self.pool.as_ref().filter(|f| f.stage != PoolStage::Done) {
+            return if matches!(flow.stage, PoolStage::Card | PoolStage::Wallet) { "waiting" } else { "working" };
+        }
         match self.run.as_ref().map(|r| &r.phase) {
             Some(Phase::Waiting(_)) => "waiting",
             Some(Phase::Running) => "working",
@@ -365,6 +438,16 @@ impl Chat {
     }
 
     fn working(&self) -> Option<(String, &'static str)> {
+        if let Some(flow) = self.pool.as_ref().filter(|f| f.ticking() && f.stage != PoolStage::Wallet) {
+            return Some(("pool".into(), match flow.stage {
+                PoolStage::Prepare | PoolStage::CardPrepare => "Preparing with the pool…",
+                PoolStage::Recover => "Waiting for the pool agent's cash notes…",
+                PoolStage::EnterPrepare | PoolStage::EnterExecute => "Entering the vault…",
+                PoolStage::Execute => "Sending the payout to the pool agent…",
+                PoolStage::Portfolio | PoolStage::PortfolioPrivacy => "Reading your portfolio…",
+                _ => "Reading the pool…",
+            }));
+        }
         let run = self.run.as_ref()?;
         if !matches!(run.phase, Phase::Running) {
             return None;
@@ -416,6 +499,11 @@ pub struct ChatEngine {
     /// The NEAR accounts the person allows a research to pay (`payees.txt` in the data folder). Empty: only the
     /// demo directory's accounts can be paid.
     pub payees: Vec<String>,
+    /// The account of the NEAR wallet the person connected on the wallet page: the depositing account of a pool
+    /// request typed in the chat, and the only account its payouts go to. ONA never holds this wallet's keys.
+    pub wallet_account: Option<String>,
+    /// Deposits of chat pool requests, for the worker to open on the wallet page.
+    wallet_requests: Vec<WalletRequest>,
 }
 
 impl ChatEngine {
@@ -423,7 +511,7 @@ impl ChatEngine {
         let make_core: CoreFactory = Arc::new(make_core);
         Self {
             chats: Vec::new(), mode: "mock".into(), make_pool_core: make_core.clone(), make_core, count: 0, pool: None,
-            payees: Vec::new(),
+            payees: Vec::new(), wallet_account: None, wallet_requests: Vec::new(),
         }
     }
 
@@ -465,34 +553,49 @@ impl ChatEngine {
 
     // Requests (from the phone or this computer)
 
-    /// A new conversation: a free research on `text`.
+    /// A new conversation from the phone: a free research on `text`.
     pub fn create(&mut self, text: &str) -> Result<String, ProtocolError> {
-        self.open_chat(text, Kind::Research)
+        self.open_chat(text, Kind::Research, false)
+    }
+
+    /// A new conversation typed in this window: a pool request (`pool_chat`) if it reads as one, else a free research.
+    pub fn create_here(&mut self, text: &str) -> Result<String, ProtocolError> {
+        self.open_chat(text, Kind::Research, true)
     }
 
     /// A new conversation running the lawyer mission (kept for its tests).
     #[cfg(test)]
     pub fn create_mission(&mut self, text: &str) -> Result<String, ProtocolError> {
-        self.open_chat(text, Kind::Mission)
+        self.open_chat(text, Kind::Mission, false)
     }
 
-    fn open_chat(&mut self, text: &str, kind: Kind) -> Result<String, ProtocolError> {
+    fn open_chat(&mut self, text: &str, kind: Kind, here: bool) -> Result<String, ProtocolError> {
         let text = clean(text).ok_or(ProtocolError::BadText)?;
         self.count += 1;
         // Random, never reused: an old signed request cannot target a new chat that took the same id.
         let id = format!("chat-{}", protocol::random_hex16());
         self.chats.push(Chat {
             id: id.clone(), title: title(&text), updated_at: now(), items: Vec::new(), decisions: Vec::new(),
-            run: None, kind, runs: 0, item_count: 0, order: self.count,
+            run: None, pool: None, kind, runs: 0, item_count: 0, order: self.count,
         });
-        self.say(&text, &id);
+        self.say(&text, &id, here);
         Ok(id)
     }
 
+    /// A message from the phone: always a free research (pool operations are never asked or confirmed there).
     pub fn post(&mut self, text: &str, chat_id: &str) -> Result<(), ProtocolError> {
+        self.post_from(text, chat_id, false)
+    }
+
+    /// A message typed in this window: a pool request if it reads as one, else a free research.
+    pub fn post_here(&mut self, text: &str, chat_id: &str) -> Result<(), ProtocolError> {
+        self.post_from(text, chat_id, true)
+    }
+
+    fn post_from(&mut self, text: &str, chat_id: &str, here: bool) -> Result<(), ProtocolError> {
         let text = clean(text).ok_or(ProtocolError::BadText)?;
         self.chat_mut(chat_id).ok_or(ProtocolError::UnknownChat)?;
-        self.say(&text, chat_id);
+        self.say(&text, chat_id, here);
         Ok(())
     }
 
@@ -591,15 +694,39 @@ impl ChatEngine {
                 }
             }
         }
+        self.tick_pool(None);
     }
 
-    fn say(&mut self, text: &str, chat_id: &str) {
+    /// Moves the chats' pool requests on by one pool command each (all of them, or `only` this chat).
+    fn tick_pool(&mut self, only: Option<&str>) {
+        let Self { chats, pool, make_pool_core, wallet_requests, .. } = self;
+        let ticking = |c: &Chat| only.is_none_or(|id| c.id == id) && c.pool.as_ref().is_some_and(PoolFlow::ticking);
+        if !chats.iter().any(ticking) {
+            return;
+        }
+        let core = pool.get_or_insert_with(|| CoreThread::spawn(make_pool_core));
+        for chat in chats.iter_mut().filter(|c| ticking(c)) {
+            step_pool(chat, core, wallet_requests);
+        }
+    }
+
+    fn say(&mut self, text: &str, chat_id: &str, here: bool) {
         let make_core = &self.make_core;
         let payees = self.payees.clone();
+        let account = self.wallet_account.clone();
         let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else { return };
         chat.add(Content::User(text.to_owned()));
-        if chat.run.as_ref().is_some_and(|r| matches!(r.phase, Phase::Running | Phase::Waiting(_))) {
+        if chat.run.as_ref().is_some_and(|r| matches!(r.phase, Phase::Running | Phase::Waiting(_)))
+            || chat.pool.as_ref().is_some_and(|f| f.stage != PoolStage::Done)
+        {
             chat.add(Content::Agent(BUSY_MESSAGE.into()));
+            return;
+        }
+        // Typed here and read as a pool request: no model, no research (pool_chat).
+        if let Some(intent) = here.then(|| pool_chat::parse(text)).flatten().filter(|_| chat.kind == Kind::Research) {
+            if start_pool(chat, intent, account) {
+                self.tick_pool(Some(chat_id));
+            }
             return;
         }
         // A new core for every mission: the previous one (closed, or stopped by an error or a panic) is dropped.
@@ -728,6 +855,95 @@ impl ChatEngine {
         Ok(json!({"mode": mode, "portfolio": reply}))
     }
 
+    // Pool requests typed in the chat (pool_chat): decided on this computer only, never by the phone.
+
+    /// Yes or No on a pool card. Yes prepares the operation again (a preparation lives 5 minutes): a deposit then goes
+    /// to the person's wallet on the wallet page, a payout to the pool agent. Refused if the connected wallet changed
+    /// since the card was made.
+    pub fn pool_decide(&mut self, chat_id: &str, card: &str, accept: bool) -> Result<(), String> {
+        let account = self.wallet_account.clone();
+        let chat = self.chat_mut(chat_id).ok_or_else(|| ProtocolError::UnknownChat.code().to_owned())?;
+        let flow = chat.pool.as_mut().filter(|f| f.card == card && f.stage == PoolStage::Card)
+            .ok_or("this pool request is no longer waiting for an answer")?;
+        if !accept {
+            flow.stage = PoolStage::Done;
+            set_card_state(chat, card, "rejected");
+            chat.add(Content::Agent("Cancelled: nothing was sent and nothing was signed.".into()));
+            return Ok(());
+        }
+        if flow.account.is_some() && flow.account != account {
+            return Err("the connected wallet changed since this card was made: ask again".into());
+        }
+        flow.stage = PoolStage::Prepare;
+        set_card_state(chat, card, "accepted");
+        self.tick_pool(Some(chat_id));
+        Ok(())
+    }
+
+    /// The deposits of chat pool requests to open on the wallet page (the worker does, then calls `pool_wallet_opened`).
+    pub fn take_wallet_requests(&mut self) -> Vec<WalletRequest> {
+        std::mem::take(&mut self.wallet_requests)
+    }
+
+    /// The wallet page was opened (its address), or could not be.
+    pub fn pool_wallet_opened(&mut self, chat_id: &str, card: &str, opened: Result<String, String>) {
+        let Some(chat) = self.chat_mut(chat_id) else { return };
+        let Some(flow) = chat.pool.as_mut().filter(|f| f.card == card && f.stage == PoolStage::Wallet) else { return };
+        let account = flow.account.clone().unwrap_or_default();
+        match opened {
+            Ok(url) => chat.add(Content::Activity { tool: "pool".into(), text: format!(
+                "Your wallet page is open in the browser. Connect your wallet as {account} if it asks, confirm the \
+                 deposit transaction, then sign the pool agent's message. If no page opened: {url}") }),
+            Err(error) => pool_fail(chat, &format!("the wallet page could not be opened: {error}")),
+        }
+    }
+
+    /// A step of the wallet page for a chat's deposit: `second` false for the first `pool_execute` (after the wallet
+    /// sent the deposit), true for the second (after it signed the agent's message); `reply` is ona-core's reply.
+    pub fn pool_wallet_step(&mut self, chat_id: &str, card: &str, second: bool, reply: &Value) {
+        let Some(chat) = self.chat_mut(chat_id) else { return };
+        let Some(flow) = chat.pool.as_mut().filter(|f| f.card == card && f.stage == PoolStage::Wallet) else { return };
+        let label = mock_label(reply);
+        let pool = |text: String| Content::Activity { tool: "pool".into(), text };
+        if !second {
+            if !ok(reply) {
+                return pool_fail(chat, &format!("the first deposit step was refused: {}", error_of(reply)));
+            }
+            flow.deposit_seen = true;
+            chat.add(pool(format!(
+                "Deposit reported sent by your wallet page (the app does not read the transaction itself). Your cash \
+                 notes are made and saved on this computer{label}. Next: sign the pool agent's message in your wallet.")));
+            return;
+        }
+        let queued = !ok(reply) && error_of(reply).contains("outcome unknown");
+        if !ok(reply) && !queued {
+            return pool_fail(chat, &format!("the pool agent refused the cash issue: {}", error_of(reply)));
+        }
+        let into_vault = flow.vault.is_some();
+        let amount = near_text(flow.amount);
+        flow.stage = match (queued, into_vault) {
+            (true, true) => PoolStage::Recover,
+            (false, true) => PoolStage::EnterPrepare,
+            (_, false) => PoolStage::Done,
+        };
+        flow.recover_left = RECOVER_TRIES;
+        flow.pause = 0;
+        if queued {
+            chat.add(pool("Cash issue sent to the pool agent; its answer did not come back yet.".into()));
+            if !into_vault {
+                chat.add(Content::Agent("The cash notes will appear once the agent answers: use “Recover pending \
+                                         operations” in the Pool screen.".into()));
+            }
+            return;
+        }
+        let issued = reply["steps"].as_array().and_then(|s| s.iter().find_map(|s| s["issued_cash"].as_u64()));
+        let notes = issued.map(|n| plural(n as usize, "cash note")).unwrap_or_else(|| "the cash notes".into());
+        chat.add(pool(format!("Cash issued: the pool agent signed {notes} worth {amount}{label}.")));
+        if !into_vault {
+            chat.add(Content::Agent(format!("Done: {amount} is now cash notes in your pool wallet.")));
+        }
+    }
+
     pub fn list_json(&self) -> Value {
         let chats: Vec<Value> = self.sorted().iter().map(|c| json!({
             "id": c.id, "title": c.title, "updated_at": c.updated_at, "preview": c.preview(), "status": c.status(),
@@ -752,6 +968,7 @@ impl ChatEngine {
                 }
                 Content::Action { action, done, .. } =>
                     json!({"kind": "action", "action": action, "state": if *done { "done" } else { "suggested" }}),
+                Content::Pool { view, state, .. } => json!({"kind": "pool", "card": view, "state": state}),
             };
             if let (Some(view), Some(fields)) = (view.as_object_mut(), fields.as_object()) {
                 view.extend(fields.clone());
@@ -866,6 +1083,353 @@ fn advance(chat: &mut Chat) {
     };
     run.cursor += 1;
     chat.add(content);
+}
+
+const CONNECT_FIRST: &str = "Connect your NEAR wallet first: click “Connect wallet” in the sidebar, choose your wallet \
+    (Meteor, for example) on the page that opens in your browser, then ask again. ONA never holds your wallet's keys.";
+
+/// Starts a pool request read by `pool_chat`. False when it cannot start (no wallet connected for a deposit or a
+/// payout): the chat says why.
+fn start_pool(chat: &mut Chat, intent: Intent, account: Option<String>) -> bool {
+    let (amount, what) = match &intent {
+        Intent::Deposit { amount, vault } => (*amount, format!("deposit {} from your wallet{}", near_text(*amount), match vault {
+            Some(VaultRef::Index(i)) => format!(", then put it into vault {i}"),
+            Some(VaultRef::Kind(kind)) => format!(", then put it into the {kind} vault"),
+            Some(VaultRef::Any) => ", then put it into a vault".into(),
+            None => " as cash notes".into(),
+        })),
+        Intent::Withdraw { amount } => (*amount, format!("pay {} of your pool cash out to your account", near_text(*amount))),
+        Intent::Portfolio => (0, "show your pool portfolio".into()),
+    };
+    if intent != Intent::Portfolio && account.is_none() {
+        chat.add(Content::Agent(CONNECT_FIRST.into()));
+        return false;
+    }
+    chat.add(Content::Activity { tool: "pool".into(),
+                                 text: format!("Pool request read on this computer, without the model: {what}.") });
+    chat.pool = Some(PoolFlow {
+        card: format!("p-{}", protocol::random_hex16()), intent, stage: PoolStage::Info, account, amount, vault: None,
+        mode: "mock".into(), info: Value::Null, privacy: Value::Null, portfolio: Value::Null, prepared_id: None, pause: 0,
+        recover_left: 0, wallet_since: 0, deposit_seen: false,
+    });
+    true
+}
+
+/// Moves a chat's pool request on by one pool command, when the pool's core has answered the previous one.
+fn step_pool(chat: &mut Chat, core: &mut CoreThread, wallet: &mut Vec<WalletRequest>) {
+    let Some(flow) = chat.pool.as_mut() else { return };
+    let pool = |text: String| Content::Activity { tool: "pool".into(), text };
+    match flow.stage {
+        PoolStage::Info => {
+            let Some(reply) = core.poll(json!({"cmd": "pool_info"})) else { return };
+            if !ok(&reply) {
+                return pool_fail(chat, &format!("the pool could not be read: {}", error_of(&reply)));
+            }
+            flow.mode = reply["mode"].as_str().unwrap_or("mock").to_owned();
+            if let Intent::Deposit { vault: Some(wanted), .. } = &flow.intent {
+                match resolve_vault(&reply, wanted) {
+                    Ok(id) => flow.vault = Some(id),
+                    Err(error) => return pool_fail(chat, &error),
+                }
+            }
+            flow.stage = match flow.intent {
+                Intent::Deposit { .. } => PoolStage::Privacy,
+                Intent::Withdraw { .. } => PoolStage::CardPrepare,
+                Intent::Portfolio => PoolStage::Portfolio,
+            };
+            flow.info = reply;
+        }
+        PoolStage::Privacy => {
+            let Some(reply) = core.poll(json!({"cmd": "pool_privacy", "amount": flow.amount.to_string()})) else { return };
+            // Not needed to go on: the card then says the figure could not be read.
+            flow.privacy = if ok(&reply) { reply } else { Value::Null };
+            flow.stage = PoolStage::CardPrepare;
+        }
+        PoolStage::CardPrepare | PoolStage::Prepare => {
+            let Some(reply) = core.poll(prepare_request(flow)) else { return };
+            if !ok(&reply) {
+                return pool_fail(chat, &format!("ona-core refused to prepare it: {}", error_of(&reply)));
+            }
+            if flow.stage == PoolStage::CardPrepare {
+                let (message, view) = card(flow, &reply["summary"]);
+                flow.stage = PoolStage::Card;
+                let card = flow.card.clone();
+                chat.add(Content::Agent(message));
+                chat.add(Content::Pool { card, view, state: "pending" });
+                return;
+            }
+            if matches!(flow.intent, Intent::Deposit { .. }) {
+                flow.stage = PoolStage::Wallet;
+                flow.wallet_since = now();
+                wallet.push((chat.id.clone(), flow.card.clone(), reply));
+            } else {
+                flow.prepared_id = reply["prepared_id"].as_str().map(String::from);
+                flow.stage = PoolStage::Execute;
+            }
+        }
+        PoolStage::Card | PoolStage::Done => {}
+        PoolStage::Wallet => {
+            if now() < flow.wallet_since.saturating_add(WALLET_WAIT_SECS) {
+                return;
+            }
+            let error = if flow.deposit_seen {
+                "the pool agent's message was not signed within the 5 minutes of the preparation, so the app forgot \
+                 these cash notes. The deposit stays in the pool contract: your account can ask for it back \
+                 (request_refund, then refund_deposit after the contract's escape delay)"
+            } else {
+                "the deposit was not sent from your wallet within the 5 minutes of its preparation: nothing was taken. \
+                 Ask again to start over"
+            };
+            pool_fail(chat, error);
+        }
+        PoolStage::Recover => {
+            if flow.pause > 0 {
+                flow.pause -= 1;
+                return;
+            }
+            let Some(reply) = core.poll(json!({"cmd": "pool_recover"})) else { return };
+            let cash_waiting = !ok(&reply)
+                || reply["waiting"].as_array().is_some_and(|w| w.iter().any(|n| n["vault"].is_null()));
+            if !cash_waiting {
+                flow.stage = PoolStage::EnterPrepare;
+                chat.add(pool("Cash notes received from the pool agent (Recover).".into()));
+                return;
+            }
+            if flow.recover_left == 0 {
+                return pool_fail(chat, "the pool agent has not signed the cash notes yet. Once “Recover pending \
+                                        operations” in the Pool screen brings them, put them into the vault from there");
+            }
+            flow.recover_left -= 1;
+            flow.pause = RECOVER_PAUSE;
+        }
+        PoolStage::EnterPrepare => {
+            let Some(vault) = flow.vault else {
+                flow.stage = PoolStage::Done;
+                return;
+            };
+            let request = json!({"cmd": "pool_prepare", "op": "enter", "vault": vault, "amount": flow.amount.to_string()});
+            let Some(reply) = core.poll(request) else { return };
+            if !ok(&reply) {
+                return pool_fail(chat, &format!("your cash notes are in your pool wallet, but the entry into vault {vault} \
+                    could not be prepared ({}): put them in from the Pool screen", error_of(&reply)));
+            }
+            let s = &reply["summary"];
+            let text = format!("Entry into vault {vault} prepared: shares worth {}, left in the pool's cash {} (lost), storage fee {}.",
+                               yocto_text(&s["shares_value"]), yocto_text(&s["left_in_cash"]), yocto_text(&s["fees"]["storage"]));
+            flow.prepared_id = reply["prepared_id"].as_str().map(String::from);
+            flow.stage = PoolStage::EnterExecute;
+            chat.add(pool(text));
+        }
+        PoolStage::EnterExecute | PoolStage::Execute => {
+            let Some(id) = flow.prepared_id.clone() else { return pool_fail(chat, "nothing prepared") };
+            let Some(reply) = core.poll(json!({"cmd": "pool_execute", "prepared_id": id})) else { return };
+            let label = mock_label(&reply);
+            let queued = !ok(&reply) && error_of(&reply).contains("outcome unknown");
+            let amount = near_text(flow.amount);
+            let account = flow.account.clone().unwrap_or_default();
+            let entering = flow.stage == PoolStage::EnterExecute;
+            let vault = flow.vault.unwrap_or_default();
+            if !ok(&reply) && !queued {
+                let error = error_of(&reply);
+                return pool_fail(chat, &if entering {
+                    format!("the entry into vault {vault} was refused ({error}); your cash notes are still in your pool wallet")
+                } else {
+                    format!("the payout was refused ({error}); your cash notes are still in your pool wallet")
+                });
+            }
+            flow.stage = PoolStage::Done;
+            let (activity, message) = match (entering, queued, reply["complete"] == true) {
+                (true, true, _) => (
+                    format!("Entry into vault {vault} queued by the pool agent: it sends entries in batches, after a random delay{label}."),
+                    "Your share notes will arrive with “Recover pending operations” in the Pool screen (minutes to hours).".to_owned()),
+                (true, false, true) => (format!("Entered vault {vault}: the share notes are in your pool wallet{label}."),
+                                        format!("Done: {amount} deposited and placed into vault {vault}.")),
+                (false, true, _) => (
+                    format!("Payout queued by the pool agent: it pays in batches, after a random delay{label}."),
+                    format!("{account} will receive the payout once the agent sends its batch; “Recover pending operations” \
+                             in the Pool screen then shows the notes as spent.")),
+                (false, false, true) => (format!("Paid out to {account}{label}."), format!("Done: {amount} of pool cash paid out.")),
+                (_, false, false) => (format!("Partly done: {}{label}.", error_of(&reply)),
+                                      "See the Pool screen for what is left.".to_owned()),
+            };
+            chat.add(pool(activity));
+            chat.add(Content::Agent(message));
+        }
+        PoolStage::Portfolio => {
+            let Some(reply) = core.poll(json!({"cmd": "pool_portfolio"})) else { return };
+            if !ok(&reply) {
+                return pool_fail(chat, &format!("the portfolio could not be read: {}", error_of(&reply)));
+            }
+            flow.portfolio = reply;
+            flow.stage = PoolStage::PortfolioPrivacy;
+        }
+        PoolStage::PortfolioPrivacy => {
+            let Some(reply) = core.poll(json!({"cmd": "pool_privacy"})) else { return };
+            flow.privacy = if ok(&reply) { reply } else { Value::Null };
+            flow.stage = PoolStage::Done;
+            let mut portfolio = without_ok(flow.portfolio.clone());
+            if let Some(object) = portfolio.as_object_mut() {
+                object.remove("mode");
+            }
+            let view = json!({"id": flow.card, "op": "portfolio", "mode": flow.mode, "portfolio": portfolio,
+                              "privacy": flow.privacy, "vaults_info": flow.info["vaults"], "recommended": flow.info["recommended"]});
+            let card = flow.card.clone();
+            chat.add(Content::Agent("Here is your pool portfolio: the notes on this computer, valued at the pool \
+                                     contract's public prices.".into()));
+            chat.add(Content::Pool { card, view, state: "info" });
+        }
+    }
+}
+
+/// The `pool_prepare` of a deposit or a payout: the account is the connected wallet's, the amount the person's words.
+fn prepare_request(flow: &PoolFlow) -> Value {
+    let account = flow.account.clone().unwrap_or_default();
+    match flow.intent {
+        Intent::Withdraw { .. } =>
+            json!({"cmd": "pool_prepare", "op": "exit_cash", "to": account, "amount": flow.amount.to_string()}),
+        _ => json!({"cmd": "pool_prepare", "op": "deposit", "account": account, "amount": flow.amount.to_string()}),
+    }
+}
+
+/// The card's message and view, from `pool_info`, `pool_privacy` and the summary of `pool_prepare`.
+fn card(flow: &PoolFlow, summary: &Value) -> (String, Value) {
+    let info = &flow.info;
+    let cap = info["cash"]["hourly_cap"].as_str().and_then(|c| c.parse::<u128>().ok());
+    let account = flow.account.clone().unwrap_or_default();
+    let mut view = json!({
+        "id": flow.card, "amount": flow.amount.to_string(), "account": account, "network": summary["network"],
+        "contract": summary["contract"], "mode": flow.mode, "hourly_cap": cap.map(|c| c.to_string()),
+        "over_cap": cap.is_some_and(|c| flow.amount > c), "fees": summary["fees"],
+    });
+    if matches!(flow.intent, Intent::Withdraw { .. }) {
+        view["op"] = json!("withdraw");
+        view["received"] = summary["received"].clone();
+        view["exit_limit"] = summary["exit_limit"].clone();
+        view["steps"] = json!([
+            format!("ONA signs the payout of your cash notes with their own keys and hands it to the pool agent, which pays \
+                     {account} in a batch, after a random delay."),
+            "The payout is public on the chain and names your account.",
+        ]);
+        return ("Here is the payout I would ask for. Nothing is sent before you click Yes.".into(), view);
+    }
+    let vault = flow.vault.and_then(|v| info["vaults"].get(v as usize)).cloned();
+    let blends = match flow.vault {
+        Some(v) => flow.privacy["vaults"].get(v as usize).and_then(|p| p["if_entered"].as_u64()),
+        None => cash_set(info, &summary["cash_notes"]),
+    };
+    let contract = summary["contract"].as_str().unwrap_or("the pool contract");
+    let mut steps = vec![
+        format!("Your wallet page opens in your browser; connect your wallet as {account} if it asks."),
+        format!("Your wallet asks you to confirm the deposit transaction to {contract}: {} (the amount plus a refundable \
+                 storage margin).", yocto_text(&summary["wallet_call"]["attached"])),
+        "Your wallet asks you to sign a message for the pool agent (no transaction, no fee), so that it issues your cash \
+         notes."
+            .to_owned(),
+    ];
+    if let Some(v) = &vault {
+        steps.push(format!("ONA then puts the cash notes into {}. The pool agent sends entries in batches, after a \
+                            random delay.", describe_vault(v)));
+    }
+    view["op"] = json!("deposit");
+    view["vault"] = vault.map(|v| json!({"vault": v["vault"], "adapter": v["adapter"], "target": v["target"],
+                                         "share_price": v["share_price"]})).unwrap_or(Value::Null);
+    view["blends_with"] = json!(blends);
+    view["without_ona"] = json!(1);
+    view["recommended"] = if summary["recommended"].is_array() { summary["recommended"].clone() } else { info["recommended"].clone() };
+    view["is_recommended"] = json!(summary["warning"].is_null());
+    view["warning"] = summary["warning"].clone();
+    view["cash_notes"] = summary["cash_notes"].clone();
+    view["attached"] = summary["wallet_call"]["attached"].clone();
+    view["steps"] = json!(steps);
+    ("Here is what I would do. Nothing is sent before you click Yes, and your wallet asks you again before anything \
+      leaves it."
+        .into(), view)
+}
+
+/// The smallest set the new cash notes would join: notes in circulation of their tier, plus the new one (an upper
+/// bound, as `pool_privacy`).
+fn cash_set(info: &Value, notes: &Value) -> Option<u64> {
+    notes.as_array()?.iter().filter_map(|n| {
+        let tier = usize::try_from(n["tier"].as_u64()?).ok()?;
+        info["cash"]["tiers"].get(tier)?["live"].as_u64().map(|live| live.saturating_add(1))
+    }).min()
+}
+
+fn describe_vault(v: &Value) -> String {
+    let id = v["vault"].as_u64().unwrap_or_default();
+    match (v["adapter"].as_str(), v["target"].as_str()) {
+        (Some(kind), Some(target)) => format!("vault {id} ({kind}, placed with {target})"),
+        (Some(kind), None) => format!("vault {id} ({kind})"),
+        _ => format!("vault {id}"),
+    }
+}
+
+/// The vault the person named, among those `pool_info` lists: by number, by kind, or the only open one.
+fn resolve_vault(info: &Value, wanted: &VaultRef) -> Result<u32, String> {
+    let vaults = info["vaults"].as_array().cloned().unwrap_or_default();
+    let listed = || if vaults.is_empty() {
+        "the pool lists no vault".to_owned()
+    } else {
+        format!("the pool lists {}", vaults.iter().map(describe_vault).collect::<Vec<_>>().join(", "))
+    };
+    let open = || vaults.iter().filter(|v| v["frozen"] != true);
+    let chosen: Vec<&Value> = match wanted {
+        VaultRef::Index(i) => {
+            let Some(v) = vaults.get(*i as usize) else { return Err(format!("there is no vault {i}: {}", listed())) };
+            if v["frozen"] == true {
+                return Err(format!("vault {i} is frozen: it takes no new money"));
+            }
+            vec![v]
+        }
+        VaultRef::Kind(kind) => open().filter(|v| v["adapter"].as_str() == Some(kind.as_str())).collect(),
+        VaultRef::Any => open().collect(),
+    };
+    match chosen.as_slice() {
+        [one] => one["vault"].as_u64().and_then(|v| u32::try_from(v).ok()).ok_or_else(|| "a vault without its number".into()),
+        [] => Err(match wanted {
+            VaultRef::Kind(kind) => format!("there is no open {kind} vault: {}", listed()),
+            _ => format!("there is no open vault: {}", listed()),
+        }),
+        [first, ..] => Err(format!("which vault? {}. Name it by its number, for example “vault {}”", listed(),
+                                   first["vault"].as_u64().unwrap_or_default())),
+    }
+}
+
+/// A yoctoNEAR string as NEAR text, "?" when unreadable.
+fn yocto_text(value: &Value) -> String {
+    value.as_str().and_then(|v| v.parse::<u128>().ok()).map(near_text).unwrap_or_else(|| "?".into())
+}
+
+/// The honesty label of a figure from the fake pool (ona-core's `mode: mock`).
+fn mock_label(reply: &Value) -> &'static str {
+    if reply["mode"] == "mock" { " (simulation: fake pool)" } else { "" }
+}
+
+fn set_card_state(chat: &mut Chat, card: &str, state: &'static str) {
+    for item in &mut chat.items {
+        if let Content::Pool { card: c, state: s, .. } = &mut item.content {
+            if *c == card {
+                *s = state;
+            }
+        }
+    }
+    chat.updated_at = now();
+}
+
+/// Stops a chat's pool request with the reason; a card still pending or accepted is marked failed.
+fn pool_fail(chat: &mut Chat, error: &str) {
+    let card = chat.pool.as_mut().map(|flow| {
+        flow.stage = PoolStage::Done;
+        flow.card.clone()
+    });
+    if let Some(card) = card {
+        let open = chat.items.iter().any(|i| matches!(&i.content,
+            Content::Pool { card: c, state: "pending" | "accepted", .. } if *c == card));
+        if open {
+            set_card_state(chat, &card, "failed");
+        }
+    }
+    chat.add(Content::Agent(format!("I could not finish this pool request: {error}.")));
 }
 
 fn plural(count: usize, word: &str) -> String {
@@ -1444,6 +2008,274 @@ mod tests {
         run_until_idle(&mut engine, &chat);
         let refused = engine.action_prepare(&chat, 1, "lyon").unwrap_err();
         assert!(refused.contains("not in the list"), "{refused}");
+    }
+
+    // Pool requests typed in the chat (pool_chat), against a fake pool core shaped like ona-core's replies
+    // (docs/desktop/pool-commands.md): testnet tiers 0.1 and 0.5 NEAR, cash hourly cap 2 NEAR, vault 0 a staking pool.
+
+    const N: u128 = pool_chat::NEAR;
+
+    type Log = Arc<std::sync::Mutex<Vec<Value>>>;
+
+    struct ChatPool {
+        log: Log,
+        /// The reply of the second deposit execute is "outcome unknown" (the agent queued the cash issue).
+        queued_issue: bool,
+    }
+
+    impl MissionCore for ChatPool {
+        fn dispatch(&mut self, request: Value) -> Value {
+            self.log.lock().unwrap().push(request.clone());
+            let amount = |r: &Value| r["amount"].as_str().unwrap_or("0").parse::<u128>().unwrap();
+            match request["cmd"].as_str().unwrap_or_default() {
+                "pool_info" => json!({"ok": true, "mode": "real", "network": "testnet", "contract": "pool.testnet",
+                    "cash": {"hourly_cap": (2 * N).to_string(), "tiers": [
+                        {"tier": 0, "note_value": (N / 10).to_string(), "live": 3},
+                        {"tier": 1, "note_value": (N / 2).to_string(), "live": 1}]},
+                    "vaults": [{"vault": 0, "adapter": "staking", "target": "stake.testnet", "frozen": false,
+                                "share_price": "1000000000000000000", "hourly_cap": null, "tiers": []}],
+                    "min_deposit": (N / 10).to_string(), "recommended": [N.to_string(), (2 * N).to_string()]}),
+                "pool_privacy" => json!({"ok": true, "mode": "real", "wallet": {"smallest_set": null, "notes": []},
+                    "vaults": [{"vault": 0, "frozen": false, "if_entered": 4}], "without_ona": 1}),
+                "pool_prepare" => match request["op"].as_str().unwrap_or_default() {
+                    "deposit" => {
+                        let a = amount(&request);
+                        let mut summary = json!({"op": "deposit", "amount": a.to_string(), "account": request["account"],
+                            "network": "testnet", "contract": "pool.testnet", "expires_at": 2_000_000_000_000_000_000u64,
+                            "cash_notes": [{"tier": 1, "count": a / (N / 2), "note_value": (N / 2).to_string()}],
+                            "recommended": [N.to_string(), (2 * N).to_string()],
+                            "fees": {"storage_margin": (N / 100).to_string(), "refundable": "unused margin"},
+                            "wallet_call": {"receiver": "pool.testnet", "method": "deposit", "args": {},
+                                            "attached": (a + N / 100).to_string()}});
+                        if a != N && a != 2 * N {
+                            summary["warning"] = json!("this amount is not one of the recommended amounts");
+                        }
+                        json!({"ok": true, "mode": "real", "prepared_id": "dep-1", "summary": summary})
+                    }
+                    "enter" => json!({"ok": true, "mode": "real", "prepared_id": "enter-1", "summary": {"op": "enter",
+                        "vault": request["vault"], "amount": request["amount"], "shares_value": (99 * N / 100).to_string(),
+                        "left_in_cash": "0", "fees": {"storage": (N / 100).to_string()}}}),
+                    "exit_cash" => json!({"ok": true, "mode": "real", "prepared_id": "pay-1", "summary": {"op": "exit_cash",
+                        "to": request["to"], "amount": request["amount"], "received": (amount(&request) - N / 100).to_string(),
+                        "exit_limit": (3 * N).to_string(), "network": "testnet", "contract": "pool.testnet",
+                        "fees": {"storage": (N / 100).to_string()}}}),
+                    _ => json!({"ok": false, "error": "unknown operation"}),
+                },
+                "pool_execute" => match request["prepared_id"].as_str().unwrap_or_default() {
+                    "enter-1" => json!({"ok": false, "mode": "real", "error": "outcome unknown, run pool_recover later: queued"}),
+                    "pay-1" => json!({"ok": true, "mode": "real", "complete": true, "executed": "exit_cash", "steps": []}),
+                    _ => json!({"ok": false, "error": "unknown, expired or already used prepared_id"}),
+                },
+                "pool_recover" => json!({"ok": true, "mode": "real", "spent": 0, "held_again": 0, "still_spending": 0,
+                                         "signatures_recovered": 2, "awaiting_signature": 0, "waiting": []}),
+                "pool_portfolio" => json!({"ok": true, "mode": "real", "total": N.to_string(), "vault_count": 1,
+                    "cash": {"tiers": [{"tier": 1, "note_value": (N / 2).to_string(), "held": 2, "spending": 0}],
+                             "value": N.to_string(), "spending_value": "0", "awaiting_signature": 0}, "vaults": []}),
+                _ => json!({"ok": false, "error": "not a pool command"}),
+            }
+        }
+    }
+
+    impl ChatPool {
+        /// What the wallet page's two `pool_execute` calls get back (they run on the wallet page's path, not here).
+        fn issue(&self, second: bool) -> Value {
+            match (second, self.queued_issue) {
+                (false, _) => json!({"ok": true, "mode": "real", "complete": false, "executed": "deposit",
+                    "sign_message": {"message": "ONA pool cash issue v1", "recipient": "pool.testnet", "nonce": "AA=="}}),
+                (true, false) => json!({"ok": true, "mode": "real", "complete": true, "executed": "deposit",
+                                        "steps": [{"issued_cash": 2}]}),
+                (true, true) => json!({"ok": false, "mode": "real", "error": "outcome unknown, run pool_recover later"}),
+            }
+        }
+    }
+
+    fn pool_engine(queued_issue: bool) -> (ChatEngine, Log) {
+        let log: Log = Default::default();
+        let shared = log.clone();
+        let mut engine = ChatEngine::new(move || Box::new(ChatPool { log: shared.clone(), queued_issue }));
+        engine.wallet_account = Some("alice.testnet".into());
+        (engine, log)
+    }
+
+    fn ticks_until(engine: &mut ChatEngine, chat: &str, status: &str) {
+        for _ in 0..30 {
+            if engine.chat_json(chat).unwrap()["chat"]["status"] == status {
+                return;
+            }
+            engine.tick();
+        }
+        panic!("never {status}: {:?}", items_of(engine, chat));
+    }
+
+    fn pool_card_of(engine: &ChatEngine, chat: &str) -> Value {
+        items_of(engine, chat).into_iter().rev().find(|i| i["kind"] == "pool").expect("a pool card")
+    }
+
+    fn sent(log: &Log, cmd: &str) -> Vec<Value> {
+        log.lock().unwrap().iter().filter(|r| r["cmd"] == cmd).cloned().collect()
+    }
+
+    fn texts(engine: &ChatEngine, chat: &str) -> Vec<String> {
+        items_of(engine, chat).iter().filter_map(|i| i["text"].as_str().map(String::from)).collect()
+    }
+
+    /// The flow the product owner asked for: the request, the card, Yes, the wallet page, the two wallet steps, the
+    /// entry into the vault, each step reported in the chat.
+    #[test]
+    fn a_deposit_asked_in_the_chat_goes_through_the_wallet_then_into_the_vault() {
+        for queued in [false, true] {
+            let (mut engine, log) = pool_engine(queued);
+            let chat = engine.create_here("place 1 NEAR in vault 0").unwrap();
+            ticks_until(&mut engine, &chat, "waiting");
+            let card = pool_card_of(&engine, &chat);
+            assert_eq!(card["state"], "pending");
+            let c = &card["card"];
+            assert_eq!((c["op"].as_str(), c["amount"].as_str()), (Some("deposit"), Some(N.to_string().as_str())));
+            assert_eq!(c["account"], "alice.testnet");
+            assert_eq!((c["vault"]["vault"].as_u64(), c["vault"]["adapter"].as_str(), c["vault"]["target"].as_str()),
+                       (Some(0), Some("staking"), Some("stake.testnet")));
+            assert_eq!(c["blends_with"], 4, "pool_privacy's if_entered for vault 0");
+            assert_eq!(c["recommended"], json!([N.to_string(), (2 * N).to_string()]));
+            assert_eq!((c["is_recommended"].as_bool(), c["over_cap"].as_bool()), (Some(true), Some(false)));
+            assert_eq!(c["hourly_cap"], (2 * N).to_string());
+            assert_eq!(c["steps"].as_array().unwrap().len(), 4);
+            assert_eq!(sent(&log, "pool_privacy")[0]["amount"], N.to_string());
+            // Nothing leaves before Yes: one preparation (for the card), no wallet page.
+            assert_eq!(sent(&log, "pool_prepare").len(), 1);
+            assert!(engine.take_wallet_requests().is_empty());
+            assert!(engine.pool_decide(&chat, "p-other", true).is_err());
+
+            engine.pool_decide(&chat, c["id"].as_str().unwrap(), true).unwrap();
+            assert!(engine.pool_decide(&chat, c["id"].as_str().unwrap(), true).is_err(), "answered once");
+            ticks_until(&mut engine, &chat, "waiting");
+            let requests = engine.take_wallet_requests();
+            assert_eq!(requests.len(), 1, "{:?}", texts(&engine, &chat));
+            let (chat_id, card_id, prepared) = &requests[0];
+            assert_eq!((chat_id, card_id.as_str()), (&chat, c["id"].as_str().unwrap()));
+            assert_eq!(prepared["summary"]["account"], "alice.testnet", "the connected wallet's account, not the model's");
+            assert!(crate::wallet::Session::from_prepared(prepared).is_ok(), "the wallet page takes this preparation");
+            let prepares = sent(&log, "pool_prepare");
+            assert_eq!(prepares.len(), 2, "prepared again on Yes, for a fresh 5 minutes");
+            assert_eq!((prepares[1]["account"].as_str(), prepares[1]["amount"].as_str()),
+                       (Some("alice.testnet"), Some(N.to_string().as_str())));
+            assert_eq!(pool_card_of(&engine, &chat)["state"], "accepted");
+
+            engine.pool_wallet_opened(&chat, card_id, Ok("http://127.0.0.1:8797/wallet/x/".into()));
+            let fake = ChatPool { log: log.clone(), queued_issue: queued };
+            engine.pool_wallet_step(&chat, card_id, false, &fake.issue(false));
+            engine.pool_wallet_step(&chat, card_id, true, &fake.issue(true));
+            ticks_until(&mut engine, &chat, "idle");
+            let all = texts(&engine, &chat);
+            assert!(all.iter().any(|t| t.starts_with("Your wallet page is open in the browser")), "{all:?}");
+            assert!(all.iter().any(|t| t.starts_with("Deposit reported sent by your wallet page")), "{all:?}");
+            if queued {
+                assert!(all.iter().any(|t| t == "Cash notes received from the pool agent (Recover)."), "{all:?}");
+                assert!(!sent(&log, "pool_recover").is_empty());
+            } else {
+                assert!(all.iter().any(|t| t == "Cash issued: the pool agent signed 2 cash notes worth 1 NEAR."), "{all:?}");
+            }
+            let enter = sent(&log, "pool_prepare").into_iter().find(|r| r["op"] == "enter").expect("entry prepared");
+            assert_eq!((enter["vault"].as_u64(), enter["amount"].as_str()), (Some(0), Some(N.to_string().as_str())));
+            assert!(all.iter().any(|t| t.starts_with("Entry into vault 0 prepared: shares worth 0.99 NEAR")), "{all:?}");
+            assert!(all.iter().any(|t| t.starts_with("Entry into vault 0 queued by the pool agent")), "{all:?}");
+            assert_eq!(sent(&log, "pool_execute").len(), 1, "only the entry: the deposit's executes are the wallet page's");
+        }
+    }
+
+    #[test]
+    fn without_a_connected_wallet_nothing_is_asked_of_the_pool() {
+        let (mut engine, log) = pool_engine(false);
+        engine.wallet_account = None;
+        let chat = engine.create_here("deposit 1 NEAR").unwrap();
+        assert_eq!(texts(&engine, &chat).last().unwrap(), CONNECT_FIRST);
+        assert_eq!(engine.chat_json(&chat).unwrap()["chat"]["status"], "idle");
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn no_on_the_card_sends_nothing() {
+        let (mut engine, log) = pool_engine(false);
+        let chat = engine.create_here("put 2 NEAR in the staking vault").unwrap();
+        ticks_until(&mut engine, &chat, "waiting");
+        let card = pool_card_of(&engine, &chat);
+        assert_eq!(card["card"]["vault"]["vault"], 0, "the only staking vault");
+        engine.pool_decide(&chat, card["card"]["id"].as_str().unwrap(), false).unwrap();
+        assert_eq!(pool_card_of(&engine, &chat)["state"], "rejected");
+        for _ in 0..3 {
+            engine.tick();
+        }
+        assert_eq!(sent(&log, "pool_prepare").len(), 1);
+        assert!(engine.take_wallet_requests().is_empty());
+        assert_eq!(engine.chat_json(&chat).unwrap()["chat"]["status"], "idle");
+    }
+
+    #[test]
+    fn the_card_says_when_the_amount_is_unusual_or_above_the_hourly_cap() {
+        let (mut engine, _) = pool_engine(false);
+        let chat = engine.create_here("deposit 2.5 NEAR").unwrap();
+        ticks_until(&mut engine, &chat, "waiting");
+        let c = pool_card_of(&engine, &chat)["card"].clone();
+        assert_eq!((c["over_cap"].as_bool(), c["is_recommended"].as_bool()), (Some(true), Some(false)));
+        assert!(c["warning"].as_str().unwrap().contains("recommended"));
+        assert!(c["vault"].is_null(), "no vault named: cash only");
+        assert_eq!(c["blends_with"], 2, "0.5-NEAR cash notes: 1 in circulation, plus the new one");
+        assert_eq!(c["steps"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_vault_the_pool_does_not_list_is_refused_with_the_list() {
+        let (mut engine, log) = pool_engine(false);
+        let chat = engine.create_here("place 1 NEAR in vault 7").unwrap();
+        ticks_until(&mut engine, &chat, "idle");
+        let last = texts(&engine, &chat).last().unwrap().clone();
+        assert!(last.contains("there is no vault 7: the pool lists vault 0 (staking, placed with stake.testnet)"), "{last}");
+        assert!(sent(&log, "pool_prepare").is_empty());
+        let chat = engine.create_here("place 1 NEAR in the lending vault").unwrap();
+        ticks_until(&mut engine, &chat, "idle");
+        assert!(texts(&engine, &chat).last().unwrap().contains("there is no open lending vault"));
+    }
+
+    #[test]
+    fn a_payout_goes_to_the_connected_account_only() {
+        let (mut engine, log) = pool_engine(false);
+        let chat = engine.create_here("withdraw 0.5 NEAR").unwrap();
+        ticks_until(&mut engine, &chat, "waiting");
+        let c = pool_card_of(&engine, &chat)["card"].clone();
+        assert_eq!((c["op"].as_str(), c["account"].as_str()), (Some("withdraw"), Some("alice.testnet")));
+        assert_eq!(c["received"], (N / 2 - N / 100).to_string());
+        assert_eq!(c["exit_limit"], (3 * N).to_string());
+        // Another wallet connected meanwhile: the card no longer holds.
+        engine.wallet_account = Some("bob.testnet".into());
+        assert!(engine.pool_decide(&chat, c["id"].as_str().unwrap(), true).unwrap_err().contains("wallet changed"));
+        engine.wallet_account = Some("alice.testnet".into());
+        engine.pool_decide(&chat, c["id"].as_str().unwrap(), true).unwrap();
+        ticks_until(&mut engine, &chat, "idle");
+        assert!(sent(&log, "pool_prepare").iter().all(|r| r["to"] == "alice.testnet"));
+        assert_eq!(sent(&log, "pool_execute")[0]["prepared_id"], "pay-1");
+        assert!(texts(&engine, &chat).iter().any(|t| t == "Paid out to alice.testnet."));
+    }
+
+    #[test]
+    fn the_portfolio_is_a_read_only_card() {
+        let (mut engine, log) = pool_engine(false);
+        engine.wallet_account = None;
+        let chat = engine.create_here("show my portfolio").unwrap();
+        ticks_until(&mut engine, &chat, "idle");
+        let card = pool_card_of(&engine, &chat);
+        assert_eq!((card["state"].as_str(), card["card"]["op"].as_str()), (Some("info"), Some("portfolio")));
+        assert_eq!(card["card"]["portfolio"]["total"], N.to_string());
+        assert_eq!(card["card"]["vaults_info"][0]["adapter"], "staking");
+        assert!(sent(&log, "pool_prepare").is_empty());
+    }
+
+    /// The phone's messages stay free research: a pool request is read only when typed on this computer.
+    #[test]
+    fn a_pool_request_from_the_phone_is_not_read_as_one() {
+        let (mut engine, log) = pool_engine(false);
+        let chat = engine.create("place 1 NEAR in vault 0").unwrap();
+        engine.post("place 1 NEAR in vault 0", &chat).unwrap();
+        assert!(items_of(&engine, &chat).iter().all(|i| i["kind"] != "pool"));
+        assert!(log.lock().unwrap().iter().all(|r| !r["cmd"].as_str().unwrap_or_default().starts_with("pool_")));
     }
 
     /// A slow research step (the model or Tor) does not hold the worker thread.

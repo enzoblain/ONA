@@ -123,6 +123,15 @@ and `live` notes per tier), `vaults` (per vault: `frozen`, `live` per tier, and 
 `amount`, `without_ona` (1). A note's set is the notes still in circulation (`issued - paid`) of its tier at its place. Read
 from the contract's public views only; upper bounds (docs/desktop/privacy.md).
 
+### `pool_info`
+
+Request: `{"cmd":"pool_info"}`. What the pool offers, from the contract's public views (`get_config`, `get_cash`,
+`get_vault`) and this client's settings, nothing about the wallet's notes and no account named. Reply: `network`,
+`contract`, `cash` (`tiers` with `tier`, `note_value`, `live` = notes in circulation; `hourly_cap`), `vaults` (per vault:
+`vault`, `adapter` (its kind, `staking`), `target` (the account it places into), `share_price`, `frozen`, `hourly_cap`,
+`tiers` with `note_shares`, `note_value` at the current price and `live`), `min_deposit`, `recommended`. A field the
+contract does not publish is `null`. Tested against the fake contract only (`crates/ona-core/tests/pool.rs`).
+
 ### `pool_recover`
 
 Request: `{"cmd":"pool_recover"}`. To run after an interruption or an `outcome unknown` error, and at start-up.

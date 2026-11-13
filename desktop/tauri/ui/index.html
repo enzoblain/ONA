@@ -14,6 +14,10 @@
     </header>
     <ul id="chat-list"></ul>
     <p id="no-chats" class="empty" hidden>No conversations</p>
+    <button id="wallet-button" class="phone-button" title="Your NEAR wallet: it signs every deposit; ONA never holds its keys">
+      <span id="wallet-dot" class="dot"></span>
+      <span id="wallet-label">Connect wallet</span>
+    </button>
     <button id="pool-button" class="phone-button">
       <span class="dot ok"></span>
       <span>Pool</span>
@@ -31,6 +35,7 @@
       <div class="logo"></div>
       <h2>What can I do for you?</h2>
       <p>Ask a question: the agent works on this computer. It shows you its searches before running them, answers with its sources, and never contacts or pays anyone without your approval, given on this computer.</p>
+      <p>Pool: “place 1 NEAR in vault 0”, “withdraw 0.5 NEAR”, “show my portfolio”. Read on this computer, without the model; you confirm with Yes, and your wallet confirms again.</p>
     </section>
 
     <section id="conversation" hidden>
@@ -74,7 +79,10 @@
   <dialog id="pool-dialog" class="pool">
     <header>
       <h2>Pool</h2>
-      <button id="close-pool" class="ghost">Close</button>
+      <span>
+        <button id="refresh-pool" class="ghost">Refresh</button>
+        <button id="close-pool" class="ghost">Close</button>
+      </span>
     </header>
     <div id="pool-body"></div>
     <p class="help pool-note">Pool operations are confirmed here, never on the phone.</p>

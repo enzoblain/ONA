@@ -135,7 +135,7 @@ impl PoolChain for Chain {
                 let (issued, paid) = f.counts.get(&(None, t)).copied().unwrap_or_default();
                 json!({"value": f.shown_cash.unwrap_or(v).to_string(), "pk_raw": raw(k), "issued": issued, "paid": paid})
             }).collect::<Vec<_>>(),
-                "liquid": f.cash_liquid.to_string(), "open": f.escape_open})),
+                "liquid": f.cash_liquid.to_string(), "open": f.escape_open, "hourly_cap": (20 * NEAR).to_string()})),
             "get_vault" => {
                 let id = args["vault_id"].as_u64().unwrap() as usize;
                 let v = &f.vaults[id];
@@ -147,7 +147,7 @@ impl PoolChain for Chain {
                     "liquid": v.liquid.to_string(), "placed": "0", "fee_owed": "0", "orphan": v.orphan.to_string(),
                     "total_shares": v.total_shares.to_string(),
                     "share_price": v.shown_price.unwrap_or_else(|| price(v)).to_string(), "frozen": false,
-                    "open": f.escape_open,
+                    "open": f.escape_open, "adapter": "staking", "target": format!("stake-{id}.test"),
                 }))
             }
             "get_holder" => {
@@ -639,6 +639,30 @@ fn the_portfolio_reads_every_vault_and_nothing_about_the_notes() {
         "get_vault {\"vault_id\":1}".to_string(),
     ];
     assert_eq!(w.fake.borrow().log.views, expected, "the same reads whoever holds what");
+}
+
+/// `pool_info`: what the pool offers, from public views only (no holder, no note is named).
+#[test]
+fn the_pool_info_lists_the_tiers_the_vaults_and_the_recommended_deposits() {
+    let mut w = World::new("info");
+    w.run(json!({"op": "deposit", "account": "alice.test", "amount": (10 * NEAR).to_string()}));
+    w.fake.borrow_mut().counts.insert((None, 2), (3, 1));
+    w.fake.borrow_mut().log.views.clear();
+    let info = w.ok(json!({"cmd": "pool_info"}));
+    assert_eq!(info["mode"], "mock");
+    assert_eq!((info["network"].as_str(), info["contract"].as_str()), (Some(NETWORK), Some(POOL)));
+    assert_eq!(info["cash"]["hourly_cap"], (20 * NEAR).to_string());
+    assert_eq!(info["cash"]["tiers"][2], json!({"tier": 2, "note_value": CASH[2].to_string(), "live": 2}));
+    assert_eq!(info["vaults"].as_array().unwrap().len(), 2);
+    let v = &info["vaults"][1];
+    assert_eq!((v["adapter"].as_str(), v["target"].as_str()), (Some("staking"), Some("stake-1.test")));
+    assert_eq!(v["frozen"], false);
+    assert_eq!(v["hourly_cap"], Value::Null, "not published by this fake: null, not invented");
+    assert_eq!(v["tiers"][0]["note_value"], (SHARES[0] * INITIAL_PRICE).to_string());
+    assert_eq!(info["min_deposit"], (NEAR / 10).to_string());
+    assert_eq!(info["recommended"], json!([(10 * NEAR).to_string(), (11 * NEAR).to_string()]));
+    assert!(w.fake.borrow().log.views.iter().all(|v| v.starts_with("get_config") || v.starts_with("get_cash") || v.starts_with("get_vault")),
+            "{:?}", w.fake.borrow().log.views);
 }
 
 #[test]

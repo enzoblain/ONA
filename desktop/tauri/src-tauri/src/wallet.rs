@@ -16,6 +16,8 @@ const STYLE: &[u8] = include_bytes!("../../../wallet-page/dist/wallet.css");
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
+    /// No deposit: the person connects a wallet, and the page tells the app which account it is (`connected`).
+    Connect,
     /// The deposit transaction is still to be sent.
     Deposit,
     /// Sent; the agent's message (`sign_message` of the first `pool_execute`) is to be signed.
@@ -39,6 +41,20 @@ pub struct Session {
     pub step: Step,
     /// A `pool_execute` of this session is running: a second request waits for it instead of running another.
     pub executing: bool,
+    /// The chat pool request (chat, card) this deposit comes from: its steps are reported in that chat.
+    pub chat: Option<(String, String)>,
+}
+
+/// How long a connect page works.
+const CONNECT_LIFE_NS: u64 = 10 * 60 * 1_000_000_000;
+
+/// A NEAR account name as the protocol allows it: 2 to 64 characters, lower-case letters and digits, separated by
+/// single `-`, `_` or `.` (an implicit account, 64 hex characters, passes too).
+pub fn is_account(account: &str) -> bool {
+    let bytes = account.as_bytes();
+    (2..=64).contains(&bytes.len())
+        && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'))
+        && account.split(['-', '_', '.']).all(|part| !part.is_empty())
 }
 
 impl Session {
@@ -62,7 +78,23 @@ impl Session {
             expires_at: summary["expires_at"].as_u64().ok_or("deposit without expires_at")?,
             step: Step::Deposit,
             executing: false,
+            chat: None,
         })
+    }
+
+    /// A page that only connects a wallet (`network`: "testnet" or "mainnet"), for 10 minutes from `now_ns`.
+    pub fn connect(network: &str, now_ns: u64) -> Self {
+        Self {
+            token: crate::protocol::random_hex16(),
+            prepared_id: String::new(),
+            account: String::new(),
+            network: network.to_owned(),
+            wallet_call: Value::Null,
+            expires_at: now_ns.saturating_add(CONNECT_LIFE_NS),
+            step: Step::Connect,
+            executing: false,
+            chat: None,
+        }
     }
 
     pub fn expired(&self, now_ns: u64) -> bool {
@@ -72,6 +104,7 @@ impl Session {
     /// What the page reads (`state`): never the prepared id, which is the app's.
     pub fn state(&self) -> Value {
         let (step, message) = match &self.step {
+            Step::Connect => ("connect", Value::Null),
             Step::Deposit => ("deposit", Value::Null),
             Step::Sign(message) => ("sign", message.clone()),
             Step::Done => ("done", Value::Null),
@@ -88,6 +121,8 @@ pub enum Ask {
     State,
     Deposited,
     Signed { public_key: String, signature: String },
+    /// The account the person connected on a connect page.
+    Connected { account: String },
 }
 
 /// Checks a request to the wallet page: `/wallet/<token>/…`, `Host` this server, and for a POST an `Origin` that is this
@@ -127,6 +162,10 @@ pub fn parse(request: &Request, token: &str, host: &str) -> Result<Ask, Response
                 _ => Err(refuse(400, "public_key and signature are required")),
             }
         }
+        "/connected" => match body["account"].as_str().filter(|a| is_account(a)) {
+            Some(account) => Ok(Ask::Connected { account: account.to_owned() }),
+            None => Err(refuse(400, "a NEAR account is required")),
+        },
         _ => Err(refuse(404, "not found")),
     }
 }
@@ -225,6 +264,27 @@ mod tests {
         let signed = parse(&request("POST", &format!("{page}/signed"), origin, r#"{"public_key":"ed25519:K","signature":"S"}"#), t, HOST);
         assert_eq!(signed, Ok(Ask::Signed { public_key: "ed25519:K".into(), signature: "S".into() }));
         assert_eq!(parse(&request("POST", &format!("{page}/signed"), origin, "{}"), t, HOST).unwrap_err().status, 400);
+    }
+
+    /// The connect page: no deposit, the page reports the account, and only a well-formed NEAR account is taken.
+    #[test]
+    fn a_connect_page_reports_the_account_only() {
+        let session = Session::connect("testnet", 1_000);
+        assert_eq!(session.state()["step"], "connect");
+        assert!(session.state()["wallet_call"].is_null());
+        assert!(!session.expired(1_000) && session.expired(1_000 + 10 * 60 * 1_000_000_000));
+        let t = session.token.clone();
+        let origin = Some("http://127.0.0.1:5555");
+        let path = format!("/wallet/{t}/connected");
+        assert_eq!(parse(&request("POST", &path, origin, r#"{"account":"alice.testnet"}"#), &t, HOST),
+                   Ok(Ask::Connected { account: "alice.testnet".into() }));
+        for bad in [r#"{"account":"Alice.testnet"}"#, r#"{"account":"a..b"}"#, r#"{"account":"a"}"#, r#"{}"#,
+                    r#"{"account":"alice.testnet\n"}"#] {
+            assert_eq!(parse(&request("POST", &path, origin, bad), &t, HOST).unwrap_err().status, 400, "{bad}");
+        }
+        assert_eq!(parse(&request("POST", &path, None, r#"{"account":"alice.testnet"}"#), &t, HOST).unwrap_err().status, 403);
+        assert!(is_account("98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6648cdf0dbd6de"));
+        assert!(!is_account("-alice.testnet") && !is_account("alice_.testnet"));
     }
 
     #[test]

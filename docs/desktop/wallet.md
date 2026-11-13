@@ -26,6 +26,14 @@ The server answers only `Host: 127.0.0.1:<port>`, and a POST only with `Origin: 
 open in the browser cannot drive the deposit, even if it guessed the address. Files are sent with `nosniff`, `no-store`
 and `no-referrer`.
 
+## Connecting a wallet without a deposit (Tauri app, 13/11/2026)
+
+**Connect wallet** opens the same page with a `connect` step: no deposit is shown; once a wallet is connected (or if
+Wallet Selector already remembers one for this address), the page posts its account name to the app (`connected`), and
+the app keeps it as the depositing account of the chat's pool requests (docs/desktop/tauri.md). In a deposit, when the
+wallet is already connected as the depositing account, the button reads "Send the deposit with my wallet". The macOS
+app does not open the `connect` step. Not tested in a browser.
+
 ## The page
 
 `desktop/wallet-page`: `src/main.js` and `src/index.html`, bundled by esbuild into `dist/` (`wallet.js`, about 2.3 MB,
@@ -36,7 +44,10 @@ resource folder. Nothing is loaded from a CDN. To rebuild after a change:
 cd desktop/wallet-page && npm ci && npm run build
 ```
 
-`npm ci` installs the exact versions of `package-lock.json`; npm 12 runs no install script by default. Two Node
+`npm ci` installs the exact versions of `package-lock.json`; npm 12 runs no install script by default. On 13/11/2026 the
+bundle could not be rebuilt in a sandbox that refuses to read files named `*keystore*` (some wallet libraries have
+them): the `connect` change of `src/main.js` was applied to `dist/wallet.js` by exact text replacements. Rebuilding
+gives the same behaviour from the source. Two Node
 built-ins some wallet libraries import are replaced by what they use of them (`src/shims`: `randomBytes` from the
 browser's `crypto.getRandomValues`, `util.format`), and the bundle gets a minimal `process` object.
 

@@ -22,14 +22,14 @@
   </style>
 </head>
 <body>
-  <h1>Deposit into the ONA pool</h1>
-  <dl>
+  <h1 id="title">Deposit into the ONA pool</h1>
+  <dl id="details">
     <dt>Depositing account</dt><dd id="account">…</dd>
     <dt>Amount sent</dt><dd id="amount">…</dd>
     <dt>Contract</dt><dd id="receiver">…</dd>
     <dt>Network</dt><dd id="network">…</dd>
   </dl>
-  <p class="help">Your NEAR wallet sends this deposit, then signs a message for the pool agent. ONA never sees your wallet's keys. The deposit is public on the chain; the notes you receive afterwards are not linked to this account.</p>
+  <p id="help" class="help">Your NEAR wallet sends this deposit, then signs a message for the pool agent. ONA never sees your wallet's keys. The deposit is public on the chain; the notes you receive afterwards are not linked to this account.</p>
   <button id="go" disabled>Open my wallet</button>
   <p id="status">Loading…</p>
   <script src="wallet.js"></script>

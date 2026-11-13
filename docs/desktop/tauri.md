@@ -194,8 +194,8 @@ docs/desktop/pool-commands.md. Each operation is prepared by ona-core (`pool_pre
 is received, what is left in the pool's cash and lost, fees, network, contract, expiry), and executed only when the
 person clicks **Confirmer** in this window: never from the phone, which only reads the portfolio. Entries, exits and
 payments are queued by the pool agent: the window says the result comes later, and **Récupérer** runs `pool_recover`.
-A deposit is prepared and its summary shown, but cannot be finished: it is sent and signed by the person's own NEAR
-wallet, and connecting a wallet to the app is not decided yet.
+A deposit is sent and signed by the person's own NEAR wallet, on the wallet page the app opens in the browser
+(docs/desktop/wallet.md). Since 13/11/2026 the screen is laid out as below ("Pool screen").
 
 Settings: `pool.json` in the app's data folder, with the names of `ona`'s variables (docs/INSTALL.md, "The pool
 commands"):
@@ -218,6 +218,76 @@ for a pool reply there; the phone's portfolio read waits on the worker thread.
 
 Tested: the settings and refusals (unit tests), and the window against a fake bridge returning the example values of
 pool-commands.md (in a browser). Not run against a pool contract.
+
+## Connected wallet, pool requests in the chat, Pool screen (13/11/2026)
+
+**Connect wallet** (sidebar button, and the Pool screen's top line) opens the wallet page in the browser without a
+deposit (`wallet_connect`): the person picks a wallet in NEAR Wallet Selector (Meteor, MyNearWallet, HERE, Intear) and
+the page posts the account name to the app (`POST /wallet/<token>/connected`, same `Host`/`Origin` checks, a well-formed
+NEAR account only, once per page). The app shows it, keeps the name in `wallet_account` in the data folder (no key), and
+uses it as the depositing account of the chat's pool requests and as the only payout account. **Forget** removes it.
+The wallet page's server first tries port 8797, so that the browser keeps the wallet connected across restarts (Wallet
+Selector remembers it per address); another port is chosen by the system if 8797 is taken.
+
+**Pool requests in the chat.** A message typed in this window (never one from the phone) is read with fixed patterns,
+without the model (`src/pool_chat.rs`); anything else goes to the free research as before. It must start with its verb
+and not be a question; the amount must carry its unit (`NEAR`); it is never guessed.
+
+| Typed | Read as |
+|---|---|
+| `place 1 NEAR in vault 0`, `deposit 0.5 near into vault #1`, `put 1,5 NEAR in vault0` | deposit, then entry into that vault |
+| `put 2 NEAR in the staking vault`, `invest 1 NEAR in staking` | deposit, then entry into the only open vault of that kind |
+| `put 1 NEAR in a vault` | deposit, then entry into the only open vault (else the chat lists them and asks for a number) |
+| `deposit 1 NEAR`, `stake 1near` | deposit only (cash notes) |
+| `withdraw 0.5 NEAR`, `exit 1 NEAR to cash`, `cash out 1 NEAR`, `pay out 1 NEAR` | cash payout to the connected account |
+| `show my portfolio`, `my portfolio`, `show me my pool holdings` | the portfolio, read only |
+
+Without a connected wallet a deposit or payout is not started: the chat says to connect one. Otherwise the engine
+reads `pool_info` (vault kind and target, cash tiers, cash hourly cap, recommended amounts), for a deposit
+`pool_privacy` with the amount, then `pool_prepare`, and shows a card: amount, account, vault (kind and target), what
+the wallet sends (amount plus storage margin), the cash notes, fees, "blends in with at most N notes" (`if_entered` of
+the vault, or for cash the notes in circulation of the new notes' tiers plus one; the same upper bound as
+docs/desktop/privacy.md), the recommended amounts or ona-core's warning, a warning when the amount is above the cash
+hourly payout cap, and the steps Yes will take. **No** ends it (nothing sent). **Yes** prepares again (a preparation
+lives 5 minutes) and opens the same wallet page as the Pool screen's deposit: the wallet asks to confirm the `deposit`
+transaction, then to sign the pool agent's message (NEP-413); the two `pool_execute` run on the wallet page's path as
+before, and each is reported in the chat ("Deposit reported sent by your wallet page", "Cash issued"; the app does not
+read the transaction itself). With a vault, the engine then runs `pool_prepare` `enter` (vault, the same amount) and
+`pool_execute`, and reports the summary and the outcome (normally queued by the agent: the share notes come with
+**Recover**). A cash issue queued by the agent is followed with `pool_recover` about every 6 s for about 4 minutes before
+the entry. A payout card shows what is received and the account's exit limit; Yes runs `pool_execute`. The card is
+refused if another wallet was connected meanwhile. All pool commands of the chat are polled on the pool's thread: the
+window and the phone are not held. The phone sees a `pool` item kind it does not know (decoded as `unknown` by
+`ChatMessages.swift`; how the iOS app draws it was not checked) and cannot answer it; its protocol and digests are
+unchanged.
+
+**Pool screen.** Reads `pool_portfolio`, `pool_privacy` and `pool_info` together, each shown if it came, with its exact
+error and a **Retry** button otherwise. Top: the connected wallet with Connect / Forget. Then the total value (as on the
+phone), the simulation label in mock mode, the privacy summary, and the holdings: the cash (value; each tier's held
+notes as "count × note value", notes in an operation; "operation in progress" with the moving value and the notes
+awaiting the agent's signature; its privacy figure; what can be withdrawn: the held cash, to the depositing account, its
+exit limit being checked when prepared) and one card per vault holding (kind and target, value, frozen, share notes per
+tier with their share count, share price, operation in progress, privacy figure, "leave first, then pay out"). Then the
+actions (deposit from the wallet with the account filled in and the recommended amounts as one-click chips, put cash in
+a vault, pay cash out with the connected account filled in, recover), every vault the pool lists (kind, target, share
+price, open or frozen, share note values, notes in circulation, exit cap, what an entry would blend in with), and the
+deposit figures (recommended amounts, smallest deposit, cash note values, cash payouts per hour). Everything the
+phone's Pool tab shows (total, cash value, one line per vault with its value, frozen, operation in progress, error and
+retry) is on it. The operations go through the same prepare → summary → confirm → execute path as before.
+
+`pool_info` is a new ona-core command (docs/desktop/pool-commands.md), allowed through the window's `pool` command.
+
+**What was run (13/11/2026, on macOS, in a sandbox).** `cargo test --locked` in `src-tauri` could not run: unpacking the
+crate `bit-vec` (a Tauri dependency) failed with "Operation not permitted". Every module except `main.rs` was compiled
+and tested in an outside harness with the same pinned versions (`qrcode` replaced by a stand-in, as on 11/11): 90 tests
+passed, no warning, among them the parser, the chat flow against a fake pool core (card, Yes, wallet page request,
+the two wallet steps, entry, queued cash issue with recovery, refusal, payout, portfolio, unknown vault, a phone message
+not read as a pool request, no wallet connected) and the connect page over HTTP. `cargo test -p ona-core`: the
+`pool_info` test against the fake contract. The window's new code was run in Node with a stand-in DOM and a fake bridge
+(cards and Pool screen render, no runtime error). **Not run:** `main.rs` and the real Tauri window, any click, the
+wallet page in a browser, Meteor or any real wallet, the testnet pool. The wallet page's bundle (`dist/wallet.js`) could
+not be rebuilt in the sandbox (it cannot read the wallet libraries' `*keystore*` files): the change of `src/main.js` was
+applied to the bundle by exact text replacements; `npm ci && npm run build` regenerates it from the source.
 
 ## Tor client authorization
 

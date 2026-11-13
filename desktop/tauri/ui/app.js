@@ -40,12 +40,38 @@ function el(tag, props = {}, ...children) {
   return node;
 }
 
-function toast(message) {
+function toast(message, ms = 3500) {
   const box = $("toast");
   box.textContent = message;
   box.hidden = false;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { box.hidden = true; }, 3500);
+  toast.timer = setTimeout(() => { box.hidden = true; }, ms);
+}
+
+let walletAccount = null; // the connected NEAR wallet's account (state.wallet_account), or null
+
+function drawWallet(state) {
+  walletAccount = state.wallet_account || null;
+  $("wallet-dot").className = walletAccount ? "dot ok" : "dot";
+  $("wallet-label").textContent = walletAccount ? `Wallet: ${walletAccount}` : "Connect wallet";
+}
+
+/** Opens the wallet page in the browser to connect a NEAR wallet (Meteor and the others of NEAR Wallet Selector). */
+async function connectWallet() {
+  let url;
+  try {
+    url = await run("wallet_connect");
+  } catch {
+    return;
+  }
+  toast(`Your wallet page opened in the browser: choose your wallet there. If no page opened, open ${url}`, 12000);
+}
+
+async function walletButton() {
+  if (!walletAccount) return connectWallet();
+  if (await ask("Connected wallet", `ONA uses ${walletAccount} as the depositing account of your pool requests, and pays cash out to it only. Your wallet signs every deposit; ONA never holds its keys.`, "Connect another wallet")) {
+    await connectWallet();
+  }
 }
 
 /** Asks before an action that cannot be undone. Resolves to true when confirmed. */
@@ -197,8 +223,90 @@ function item(entry) {
     case "exposure": return exposure(entry.exposure);
     case "answer": return answer(entry);
     case "action": return action(entry.action, entry.state);
+    case "pool": return poolCard(entry.card, entry.state);
     default: return el("div");
   }
+}
+
+// Pool requests typed in the chat ("place 1 NEAR in vault 0"): read by ONA without the model, answered here only.
+
+const POOL_STATE_LABELS = {
+  accepted: "Confirmed: the steps follow below", rejected: "Declined: nothing was sent", failed: "Stopped: see below",
+};
+
+function line(label, value) {
+  return el("div", { class: "line" }, el("span", {}, label), el("span", {}, value));
+}
+
+/** "Blends in with at most N notes": an upper bound counted on the chain (docs/desktop/privacy.md). */
+function blendsLine(n, where) {
+  if (n === null || n === undefined) return "Privacy figure unavailable: the pool did not answer.";
+  if (n <= 1) return `Your notes would be the only ones of their value ${where}: anyone watching the chain could follow them.`;
+  return `${where[0].toUpperCase()}${where.slice(1)}, your notes blend in with at most ${n} notes of the same value.`;
+}
+
+function vaultName(v) {
+  if (!v) return "";
+  const kind = v.adapter ? ` — ${v.adapter}` : "";
+  const target = v.target ? `, placed with ${v.target}` : "";
+  return `Vault ${v.vault}${kind}${target}`;
+}
+
+function poolCard(c, state) {
+  if (c.op === "portfolio") return chatPortfolio(c);
+  const open = state === "pending";
+  const deposit = c.op === "deposit";
+  const title = deposit
+    ? (c.vault ? `Deposit ${near(c.amount)} into vault ${c.vault.vault}` : `Deposit ${near(c.amount)} as pool cash`)
+    : `Pay ${near(c.amount)} of pool cash out to your account`;
+  const rows = [line("Amount", near(c.amount)), line(deposit ? "From your wallet" : "Paid to", c.account)];
+  const notes = [];
+  if (deposit) {
+    rows.push(line("Vault", c.vault ? vaultName(c.vault) : "None: stays as cash in the pool"));
+    rows.push(line("Your wallet sends", near(c.attached || "0")));
+    if (c.cash_notes?.length) rows.push(line("Cash notes", c.cash_notes.map((n) => `${n.count} × ${near(n.note_value)}`).join(" + ")));
+    notes.push(el("p", {}, blendsLine(c.blends_with, c.vault ? `once in vault ${c.vault.vault}` : "as cash")),
+      el("p", { class: "help" }, "Without ONA, a direct staking deposit is tied to your account: 1. This is an upper bound; someone who cross-checks dates and amounts can rule some notes out."));
+    const recommended = (c.recommended || []).map((r) => near(r)).join(", ");
+    notes.push(c.is_recommended
+      ? el("p", { class: "ok-text" }, `A recommended amount (${recommended}): common amounts are harder to link to their exit.`)
+      : el("p", { class: "warn" }, `Not a recommended amount. Recommended: ${recommended}. ${c.warning || ""}`));
+    if (c.over_cap) notes.push(el("p", { class: "warn" }, `Above the pool's cash payout cap of ${near(c.hourly_cap)} per hour: getting this amount back out to your account will take more than one hour.`));
+  } else {
+    rows.push(line("You receive", near(c.received || "0")), line("Your account's exit limit", near(c.exit_limit || "0")));
+    if (c.over_cap) notes.push(el("p", { class: "warn" }, `Above the pool's cash payout cap of ${near(c.hourly_cap)} per hour: the contract may refuse part of it this hour.`));
+  }
+  const fees = Object.entries(c.fees || {}).map(([k, v]) => line(`Fee: ${k}`, /^\d+$/.test(String(v)) ? near(String(v)) : String(v)));
+  return el("div", { class: "card pool-card" },
+    el("h3", {}, title),
+    ...rows, ...fees, ...notes,
+    el("h4", {}, open ? "If you click Yes" : "What happens"),
+    el("ol", {}, (c.steps || []).map((s) => el("li", {}, s))),
+    el("div", { class: "sub" }, `Network ${c.network}, contract ${c.contract}.${c.mode === "mock" ? " Simulation: fake pool." : ""}`),
+    open
+      ? el("div", { class: "actions" },
+          el("button", { class: "secondary", onclick: () => decidePool(c.id, false) }, "No"),
+          el("button", { class: "primary", onclick: () => decidePool(c.id, true) }, deposit ? "Yes, open my wallet" : "Yes, pay out"))
+      : el("div", { class: `state ${state === "failed" ? "rejected" : state}` }, POOL_STATE_LABELS[state] || state));
+}
+
+async function decidePool(card, accept) {
+  try {
+    await run("pool_card", { chat: selected, card, accept });
+  } catch {
+    // The reason is in the toast.
+  }
+  lastChat = "";
+  refresh();
+}
+
+/** The portfolio asked in the chat: the same holdings as the Pool screen, read only. */
+function chatPortfolio(c) {
+  return el("div", { class: "card pool" },
+    el("h3", {}, "Your pool portfolio"),
+    el("div", { class: "total" }, near(c.portfolio.total)),
+    c.mode === "mock" ? el("p", { class: "warn" }, "Simulation: fake pool (mock mode).") : null,
+    ...holdings(c.portfolio, c.privacy, c.vaults_info, false));
 }
 
 function confirmation(pending, state) {
@@ -417,6 +525,7 @@ async function refresh() {
     lastState = text;
     mode = state.mode;
     drawList(state.chats);
+    drawWallet(state);
     drawPhoneButton(state);
     drawPhone(state);
   }
@@ -513,38 +622,143 @@ async function openPool() {
   await drawPortfolio();
 }
 
-async function drawPortfolio() {
-  const body = $("pool-body");
-  body.replaceChildren(el("p", { class: "help" }, "Reading the pool…"));
-  let portfolio;
+let poolInfo = null; // the last pool_info reply (vault kinds, recommended deposits), for the forms
+
+/** The wallet line at the top of the Pool screen: the connected account, or a button to connect one. */
+function walletRow() {
+  return el("div", { class: "wallet-row" },
+    el("span", { class: "who" }, walletAccount
+      ? [el("span", { class: "help" }, "Wallet  "), el("span", { class: "mono" }, walletAccount)]
+      : el("span", { class: "help" }, "No NEAR wallet connected: deposits need one (Meteor, for example).")),
+    el("button", { class: walletAccount ? "secondary" : "primary", onclick: connectWallet }, walletAccount ? "Connect another" : "Connect wallet"),
+    walletAccount ? el("button", { class: "ghost", onclick: forgetWallet }, "Forget") : null);
+}
+
+async function forgetWallet() {
   try {
-    portfolio = await pool({ cmd: "pool_portfolio" });
-  } catch (error) {
-    body.replaceChildren(el("p", { class: "error" }, `Pool unavailable: ${error.message}`),
-      el("p", { class: "help" }, "The pool is set up with pool.json in the app folder (see docs/desktop/tauri.md)."));
+    await run("wallet_forget");
+  } catch {
     return;
   }
-  // The privacy figures (docs/desktop/privacy.md): read with the portfolio, shown only if the pool answers.
-  const privacy = await pool({ cmd: "pool_privacy" }).catch(() => null);
-  const holding = (name, value, pending, ...buttons) => el("div", { class: "holding" },
-    el("span", { class: "name" }, name, pending ? el("span", { class: "help" }, "  · operation in progress") : null),
-    el("span", { class: "value" }, near(value)), ...buttons);
-  const vaults = portfolio.vaults || [];
+  lastState = "";
+  await refresh();
+  drawPortfolio();
+}
+
+/** The smallest set among the held notes of one place (`null`: cash), from pool_privacy's notes. */
+function placeSet(privacy, vault) {
+  const sets = (privacy?.wallet?.notes || []).filter((n) => (n.vault ?? null) === vault).map((n) => n.set);
+  return sets.length ? Math.min(...sets) : null;
+}
+
+/**
+ * The holdings, as the phone's Pool tab shows them (total, cash, one line per vault, frozen, operation in progress),
+ * plus the notes per tier, the vault's kind and target, each holding's privacy figure and what can be withdrawn.
+ * `actions`: the Pool screen's buttons (not in the chat's read-only card).
+ */
+function holdings(portfolio, privacy, infoVaults, actions) {
+  const cash = portfolio.cash;
+  const cashPending = cash.spending_value !== "0" || cash.awaiting_signature > 0;
+  const cashSet = placeSet(privacy, null);
+  const tierLine = (t, unit) => line(`${t.held} × ${near(t.note_value)}${unit}`,
+    t.spending ? `${t.spending} in an operation in progress` : "held");
+  const cashCard = el("div", { class: "holding-card" },
+    el("div", { class: "holding-head" }, el("span", { class: "name" }, "Cash"), el("span", { class: "value" }, near(cash.value)),
+      actions ? el("button", { class: "secondary", onclick: () => poolForm("enter", portfolio, undefined, privacy) }, "Put in a vault") : null,
+      actions ? el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Pay out") : null),
+    (cash.tiers || []).length ? cash.tiers.map((t) => tierLine(t, " cash notes")) : el("div", { class: "help" }, "No cash notes."),
+    cashPending ? line("Operation in progress", `${near(cash.spending_value)} moving, ${cash.awaiting_signature} awaiting the agent's signature`) : null,
+    cashSet !== null ? el("div", { class: "help" }, blendsLine(cashSet, "as cash")) : null,
+    cash.value !== "0" ? line("Can be withdrawn", `${near(cash.value)} to the account that deposited (its exit limit is checked when you prepare)`) : null);
+  const vaultCards = (portfolio.vaults || []).map((v) => {
+    const info = (infoVaults || []).find((i) => i.vault === v.vault);
+    const pending = v.spending_value !== "0" || v.awaiting_signature > 0;
+    const set = placeSet(privacy, v.vault);
+    const shares = (t) => {
+      const each = info?.tiers?.[t.tier]?.note_shares;
+      return each ? ` (${BigInt(each) * BigInt(t.held)} shares)` : "";
+    };
+    return el("div", { class: "holding-card" },
+      el("div", { class: "holding-head" },
+        el("span", { class: "name" }, info ? vaultName(info) : `Vault ${v.vault}`, v.frozen ? " (frozen)" : ""),
+        el("span", { class: "value" }, near(v.value)),
+        actions ? el("button", { class: "secondary", onclick: () => poolForm("switch", portfolio, v.vault) }, "Switch") : null,
+        actions ? el("button", { class: "secondary", onclick: () => poolForm("exit", portfolio, v.vault) }, "Leave") : null),
+      (v.tiers || []).map((t) => line(`${t.held} share notes of ${near(t.note_value)}${shares(t)}`,
+        t.spending ? `${t.spending} in an operation in progress` : "held")),
+      line("Share price", `${near(v.share_price)} per share`),
+      pending ? line("Operation in progress", `${near(v.spending_value)} moving, ${v.awaiting_signature} awaiting the agent's signature`) : null,
+      set !== null ? el("div", { class: "help" }, blendsLine(set, `in vault ${v.vault}`)) : null,
+      line("To withdraw", "Leave the vault first (shares become cash notes), then pay the cash out"));
+  });
+  return [el("div", { class: "section" }, el("h4", {}, "Your holdings"), cashCard, ...vaultCards)];
+}
+
+/** Every vault the pool lists, with or without your notes: kind, target, price, state, and what an entry would hide. */
+function vaultsSection(info, privacy) {
+  const byVault = new Map((privacy?.vaults || []).map((v) => [v.vault, v]));
+  return el("div", { class: "section" }, el("h4", {}, "Vaults in the pool"),
+    (info.vaults || []).length ? info.vaults.map((v) => {
+      const p = byVault.get(v.vault);
+      const live = (v.tiers || []).map((t) => t.live).filter((n) => n !== null && n !== undefined);
+      return el("div", { class: "holding-card" },
+        el("div", { class: "holding-head" }, el("span", { class: "name" }, vaultName(v)),
+          el("span", { class: "help" }, v.frozen ? "Frozen: takes no new money" : "Open")),
+        line("Share price", `${near(v.share_price)} per share`),
+        (v.tiers || []).length ? line("Share notes", v.tiers.map((t) => near(t.note_value)).join(", ")) : null,
+        live.length ? line("Notes in circulation", live.join(" / ")) : null,
+        v.hourly_cap ? line("Exit cap per hour", near(v.hourly_cap)) : null,
+        p?.if_entered !== undefined ? el("div", { class: "help" }, `Putting your cash in: your notes would blend in with at most ${p.if_entered} notes${p.gain !== undefined ? ` (${p.gain >= 0 ? "+" : ""}${p.gain} compared with your cash)` : ""}.`) : null);
+    }) : el("div", { class: "help" }, "The pool lists no vault."));
+}
+
+function offerSection(info) {
+  return el("div", { class: "section" }, el("h4", {}, "Deposits"),
+    line("Recommended amounts", (info.recommended || []).map((r) => near(r)).join(", ") || "none"),
+    line("Smallest deposit", near(info.min_deposit || "0")),
+    line("Cash notes", (info.cash?.tiers || []).map((t) => near(t.note_value || "0")).join(", ")),
+    info.cash?.hourly_cap ? line("Cash payouts per hour (all accounts)", `at most ${near(info.cash.hourly_cap)}`) : null,
+    el("p", { class: "help" }, "A common amount is harder to link to its exit. Your wallet sends and signs every deposit."),
+    el("p", { class: "help" }, `Network ${info.network}, contract ${info.contract}.`));
+}
+
+function retryCard(what, error) {
+  return el("div", { class: "card" },
+    el("p", { class: "error" }, `${what}: ${error}`),
+    el("p", { class: "help" }, "The pool is set up with pool.json in the app folder, and is reached through Tor once the QR code shows in the Phone window (see docs/desktop/tauri.md)."),
+    el("div", { class: "card-actions actions" }, el("button", { class: "primary", onclick: drawPortfolio }, "Retry")));
+}
+
+async function drawPortfolio() {
+  const body = $("pool-body");
+  body.replaceChildren(walletRow(), el("p", { class: "help" }, "Reading the pool…"));
+  // Read together; each part is shown if it came, with its exact error otherwise.
+  const [p, v, i] = await Promise.allSettled([
+    pool({ cmd: "pool_portfolio" }), pool({ cmd: "pool_privacy" }), pool({ cmd: "pool_info" }),
+  ]);
+  const reason = (r) => r.reason?.message || String(r.reason);
+  const privacy = v.status === "fulfilled" ? v.value : null;
+  const info = i.status === "fulfilled" ? i.value : null;
+  poolInfo = info;
+  if (p.status !== "fulfilled") {
+    body.replaceChildren(walletRow(), retryCard("Pool unavailable", reason(p)), info ? offerSection(info) : null);
+    return;
+  }
+  const portfolio = p.value;
   body.replaceChildren(
+    walletRow(),
     el("div", {}, el("p", { class: "help" }, "Total value"), el("div", { class: "total" }, near(portfolio.total))),
     portfolio.mode === "mock" ? el("p", { class: "warn" }, "Simulation: fake pool (mock mode).") : null,
-    privacy ? privacyCard(privacy) : null,
-    el("div", {},
-      holding("Cash", portfolio.cash.value, portfolio.cash.spending_value !== "0"),
-      ...vaults.map((v) => holding(`Vault ${v.vault}${v.frozen ? " (frozen)" : ""}`, v.value,
-        v.spending_value !== "0" || v.awaiting_signature > 0,
-        el("button", { class: "secondary", onclick: () => poolForm("switch", portfolio, v.vault) }, "Switch"),
-        el("button", { class: "secondary", onclick: () => poolForm("exit", portfolio, v.vault) }, "Leave")))),
+    privacy ? privacyCard(privacy) : el("p", { class: "help" }, `Privacy figures unavailable: ${reason(v)}`),
+    ...holdings(portfolio, privacy, info?.vaults, true),
     el("div", { class: "ops" },
-      el("button", { class: "primary", onclick: () => poolForm("enter", portfolio, undefined, privacy) }, "Put cash in"),
-      el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Pay to an account"),
-      el("button", { class: "secondary", onclick: () => poolForm("deposit", portfolio) }, "Deposit"),
+      el("button", { class: "primary", onclick: () => poolForm("deposit", portfolio) }, "Deposit from my wallet"),
+      el("button", { class: "secondary", onclick: () => poolForm("enter", portfolio, undefined, privacy) }, "Put cash in a vault"),
+      el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Pay cash out"),
       el("button", { class: "secondary", onclick: recover }, "Recover pending operations")),
+    info ? vaultsSection(info, privacy) : el("p", { class: "help" }, `Vault details unavailable: ${reason(i)}`),
+    info ? offerSection(info) : null,
+    el("p", { class: "help" }, `Read at ${new Date().toLocaleTimeString("en-US")}. Values at the contract's public prices; held notes only.`),
   );
 }
 
@@ -581,10 +795,17 @@ function poolForm(op, portfolio, vault, privacy) {
     enter: [el("label", {}, "Vault", el("select", { name: "vault" }, vaultOptions())), amountField("Cash to put in", true)],
     switch: [el("label", {}, "To vault", el("select", { name: "to" }, vaultOptions(vault))), amountField(`Shares of vault ${vault} to move`, true)],
     exit: [amountField(`Shares of vault ${vault} to turn into cash`, true)],
-    exit_cash: [el("label", {}, "NEAR account that deposited", el("input", { name: "to", placeholder: "name.testnet", required: true })), amountField("Cash to pay", false)],
-    deposit: [el("label", {}, "Your NEAR account", el("input", { name: "account", placeholder: "name.testnet", required: true })), amountField("Amount to deposit", false)],
+    exit_cash: [el("label", {}, "NEAR account that deposited (the contract pays no other)", el("input", { name: "to", placeholder: "name.testnet", value: walletAccount || "", required: true })), amountField("Cash to pay", false)],
+    deposit: [el("label", {}, "Your NEAR account (the connected wallet)", el("input", { name: "account", placeholder: "name.testnet", value: walletAccount || "", required: true })), amountField("Amount to deposit", false)],
   }[op];
-  const form = el("form", {}, el("h3", {}, POOL_OPS[op]), ...fields,
+  // Deposit: the recommended amounts, one click each (a common amount is harder to link to its exit).
+  const chips = op === "deposit" && poolInfo?.recommended?.length
+    ? el("div", { class: "chips" }, el("span", { class: "help" }, "Recommended:"), poolInfo.recommended.map((r) => el("button", {
+        type: "button", class: "chip",
+        onclick: () => { form.querySelector("input[name=amount]").value = near(r).replace(" NEAR", ""); },
+      }, near(r))))
+    : null;
+  const form = el("form", {}, el("h3", {}, POOL_OPS[op]), ...fields, chips,
     el("div", { class: "card-actions actions" },
       el("button", { type: "button", class: "secondary", onclick: drawPortfolio }, "Cancel"),
       el("button", { type: "submit", class: "primary" }, "Prepare")));
@@ -681,6 +902,8 @@ async function recover() {
 }
 
 $("pool-button").addEventListener("click", openPool);
+$("refresh-pool").addEventListener("click", drawPortfolio);
+$("wallet-button").addEventListener("click", walletButton);
 $("close-pool").addEventListener("click", () => $("pool-dialog").close());
 $("phone-button").addEventListener("click", () => $("phone-dialog").showModal());
 $("close-phone").addEventListener("click", () => $("phone-dialog").close());

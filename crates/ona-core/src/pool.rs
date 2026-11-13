@@ -63,8 +63,10 @@ pub const REQUEST_LIFE_NS: u64 = 29 * 24 * 3_600_000_000_000;
 pub const REQUEST_FEE: u128 = 336 * 10_000_000_000_000_000_000;
 
 /// The commands this module answers. `pool_request_exit` and `pool_escape_exit` are `pool_prepare` with that `op`.
-pub const COMMANDS: [&str; 7] =
-    ["pool_portfolio", "pool_prepare", "pool_execute", "pool_recover", "pool_request_exit", "pool_escape_exit", "pool_privacy"];
+pub const COMMANDS: [&str; 8] = [
+    "pool_portfolio", "pool_prepare", "pool_execute", "pool_recover", "pool_request_exit", "pool_escape_exit", "pool_privacy",
+    "pool_info",
+];
 
 /// Read-only access to the pool contract.
 pub trait PoolChain {
@@ -741,6 +743,7 @@ impl PoolClient {
             "pool_execute" => self.execute(request),
             "pool_recover" => self.recover(),
             "pool_privacy" => self.privacy(request),
+            "pool_info" => self.info(),
             other => Err(format!("unknown command {other}")),
         }?;
         reply["mode"] = json!(self.chain.mode());
@@ -788,6 +791,51 @@ impl PoolClient {
             "vaults": vaults,
             "vault_count": state.vaults.len(),
             "total": total.to_string(),
+        }))
+    }
+
+    /// What the pool offers, from the contract's public views and this client's settings, nothing about this wallet's
+    /// notes: the network, the contract, the cash tiers and their hourly cap, each vault's kind (`adapter`) and the
+    /// account it places into (`target`), its share price, note values, cap and state, the notes in circulation per
+    /// tier, the smallest deposit and the recommended deposits. A field the contract does not publish is `null`.
+    fn info(&self) -> Result<Value, String> {
+        let state = self.state()?;
+        let text = |v: &Value, key: &str| v[key].as_str().map(String::from);
+        let live = |t: &Value| -> Option<u64> { Some(t["issued"].as_u64()?.saturating_sub(t["paid"].as_u64()?)) };
+        let cash_view = self.chain.view("get_cash", json!({}))?;
+        let cash_tiers: Vec<Value> = cash_view["tiers"]
+            .as_array()
+            .ok_or("cash view without tiers")?
+            .iter()
+            .enumerate()
+            .map(|(t, view)| {
+                let value = state.cash.get(t).map(|tier| tier.size.to_string());
+                json!({"tier": t, "note_value": value, "live": live(view)})
+            })
+            .collect();
+        let mut vaults = Vec::new();
+        for (id, v) in state.vaults.iter().enumerate() {
+            let view = self.chain.view("get_vault", json!({"vault_id": id}))?;
+            let views = view["tiers"].as_array().cloned().unwrap_or_default();
+            let mut tiers = Vec::new();
+            for (t, tier) in v.tiers.iter().enumerate() {
+                let value = tier.size.checked_mul(v.price).ok_or_else(overflow)?;
+                tiers.push(json!({"tier": t, "note_shares": tier.size.to_string(), "note_value": value.to_string(),
+                                  "live": views.get(t).and_then(live)}));
+            }
+            vaults.push(json!({
+                "vault": id, "adapter": text(&view, "adapter"), "target": text(&view, "target"),
+                "share_price": v.price.to_string(), "frozen": v.frozen, "hourly_cap": text(&view, "hourly_cap"),
+                "tiers": tiers,
+            }));
+        }
+        Ok(json!({
+            "network": state.network,
+            "contract": self.contract,
+            "cash": {"tiers": cash_tiers, "hourly_cap": text(&cash_view, "hourly_cap")},
+            "vaults": vaults,
+            "min_deposit": MIN_DEPOSIT.to_string(),
+            "recommended": self.recommended.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
         }))
     }
 
