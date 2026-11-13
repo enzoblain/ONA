@@ -1,202 +1,121 @@
 <img src="assets/logo.png" alt="ONA logo" width="120">
 
-# ONA: a private AI assistant, built so that no one links who you are to what you ask
+# ONA: a private AI assistant that no single party can link to you
 
-Built at NEAR HACKATHON · Tracks: to be confirmed · Network: NEAR testnet (planned) · Not audited
-
-> **Status: early prototype, not audited.** The token crypto, the two contracts, the signer and relay logic, the wallet and the
-> local mission core exist and pass their tests. The mint contract has run on a local NEAR node, with measured gas. The model and the
-> web are still fake, and nothing is deployed on testnet. **Do not use real funds.** See [what works today](#what-works-today).
-
-## What it is
-
-ONA is an AI assistant for sensitive matters: legal, medical, financial or professional questions you would not want
-tied to your name. You talk to it from your computer or your phone. It can also act on your behalf (search the web,
-contact a professional, make a payment), and asks for your explicit confirmation before each of these actions.
-
-The difference is who sees what. ONA is designed so that no single party gets both who you are and what you asked:
-
-- **the model** reads your request with the names and identifiers you declare replaced by pseudonyms, inside an enclave (NEAR AI
-  Cloud). Until this client verifies the enclave's quotes, the relay in front of the model can read the request and make up replies;
-- **websites and the people the agent contacts** see Tor traffic and a generic message, not you;
-- **payments** use blind tokens: the mint that holds your deposit cannot link it to what you pay for;
-- **your phone** talks to your own computer over Tor, and the agent runs on that computer, not on our servers.
-- **the pool** (planned, testnet only): you deposit from your own wallet, your money becomes blind cash notes, and an exit pays
-  your account without naming the vault you chose. Deposit, enter, switch, exit and the portfolio run end to end only against a
-  fake contract and a fake agent so far.
-
-After each mission, ONA shows an **exposure report**: every party that received something, how many requests and how many bytes
-it received (not the content itself).
-
-### What pseudonyms cover
-
-Before any text goes to the model (the planner and the page reader), `ona-core` replaces every occurrence of each protected term
-(the terms of the policy and those declared when the mission is opened: names, case numbers, company names) with a random 12-letter
-pseudonym such as `KQXMZBTRWLDN` (letters only, so it can never be read as a price). The model's reply is put back locally, whatever
-the case of the pseudonym. The table stays on the computer and is forgotten when the mission closes. A text that still contains a
-protected term after replacement is refused, not sent.
-
-Texts and terms are compared on a normalized view:
-
-- HTML tags and comments are removed (`<br>`, `<p>`, `<div>`, `<li>`, `<tr>` count as a line break). Pages reach the reader exactly as
-  the web layer returns them: today the web is a fake that returns plain text, and a real one may return HTML, so tags are handled
-  either way.
-- One level of decoding: numeric HTML references (with or without `;`, any number of leading zeros, `&#128;` to `&#159;` read as
-  Windows-1252 like browsers do); named references of Latin-1 (also without `;`), Latin Extended-A, common punctuation and invisible
-  characters (`&ZeroWidthSpace;`, `&NoBreak;`, `&it;`...); URL escapes (`%70`), bytes that are not valid UTF-8 being dropped.
-- Unicode default-ignorable characters (soft hyphens, zero-width spaces and joiners, direction marks, variation selectors...) and the
-  line separators U+2028, U+2029, U+0085 are removed.
-- A dash or a soft hyphen at the end of a line, between letters, may be there or not: `Du-` / `pont` matches "Dupont", and `Jean-` /
-  `Luc` matches "Jean-Luc".
-- These dashes become `-`: U+002D, U+058A, U+05BE, U+1400, U+1806, U+2010 to U+2015, U+2043, U+2053, U+207B, U+208B, U+2212, U+2E17,
-  U+2E1A, U+2E3A, U+2E3B, U+2E40, U+2E5D, U+301C, U+3030, U+30A0, U+FE31, U+FE32, U+FE58, U+FE63, U+FF0D, U+10EAD, U+02D7, U+2796.
-  These apostrophes become `'`: U+0027, U+0060, U+00B4, U+02B9, U+02BB to U+02BE, U+0384, U+055A, U+05F3, U+1FBD, U+1FBF, U+1FEF,
-  U+1FFD, U+2018, U+2019, U+201B, U+2032, U+2035, U+A78B, U+A78C, U+FF07, U+FF40.
-- Unicode NFKD (full-width and mathematical letters, ligatures), every combining mark removed (accents never matter: "ELODIE" matches
-  "Élodie"; stray underline or strike-through marks are ignored), lowercase, `ß` read as `ss`.
-- Every run of white space (spaces, tabs, line breaks, no-break spaces) is one space: "Jean\nDupont" matches "Jean Dupont".
-
-A term matches as a whole word ("Ali" is not replaced in "alibi"); a term written `*between asterisks*` matches inside words too.
-
-**Not covered:** a term you did not declare; a term written another way (misspelled, abbreviated, inflected, initials, nickname,
-transliterated, a rephrasing); a name split by a line break without a hyphen (`Du` / `pont`); look-alike letters from another script
-(Cyrillic `у` in "Dupont"); small capitals and other letters that NFKD does not fold; escapes nested twice or more (`%2570`,
-`&amp;#112;`, `%26%23112%3B`); `+` written for a space in a URL; HTML named references outside the sets above (such as `&Dopf;`); a
-numeric reference whose digits run into the next letters (`&#x2019Brien` reads `&#x2019B`, as a browser does); and the context around
-a name (job, city, dates, a rare situation), which can be enough to identify someone.
-
-This is the design. Today the model, the web and the payments in the app are still fakes; see
-[what works today](#what-works-today) and the [known limitations](#known-limitations).
-
-Example: find a labour lawyer and compare fees on a generic version of your case, without the firms you did not pick
-learning who you are.
+Built at NEAR HACKATHON (1 to 14 November 2026) · Track: Privacy & Private AI · Network: NEAR testnet (contracts not
+deployed yet) · MIT · **Prototype, not audited. Do not use real funds.**
 
 ## The problem
 
-A hosted AI chat links your identity, your conversations and your actions at one operator. Encrypted inference helps
-with the content, but the account, the network address, the payment and the agent's actions still identify you.
+People ask AI assistants about things they would not want tied to their name: a lawyer, a diagnosis, debts, a
+dispute at work. Today the provider of the assistant sees both who asks and what is asked, and so does every service
+the assistant acts on (search engines, websites, payment providers). A privacy policy is a promise, not a property.
 
-## Planned architecture
+## What ONA does
 
-| Component | Role | Language |
+ONA is an assistant that runs on the person's own computer and is driven from that computer or from a phone. It is built
+so that no single party receives both who the person is and what they asked:
+
+- **The model** gets the request with declared names replaced by pseudonyms, through an end-to-end encrypted channel to
+  NEAR AI Cloud (enclave inference). The relay in front of it holds the API key; the person never needs one.
+- **The web** sees Tor traffic. Search queries are shown to the person and confirmed before they leave; pages are read
+  through Tor; the answer cites its sources, and every quote is checked against the page it came from.
+- **Actions** (a message, a payment) are only suggested: the person types the recipient, sees the exact action and
+  confirms it. A message opens in the person's own mail program.
+- **Payments and savings** go through NEAR contracts with blind tokens: the mint that takes a deposit cannot link it to
+  what is paid, and the pool's notes do not say which vault the person chose.
+- **The phone** talks to the person's own computer over Tor (an onion service published for that phone only), with
+  every reply signed and every confirmation signed by a key in the phone's secure chip.
+- After each conversation, an **exposure report** lists every party that received something, with request and byte
+  counts (never the content).
+
+## What NEAR does in it
+
+| NEAR piece | Role in ONA | State |
 |---|---|---|
-| `ona-core` | Runs on the user's computer: mission state machine, payment gate, pseudonyms, E2EE client for NEAR AI Cloud, wallet tokens, sealed state, journal, exposure report. Reaches the relay, the pool agent and the NEAR RPC nodes through a local `tor` over SOCKS5 when `ONA_TOR_SOCKS` is set, one circuit per request; otherwise directly, and says so at start | Rust |
-| Desktop app | Connects a NEAR wallet for deposits, starts missions, asks for confirmations, shows the exposure report | Swift (SwiftUI) on macOS; Rust + Tauri with HTML/JavaScript on Windows and Linux; both on `ona-core` (to be confirmed) |
-| iOS app | Remote control of the computer over Tor: mission progress and confirmations. Holds no tokens and no pseudonym table | Swift |
-| `ona-server` | Thin relay in a TEE (Phala dstack): holds the NEAR AI Cloud key, enforces a flat request size, submits transactions | Rust |
-| `ona-signer` | Blind-signs tokens after on-chain deposits; no inbound network | Rust |
-| `ona-mint` | NEAR contract: holds the reserve, verifies blind BLS12-381 tokens, pays recipients directly, returns blinded change | Rust |
-| `ona-registry` | NEAR contract: published measurements, journal anchors, incident level | Rust |
-| `ona-pool` | NEAR contract with no access key: holds the funds the agent places, only in listed vaults, and pays exits only to accounts that deposited | Rust |
-| `ona-agent` | The pool's agent: blind-signs cash and share notes after the contract has done what they stand for, calls the contract with the agent's key, and moves the vaults' money on a schedule | Rust |
+| NEAR AI Cloud | the model, reached with end-to-end encryption (version 3) through a relay | one real encrypted call passed on 12/11/2026 (`e2ee_check`); missions run on the fake model until the relay is published |
+| `ona-mint` contract | issues blind tokens for a deposit, pays them out unlinkably | built, tested on a mocked NEAR VM and a local NEAR node with measured gas; not on testnet |
+| `ona-pool` contract and `ona-agent` | a shared pool of staking vaults held as blind cash and share notes | built, run end to end on a local NEAR node (deposit, cash, entry, placement, leave, payment); not on testnet |
+| NEAR wallets (NEP-413, Wallet Selector) | the person deposits and signs from their own wallet; ONA never holds its keys | built in both desktop apps; not used with a real wallet yet |
+| `ona-registry` contract | registry of journal checkpoints (anchoring) | built, mocked VM only |
 
-## How paying works (planned)
+## Try it
 
-1. **Top up.** Connect a NEAR wallet and confirm one deposit to `ona-mint`. This is the only time the wallet signs.
-2. **Send a mission.** The app shows the plan and the price. You confirm. Blind tokens are spent locally, with no transaction.
-3. **Pay a third party.** You confirm the recipient and the amount. `ona-mint` pays directly and returns blinded change.
+Each step: what to run, and what you should see. Requirements: Rust 1.99.1 ([docs/INSTALL.md](docs/INSTALL.md); tested on macOS, Apple silicon); `tor` only for the Tor parts.
 
-## What works today
+1. **A full mission on the fakes, with its exposure report.**
+   `cargo run -p ona-core --bin ona -- demo`
+   → JSON lines for each step (plan, two pages read, the offer chosen, a message, a payment confirmed by its digest),
+   ending with an exposure report: `"outputs":{"contact":1,"fetch":2,"search":1}`, `"mode":"mock"`.
+2. **A free research with sources, on the demo web.**
+   `cargo run -p ona-core --bin ona < docs/try/research.jsonl`
+   → the proposed query, then the answer (`research_result`) with notes such as « Le déplacement coûte souvent entre 40
+   et 80 euros. », each with its source `s1`/`s2` and a quote found word for word in that page; then the exposure
+   report (`"outputs":{"fetch":2,"search":1}`).
+3. **Every test, and the contracts built reproducibly.**
+   `./verify.sh` (after `cargo fetch` once; needs the `wasm32-unknown-unknown` target)
+   → all workspace tests pass and the SHA-256 of each contract is printed.
+4. **The pool on a local NEAR node.** With a `near-sandbox` 2.13.4 binary you checked:
+   `NEAR_SANDBOX_BIN_PATH=/path/to/near-sandbox cargo run -p ona-sandbox --bin ona-sandbox-pool`
+   → deployment, a deposit and its cash issue, an entry, the placement, a leave and a payment, each step named as it
+   passes, then the gas of every transaction. Last run on 12/11/2026: it passed up to the escape step, where the node
+   failed a long clock jump ([docs/INSTALL.md](docs/INSTALL.md)). Add `-- --serve` to keep the node running for a
+   desktop app.
+5. **The apps.**
+   - macOS (Apple silicon): `desktop/OnaCoreBridge/build.sh`, then open `desktop/ONADesktop/ONADesktop.xcodeproj` and
+     run. Or download the signed and notarized build from the
+     [latest release](https://github.com/enzoblain/ONA/releases/latest).
+   - Windows and Linux: `cd desktop/tauri/src-tauri && cargo tauri dev`, or the installers of the latest release.
+   - iPhone: `ios/ArtiBridge/build-xcframework.sh`, then open `ios/ONA/ONA.xcodeproj` and run in the simulator; a
+     TestFlight build exists, not yet open to the public.
+   → Write a question: the app proposes search queries to confirm, reads the pages, answers with sources; the Pool
+   window shows the portfolio and its privacy figure. In the apps, the model and the web are the demo ones (shown as a
+   simulation, `mode: mock`) until `model.json` names a relay (docs/desktop/tauri.md, "Real model").
 
-| Part | State | Tested on |
+## What works today, and what does not
+
+Real and tested:
+
+- blind BLS tokens (`ona-token`), the mint, pool and registry contracts, the signer and relay logic, the pool agent;
+- the mission core: plan, gate, pseudonyms, sealed journal, exposure report, free research with checked quotes, actions
+  confirmed by digest;
+- the three apps (macOS, Windows/Linux with Tauri, iPhone) and their signed phone protocol; the phone reached the
+  computer's onion service through Tor (Arti) on 11/11/2026;
+- builds of the four apps on GitHub's machines for every change, and a signed, notarized macOS release.
+
+Simulated or not done (everything simulated says `mode: mock`):
+
+- **the model**: fake in missions and research until the relay is published (one real NEAR AI call passed);
+- **the web through Tor**: research was checked against DuckDuckGo and a real page directly, not yet through Tor;
+- **payments**: simulated in missions and actions; the mint and the pool are not on testnet;
+- **enclave quotes** are not verified by the client yet: the relay could read a request;
+- **not run**: the iPhone on a real device, the Tauri app on real Windows and Linux machines, a deposit from a real
+  wallet.
+
+Per-component state, what each was tested on, and the known limitations: [docs/STATUS.md](docs/STATUS.md) and
+[docs/DESIGN.md](docs/DESIGN.md).
+
+## Repository
+
+| Path | What | Docs |
 |---|---|---|
-| `ona-token` blind BLS tokens | done | native tests |
-| `ona-mint` contract | done, gas measured ([SPEC](SPEC.md#measured-gas)) | mocked NEAR VM with real BLS and ed25519 host functions, and a local NEAR node |
-| `ona-registry` contract | done | mocked NEAR VM only |
-| `ona-pool` contract: listed staking vaults, cash notes with no vault and share notes, exits that name no vault, only to depositors, exit limits that grow only on money still in the pool, 7-day escape | done, never deployed on testnet, lending not implemented | mocked NEAR VM, and once on a local node against a test staking pool (12/11/2026, escape exits not reached); never against a real staking pool |
-| `ona-crowd` crowd simulator for the pool demo | simulation and vault-privacy measure done; the NEAR runner has never run | in-memory chain only |
-| `ona-anchor` hourly journal anchoring, chained checkpoints and their audit, auditor key sealing in `ona-core` | library done, no program receives leaves yet, the agent does not submit checkpoints yet | fake registry only, never on a NEAR node |
-| `ona-deploy` deployment tool | done; refuses mainnet from the names, the parent account and the chain id the node reports; checks the roles and the deployed code hash; testnet not tried yet | unit tests |
-| `ona-near` RPC client | done; https only (except a local node, or an onion address through Tor), only final results are read, failed receipts are listed apart from the transaction status, an unclear send is looked up by its hash and never sent twice. Trusts its RPC node | unit tests against a fake node, and a local NEAR node through `ona-sandbox` before these changes |
-| `ona-signer` issuing loop | done, keys in a local file | fake chain, and a local NEAR node |
-| `ona-server` relay | logic, HTTP, chain client and encrypted NEAR AI gateway done; the `ona-relay` program has not run yet | fake chain and fake NEAR AI, and a local NEAR node for the chain path |
-| `ona-wallet` encrypted wallet file | done, keychain not wired in; a wallet without its seal file is refused by design (`open_adopting_unsealed` adopts one explicitly) | native tests |
-| `ona-core` mission, gate, sealed journal, 24-hour chat deletion | done | fake model, web and payments, each labelled `mode: mock` |
-| `ona-core` pool commands (deposit, enter, switch, exit to cash, cash payout, portfolio, recovery; prepare then execute once) and pool notes in `ona-wallet` | done; the HTTP client of the agent is built (`ONA_POOL_AGENT_URL`); the bridge's wallet setup is not ([commands](docs/desktop/pool-commands.md)) | fake pool contract with a fake agent, and with the real agent over HTTP on this machine |
-| `ona-agent` pool agent: blind-signing keys, HTTP API, durable store with retention and purge, checks before any gas, depositor check by wallet signature (NEP-413), queue sending entries, leaves and cash exits in delayed batches, planner (reserve, net settlement, steady withdrawals on a fixed grid) | done, run once on a local node (12/11/2026), **never on testnet**, not in an enclave; the NEP-413 format is not verified against a wallet; the agent itself sees every request | fake pool contract, and the real pool on a local node with the client core over HTTP |
-| `ona-core` free research and actions (`research`): queries confirmed before they leave, search and page reading through Tor, notes checked against the pages, a sourced answer, actions whose recipient the person gives (docs/research.md) | done; the three desktop and phone apps show it | demo web and fake model in tests; DuckDuckGo and a page read directly once on 13/11/2026; not yet through Tor nor with the real model |
-| `ona-core` encrypted NEAR AI client | done, quote verification missing, not yet connected to missions | simulated enclave; one real call with encryption version 3 through the test relay on 12/11/2026 (`e2ee_check`, model `z-ai/glm-5.3-flash`): decrypted reply, valid signature |
-| Desktop app (`desktop/`, macOS) | conversations and confirmations driven by `ona-core` (fake model, web and payments), phone pairing and the phone protocol v1 (commit-then-reveal pairing, signed replies, token for reads, counter against replays, signed content of each confirmation); local-network mode in debug builds only; no wallet yet | Core tests with the real `ona-core` (compiled with `swiftc`, not `swift test`); one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network ([notes](docs/desktop/app.md)) |
-| Desktop app (`desktop/tauri`, Windows and Linux) | same features and protocol v1 as the macOS app, in Rust with Tauri; no wallet yet | Rust tests of every module but `main.rs` with the real `ona-core`, run on macOS; one end-to-end run with protocol v1 against the iOS app in the simulator, on the local network, on macOS. Never built or run on Windows or Linux ([notes](docs/desktop/tauri.md)) |
-| iOS app (`ios/`) | Tor (Arti embedded): an earlier test build reached a test onion service; the Tor screen is now a tab of the app | one iPhone 16, one series of measurements ([notes](docs/ios/tor-spike.md)) |
-| iOS app (`ios/`) | chat-style conversations with the agent, and a read-only Pool tab (portfolio from the computer, labelled `mock` until a pool runs), over protocol v1: commit-then-reveal QR pairing, every reply of the computer checked with its key, a token for reads, a counter and a low-s signature for writes, confirmations signed over the digest of what the phone shows, payment digest v2. The mock computer speaks v1 too, labelled `mode: mock`. Over Tor (Arti), one full v1 mission passed against the Tauri app; the first connections to the onion often took more than 60 s. The Secure Enclave key path has not run on a device yet | iOS simulator (software key) against the Tauri app (local network and Tor) and the mock, unit tests on the Mac, vectors shared with the desktop apps ([notes](docs/ios/app.md)) |
-| Client through Tor (`ona_core::tor`, re-exported by `ona-tor`) | wired into `ona`: relay, pool agent and NEAR RPC reads go through a local `tor` when `ONA_TOR_SOCKS` is set, each request with its own SOCKS credentials, no direct fallback; `ONA_REQUIRE_TOR=1` refuses to start without it. Never tested on the real Tor network ([docs/TOR.md](docs/TOR.md)) | fake SOCKS server only, never on the real Tor network |
-| Phala enclave | not built; decided on 12/11/2026: for the hackathon the relay runs on the team's own machine, outside any enclave, so whoever runs it is trusted with what a relay sees (timing, sizes, model name, token counts; content too until the client verifies quotes) | none |
+| `crates/ona-core` | the mission core: model client, gate, journal, research, pool client | [SPEC.md](SPEC.md), [docs/research.md](docs/research.md) |
+| `crates/ona-mint`, `ona-pool`, `ona-registry` | NEAR contracts | [SPEC.md](SPEC.md) |
+| `crates/ona-agent`, `ona-server`, `ona-signer` | pool agent, relay, signer | [docs/INSTALL.md](docs/INSTALL.md) |
+| `crates/ona-token`, `ona-wallet`, `ona-near`, `ona-tor`, `ona-anchor`, `ona-crowd`, `ona-deploy`, `ona-sandbox`, `ona-test-staking` | tokens, wallet, NEAR client, Tor client, anchoring, crowd simulator, deployment, local-node runs and their test staking pool | [SPEC.md](SPEC.md) |
+| `desktop/ONADesktop`, `desktop/OnaCoreBridge` | macOS app (SwiftUI) and its bridge to the core | [docs/desktop/app.md](docs/desktop/app.md) |
+| `desktop/tauri` | Windows and Linux app (Tauri) | [docs/desktop/tauri.md](docs/desktop/tauri.md) |
+| `desktop/wallet-page` | the page that connects the person's NEAR wallet | [docs/desktop/wallet.md](docs/desktop/wallet.md) |
+| `ios/` | iPhone app, embedded Tor (Arti), a fake computer for tests | [docs/ios/app.md](docs/ios/app.md), [protocol](docs/ios/protocol-draft.md) |
+| `.github/workflows` | builds and releases | [docs/RELEASE.md](docs/RELEASE.md) |
 
-## Run it
+All documents: [docs/README.md](docs/README.md).
 
-Setup and details are in [docs/INSTALL.md](docs/INSTALL.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
+## Built during the hackathon
 
-`./verify.sh` (after `cargo fetch` once, see [INSTALL](docs/INSTALL.md#check-everything)) runs every test, compiles the three
-contracts (and, used only on a local node or testnet, the pool's test build with a one-minute admin delay and a test staking pool) without local
-paths and prints their SHA-256. It needs Rust 1.99.1 and the
-`wasm32-unknown-unknown` target, and no key, no funded account, no Docker and no browser.
-
-```
-cargo run -p ona-core --bin ona -- demo     # a full mission against the fakes
-cargo run -p ona-server --bin ona-mock-relay -- 8787     # a fake relay on localhost for front-end work
-```
-
-To measure gas on a local node, run `verify.sh`, set `NEAR_SANDBOX_BIN_PATH` to a `near-sandbox` binary you have checked (required: the
-program refuses to let the library download one), and run `cargo run -p ona-sandbox`. `cargo run -p ona-sandbox --bin
-ona-sandbox-pool` is written to run the pool, its agent and the pool commands on a local node against a test staking pool, fallback
-included, and print the gas of each call. Run once on 12/11/2026: 25 checks passed through deposit, cash, entry, placement, leave and
-payment; the escape exits did not run, because the node refused a long fast-forward ([SPEC](SPEC.md#ona-pool-cratesona-pool), with the gas measured).
-
-## Next steps (product direction, not built yet)
-
-**Privacy metrics in a side panel of the app.** A first version is built: `pool_privacy` counts, from the contract's public
-views, how many notes of the same value at the same place a note hides among, and the desktop apps show it in the Pool window
-and next to each vault offered for an entry (docs/desktop/privacy.md). The "with ONA / without ONA" comparison below is not built.
-- Show a privacy figure next to the chat, for example: "for similar amounts, your privacy is at X% with ONA and Y% without it".
-- When the agent recommends a vault or a placement, it states how much that choice raises the privacy figure (for example "+Z
-  points").
-- The figure must come from a measure that is defined and published (for instance how many deposits of a similar amount, and how
-  many notes in the same vault, an observer cannot tell apart), computed from what is on chain at that moment. No fixed or
-  invented percentage: while the anonymity set is one (see below), the panel says so.
-
-**Website on Vercel, three pages.**
-1. Home: presentation of the project, with polished animations and the interesting metrics (same rule: measured and dated, or
-   marked as an example).
-2. Demo.
-3. Downloads: links to install each app (Mac, other desktops, iPhone).
-
-## Known limitations
-
-- At launch the anonymity set is one, so ONA claims no unlinkability until a measured number of users is published.
-- Deposits are public on chain and show that an account uses ONA.
-- Every program trusts the NEAR RPC node it is given: no proof is checked, so a lying node can make the signer sign for a deposit
-  that does not exist. Run your own node for the signer and the relay.
-- The model enclave reads the pseudonymized prompt by design, under a TEE assumption. Pseudonyms replace declared terms only (see
-  [what pseudonyms cover](#what-pseudonyms-cover)).
-- **The relay can read what goes to the model and invent replies.** The client takes the model key from an attestation report that the
-  relay delivers and does not verify the Intel and NVIDIA quotes yet. Every exposure report with a real call says so.
-- The payment confirmation is a digest bound to the network, the contract, the mission, a random nonce, the recipient and the amount
-  of the chosen offer; it proves the caller saw these fields, not that a human did, since it is not signed by a separate device.
-- NEAR AI Cloud keeps one usage row per request.
-- The computer must be on for a mission to progress.
-- The same team would operate the relay, the signer and the anchoring.
-- Anchoring proves that the checkpoints shown form an unbroken chain that existed at those dates. It rules out a second chain with
-  the same key only if the aggregator is honest, kept its records and was not replaced during the mission, and the auditor knows
-  from elsewhere when the mission was opened. It cannot rule out a second history built from the start with another key unless the
-  mission's opening tag was recorded elsewhere, and it proves what the agent wrote, not that it is true.
-- One owner of the registry can replace the other after 30 days unless the other vetoes, so a stolen key is a threat as long as
-  nobody watches for such proposals.
-- Chats are deleted after 24 hours only when the app runs: nothing purges while it is closed. Keys are in a local file outside the
-  chat folder until the keychain is wired in, and overwriting deleted files does not erase them on an SSD or on APFS.
-- Testnet only. The mint has no real-money deployment planned.
-- **A dishonest relay may still be able to read replies.** With encryption version 2, the relay controls which client key the reply is encrypted to.
-  The client now uses version 3, which binds the reply key. The NEAR AI gateway accepted version 3 in one real call on 12/11/2026 (model
-  `z-ai/glm-5.3-flash`, through the test relay: decrypted reply, valid signature, 48 tokens). That the real gateway refuses a request whose
-  reply key was replaced was tested only against a simulated enclave. A relay running in an attested enclave is not in place yet.
-- The relay serves a fixed pool of 32 connections with per-request deadlines, so 32 slow clients are enough to keep it busy. Do not expose it
-  to the internet yet; behind an onion service, rely on its denial-of-service protection.
-- The signer and the relay read the chain through two RPC endpoints and stop when they disagree. Two endpoints that lie together still
-  decide what gets signed.
-- A stolen signer key can drain the reserve at the speed of the hourly redemption limit. There is no key rotation.
-- An attacker holding tokens can keep a tier's redemption limit used up and slow exits for that tier (the relay has its own limit).
-
-More in [SPEC.md](SPEC.md).
+The repository's history starts on 10/11/2026, inside the build window (1 to 14 November 2026): every commit is
+hackathon work. The first commit imports the prototype as the team had it on that day. Team: Hugo Thomas (core,
+contracts, relay, pool) and Enzo Blain (apps, phone protocol, Tor on iPhone, releases).
 
 ## Libraries and AI-generated code
 
@@ -260,10 +179,6 @@ Test tooling, not shipped: C Tor 0.4.9.16 (Homebrew) runs the test onion service
 The iOS app (`ios/ONA`) uses only Apple frameworks (SwiftUI, Foundation, CryptoKit, Security, VisionKit). The mock
 computer (`ios/MockComputer`) uses only the Python standard library; its P-256 code (`p256.py`) is written for the mock
 only and is not meant for real keys.
-
-## Related project
-
-To be named.
 
 ## License
 

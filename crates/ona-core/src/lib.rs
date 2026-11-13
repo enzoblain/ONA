@@ -877,16 +877,16 @@ impl Model for MockModel {
         Ok(ModelReply { text: json!({"queries": [query.trim()]}).to_string(), mode: MODE, call: None })
     }
 
-    /// The demo's reader: the page's first sentence long enough, quoted as it is.
+    /// The demo's reader: up to two sentences of the page, those with figures first (prices, delays), quoted as they are.
     fn research_read(&mut self, input: &str) -> Result<ModelReply, ModelFailure> {
         let page = input.split_once("\n\nPage:\n").map_or("", |(_, p)| p);
-        let notes: Vec<Value> = page
+        let mut sentences: Vec<&str> = page
             .split_inclusive(['.', '!', '?'])
             .map(str::trim)
             .filter(|s| (research::MIN_QUOTE_CHARS..=research::MAX_NOTE_CHARS).contains(&s.chars().count()))
-            .take(2)
-            .map(|s| json!({"claim": s, "quote": s}))
             .collect();
+        sentences.sort_by_key(|s| !s.chars().any(|c| c.is_ascii_digit()));
+        let notes: Vec<Value> = sentences.into_iter().take(2).map(|s| json!({"claim": s, "quote": s})).collect();
         Ok(ModelReply { text: json!({"notes": notes}).to_string(), mode: MODE, call: None })
     }
 
