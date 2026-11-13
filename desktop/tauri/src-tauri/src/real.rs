@@ -16,6 +16,15 @@ use crate::engine::{Guarded, MissionCore};
 
 pub const FILE: &str = "model.json";
 pub const POOL_FILE: &str = "pool.json";
+/// The NEAR accounts the person allows a free research to pay: one per line, `#` starts a comment.
+pub const PAYEES_FILE: &str = "payees.txt";
+
+/// The allowed payment recipients, from `payees.txt`. No file: none (only the demo directory's accounts can be paid).
+/// ona-core checks each name and refuses the research if one is not a NEAR account.
+pub fn load_payees(data_dir: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(data_dir.join(PAYEES_FILE)).unwrap_or_default();
+    ona_core::gate::parse_account_list(&text).into_iter().collect()
+}
 
 /// Reads a settings file of the data folder: None when it does not exist, Err when it cannot be read.
 fn load_settings<T: serde::de::DeserializeOwned>(data_dir: &Path, name: &str) -> Result<Option<T>, String> {

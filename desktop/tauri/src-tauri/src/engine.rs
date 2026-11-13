@@ -288,6 +288,8 @@ enum Stage {
 
 struct ResearchRun {
     question: String,
+    /// The NEAR accounts the person allows to be paid (`payees.txt`), sent with `research_open`.
+    payees: Vec<String>,
     stage: Stage,
     /// Accepted queries, searched ones, sources found (handle, site), pages read or skipped: for the working label.
     queries: usize,
@@ -411,12 +413,18 @@ pub struct ChatEngine {
     count: u64,
     /// One core for the pool, on its own thread, made on first use: it holds the wallet file's lock.
     pool: Option<CoreThread>,
+    /// The NEAR accounts the person allows a research to pay (`payees.txt` in the data folder). Empty: only the
+    /// demo directory's accounts can be paid.
+    pub payees: Vec<String>,
 }
 
 impl ChatEngine {
     pub fn new(make_core: impl Fn() -> Box<dyn MissionCore> + Send + Sync + 'static) -> Self {
         let make_core: CoreFactory = Arc::new(make_core);
-        Self { chats: Vec::new(), mode: "mock".into(), make_pool_core: make_core.clone(), make_core, count: 0, pool: None }
+        Self {
+            chats: Vec::new(), mode: "mock".into(), make_pool_core: make_core.clone(), make_core, count: 0, pool: None,
+            payees: Vec::new(),
+        }
     }
 
     /// ona-core cores, with the fake model or the real one as `setup` says when each core is made.
@@ -587,6 +595,7 @@ impl ChatEngine {
 
     fn say(&mut self, text: &str, chat_id: &str) {
         let make_core = &self.make_core;
+        let payees = self.payees.clone();
         let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else { return };
         chat.add(Content::User(text.to_owned()));
         if chat.run.as_ref().is_some_and(|r| matches!(r.phase, Phase::Running | Phase::Waiting(_))) {
@@ -596,7 +605,7 @@ impl ChatEngine {
         // A new core for every mission: the previous one (closed, or stopped by an error or a panic) is dropped.
         chat.runs += 1;
         let research = (chat.kind == Kind::Research).then(|| ResearchRun {
-            question: text.to_owned(), stage: Stage::Open, queries: 0, searched: 0, sources: Vec::new(), read: 0,
+            question: text.to_owned(), payees, stage: Stage::Open, queries: 0, searched: 0, sources: Vec::new(), read: 0,
             prepared: None,
         });
         chat.run = Some(Run {
@@ -871,7 +880,7 @@ fn step_research(chat: &mut Chat) -> Option<String> {
     let think = |text: &str| Content::Activity { tool: "think".into(), text: text.into() };
     match r.stage {
         Stage::Open => {
-            let opened = run.core.poll(json!({"cmd": "research_open", "question": r.question}))?;
+            let opened = run.core.poll(json!({"cmd": "research_open", "question": r.question, "payees": r.payees}))?;
             if !ok(&opened) {
                 fail(chat, &error_of(&opened));
                 return None;

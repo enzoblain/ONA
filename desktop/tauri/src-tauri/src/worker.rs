@@ -107,7 +107,11 @@ impl Worker {
                 pairing: PairingAuthority::waiting(&name),
                 name,
                 secrets: Some(secrets),
-                engine: ChatEngine::with_ona_core(setup.clone()),
+                engine: {
+                    let mut engine = ChatEngine::with_ona_core(setup.clone());
+                    engine.payees = crate::real::load_payees(&data_dir);
+                    engine
+                },
                 tor,
                 server: None,
                 server_error: None,

@@ -135,6 +135,15 @@ up this way got HTTP 200 from a service restricted to its key. Not checked again
 
 Tested with unit tests only (settings, refusals, a core set up through a SOCKS port). Not run against a relay yet.
 
+## Allowed payment recipients
+
+A free research pays only a NEAR account the person allowed (docs/research.md, "Money guardrails"). The list is
+`payees.txt` in the app's data folder: one account per line, `#` starts a comment. It is read when the app starts and
+sent with every `research_open`. Without the file, only the demo directory's accounts can be paid. An entry that is not
+a NEAR account makes ona-core refuse the research, with the reason. Not tested in the window (13/11/2026): the change
+is two lines in the engine and the worker; the core side is tested through `Core::dispatch`
+(`crates/ona-core/tests/payees.rs`). The macOS app does not read the file yet.
+
 ## Erasure and backups
 
 Conversations are kept in memory only and are gone when the app quits; nothing about them is written to disk. Nothing
