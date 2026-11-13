@@ -1,6 +1,6 @@
 # ONA iOS app — instructions (owner: Enzo)
 
-Background: `docs/ios/brief.md` (brief received 2026-11-10) and `docs/ios/notes.md` (status, open questions).
+Background: `docs/team/ios-brief.md` (brief received 2026-11-10) and `docs/team/ios-notes.md` (status, open questions).
 
 ## Scope
 
@@ -28,4 +28,4 @@ choice, payment).
 - Swift package / Rust crate versions pinned exactly; log each adopted library in the README.
 - Measurements go in `docs/ios/` with date, device, iOS version and library versions. No number in public text
   without a reproducible measurement.
-- Research claims about Arti/Tor on iOS are unverified until checked (see `docs/ios/notes.md`).
+- Research claims about Arti/Tor on iOS are unverified until checked (see `docs/team/ios-notes.md`).
