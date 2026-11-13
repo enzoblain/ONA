@@ -182,6 +182,10 @@ impl Transport for TorTransport {
         self.call = self.proxy.agent().ok();
     }
 
+    fn end_call(&mut self) {
+        self.call = None;
+    }
+
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
         let mut request = self.agent()?.get(self.url(path)?);
         for (name, value) in headers {
@@ -226,7 +230,8 @@ pub fn near_client(url: &str, key: SigningKey, proxy: &TorProxy) -> Result<ona_n
 pub enum Network {
     /// Straight to each destination. An onion address is refused: resolving it here would leak the name.
     Direct,
-    /// Everything through this local Tor SOCKS port, each request on its own circuit.
+    /// Everything through this local Tor SOCKS port, each request on its own circuit, except the requests of one
+    /// model call, which share one.
     Tor(TorProxy),
 }
 
@@ -303,6 +308,11 @@ impl Transport for NetTransport {
     fn new_call(&mut self) {
         if let Self::Tor(t) = self {
             t.new_call()
+        }
+    }
+    fn end_call(&mut self) {
+        if let Self::Tor(t) = self {
+            t.end_call()
         }
     }
     fn get(&mut self, path: &str, headers: &[(String, String)]) -> Result<(u16, Vec<u8>), String> {
@@ -477,6 +487,8 @@ mod tests {
         assert_eq!(first, user(&t.agent().unwrap()), "the requests of one call share credentials");
         t.new_call();
         assert_ne!(first, user(&t.agent().unwrap()), "a new call, a new circuit");
+        t.end_call();
+        assert!(t.call.is_none(), "after the call, requests are alone again");
         let mut net = Network::Tor(proxy).transport("https://relay.example.org").unwrap();
         net.new_call();
         let NetTransport::Tor(inner) = &net else { panic!("through Tor") };
