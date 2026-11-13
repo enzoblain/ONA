@@ -18,6 +18,7 @@ pub const MESSAGE_DOMAIN: &str = "ona/message/v1";
 pub const DELETE_DOMAIN: &str = "ona/delete/v1";
 pub const PLAN_DOMAIN: &str = "ona/plan/v1";
 pub const OFFERS_DOMAIN: &str = "ona/offers/v1";
+pub const QUERIES_DOMAIN: &str = "ona/queries/v1";
 pub const PAY_DOMAIN: &str = "ona/pay/v2";
 pub const PAYLOAD_PREFIX: &str = "ona-pair:";
 
@@ -138,6 +139,14 @@ pub fn plan_digest(id: &str, steps: &[String]) -> String {
     let count = steps.len().to_string();
     let mut fields = vec![Field::Text(Some(PLAN_DOMAIN)), Field::Text(Some(id)), Field::Text(Some(&count))];
     fields.extend(steps.iter().map(|s| Field::Text(Some(s))));
+    sha256_hex(&encode(&fields))
+}
+
+/// The search queries of a free research (docs/research.md): `fields("ona/queries/v1", id, query_1, query_2, …)`,
+/// without a count (each field carries its length).
+pub fn queries_digest(id: &str, queries: &[String]) -> String {
+    let mut fields = vec![Field::Text(Some(QUERIES_DOMAIN)), Field::Text(Some(id))];
+    fields.extend(queries.iter().map(|q| Field::Text(Some(q))));
     sha256_hex(&encode(&fields))
 }
 
@@ -300,6 +309,9 @@ pub mod tests {
                    "10b2ecd6ff60485e505b911709ed14b162137f0237abaa8aed21eee7c26edb84");
         let offers = vec![json!({"firm_id": "cabinet-b", "price_cents": 60000, "delay_days": 10,
                                  "source_spans": ["Forfait 600 euros, sous 10 jours"]})];
+        assert_eq!(queries_digest("c-0123456789abcdef0123456789abcdef",
+                                  &["plombier Lyon".into(), "tarif déplacement plombier".into()]),
+                   "8174711c622fea16bd82439613d544f31d2c2d8c3fb4bc1e22414a092a7cb01c");
         assert_eq!(offers_digest("c-2", &offers), "5127c86b14fc1406536bc274ea9c5b9e85e4a9b7e2adaf0c7b156ccf2dfb97b6");
         assert_eq!(payment_digest_v2("testnet", "pay.ona.testnet", "m-1", PHONE_NONCE, "cabinet-b.testnet",
                                      "1000000000000000000000000"),
@@ -328,6 +340,8 @@ pub mod tests {
         assert_ne!(offers_digest("c-2", &offer(60000)), offers_digest("c-2", &offer(6000)));
         assert_ne!(plan_digest("c-1", &["search".into()]), plan_digest("c-1", &["pay".into()]));
         assert_ne!(plan_digest("c-1", &["search".into()]), plan_digest("c-9", &["search".into()]));
+        assert_ne!(queries_digest("c-1", &["a b".into()]), queries_digest("c-1", &["a".into(), "b".into()]));
+        assert_ne!(queries_digest("c-1", &["a".into()]), queries_digest("c-9", &["a".into()]));
         assert_ne!(payment_digest_v2("testnet", "c", "m-1", PHONE_NONCE, "a.testnet", "1"),
                    payment_digest_v2("testnet", "c", "m-2", PHONE_NONCE, "a.testnet", "1"));
     }
