@@ -327,6 +327,11 @@ final class RemoteModel {
         await confirm(pending, .accept)
     }
 
+    /// Free research: the queries, as shown, may leave.
+    func acceptQueries(_ pending: Pending) async {
+        await confirm(pending, .accept)
+    }
+
     func chooseRecipient(_ pending: Pending, firm: String) async {
         await confirm(pending, .accept, firm: firm)
     }
@@ -349,6 +354,7 @@ final class RemoteModel {
         switch pending.request {
         case .plan(let steps): SignedFields.planDigest(id: pending.id, steps: steps.map(\.raw))
         case .recipient(let offers): SignedFields.offersDigest(id: pending.id, offers: offers)
+        case .queries(let queries): SignedFields.queriesDigest(id: pending.id, queries: queries)
         case .payment(let request):
             switch PaymentCheck.verify(request) {
             case .success(let verified): verified.digest

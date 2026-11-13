@@ -14,6 +14,7 @@ enum SignedFields {
     static let deleteDomain = "ona/delete/v1"
     static let planDomain = "ona/plan/v1"
     static let offersDomain = "ona/offers/v1"
+    static let queriesDomain = "ona/queries/v1"
     static let payDomain = "ona/pay/v2"
 
     enum Field {
@@ -98,6 +99,11 @@ enum SignedFields {
 
     static func planDigest(id: String, steps: [String]) -> String {
         sha256Hex(encode([.text(planDomain), .text(id), .text(String(steps.count))] + steps.map { .text($0) }))
+    }
+
+    /// Free research: `fields("ona/queries/v1", id, query_1, query_2, …)` (docs/research.md).
+    static func queriesDigest(id: String, queries: [String]) -> String {
+        sha256Hex(encode([.text(queriesDomain), .text(id)] + queries.map { .text($0) }))
     }
 
     static func offersDigest(id: String, offers: [Offer]) -> String {

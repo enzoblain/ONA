@@ -175,6 +175,10 @@ private struct ItemView: View {
             ConfirmationCard(pending: pending, state: state, open: open)
         case .exposure(let exposure):
             ExposureCard(exposure: exposure)
+        case .answer(let answer):
+            AnswerCard(answer: answer)
+        case .action(let action, let done):
+            ActionCard(action: action, done: done)
         case .unknown:
             EmptyView()
         }
@@ -313,6 +317,7 @@ private struct ConfirmationCard: View {
         case .plan: "Valider le plan"
         case .recipient: "Choisir le destinataire"
         case .payment: "Confirmer le paiement"
+        case .queries: "Valider les recherches"
         case .unknown: "Confirmation"
         }
     }
@@ -322,6 +327,7 @@ private struct ConfirmationCard: View {
         case .plan: "list.bullet.clipboard"
         case .recipient: "person.crop.circle.badge.checkmark"
         case .payment: "creditcard"
+        case .queries: "magnifyingglass"
         case .unknown: "hand.raised"
         }
     }
@@ -336,6 +342,7 @@ private struct ConfirmationCard: View {
             case .success(let verified): "\(NEARAmount.format(verified.amount)) NEAR à \(verified.to)"
             case .failure: "Paiement incohérent : à refuser."
             }
+        case .queries(let queries): "\(queries.count) recherche\(queries.count > 1 ? "s" : "") à envoyer par Tor. Rien n'est sorti."
         case .unknown: "Cette version de l'app ne sait pas l'afficher."
         }
     }
@@ -345,6 +352,7 @@ private struct ConfirmationCard: View {
         case .plan: "Voir le plan"
         case .recipient: "Voir les offres"
         case .payment: "Vérifier le paiement"
+        case .queries: "Voir les recherches"
         case .unknown: "Ouvrir"
         }
     }
@@ -413,5 +421,72 @@ private struct Composer: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
+    }
+}
+
+// MARK: - Free research
+
+/// The answer of a research, with the notes it relies on and the pages they come from (docs/research.md).
+struct AnswerCard: View {
+    let answer: ResearchAnswer
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(answer.text).textSelection(.enabled)
+            if !answer.notes.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(answer.notes.enumerated()), id: \.offset) { _, note in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("« \(note.quote) »").font(.footnote).italic()
+                            Text("\(note.source) · \(source(note.source)?.title ?? "")").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            if !answer.sources.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Sources").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ForEach(answer.sources, id: \.handle) { s in
+                        // Shown as text, never opened from here: the phone does not visit the pages.
+                        Text("\(s.handle) · \(s.title)\n\(s.url)").font(.caption).textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: .rect(cornerRadius: 24))
+    }
+
+    private func source(_ handle: String) -> ResearchAnswer.Source? {
+        answer.sources.first { $0.handle == handle }
+    }
+}
+
+/// An action the answer suggests. Its recipient is given and confirmed on the computer only.
+struct ActionCard: View {
+    let action: SuggestedAction
+    let done: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(action.purpose, systemImage: action.kind == "payment" ? "creditcard" : "envelope")
+                .font(.headline)
+            if let text = action.text {
+                Text(text).font(.footnote).textSelection(.enabled)
+            }
+            if let amount = action.amount {
+                Text("\(NEARAmount.text(amount) ?? "montant illisible") NEAR").monospacedDigit()
+            }
+            if done {
+                Label("Fait sur l'ordinateur", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.subheadline)
+            } else {
+                Text("À faire sur l'ordinateur : vous y donnez le destinataire et confirmez l'action exacte.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: .rect(cornerRadius: 24))
     }
 }
