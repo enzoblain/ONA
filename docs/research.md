@@ -64,6 +64,13 @@ with these additions:
 A chat's `status` is `working` while queries are searched and pages read, `waiting` while the queries await
 confirmation, `idle` once answered (actions do not block it).
 
+## Checked
+
+On macOS (13/11/2026): the `mailto:` link of a message, made by the real core through the demo flow and opened with
+`open` as the apps open it, opened Mail with the recipient, the subject and the text (accents included) filled in. The
+message was not sent. The message leaves from the person's own e-mail address: Tor does not cover it, and the recipient
+sees that address.
+
 ## Not tested
 
 Through Tor end to end: the network used for development blocked Tor on 13/11/2026; the search engine and page reading
