@@ -396,6 +396,36 @@ mod tests {
         assert_eq!(gone.status, 404);
     }
 
+    /// A research's queries: the phone signs the digest of the queries it shows and accepts them as shown. The answer
+    /// and the actions are shown on the phone; there is no route to carry out an action.
+    #[test]
+    fn the_phone_accepts_the_queries_it_shows() {
+        let mut setup = Setup::new();
+        let (_, created) = setup.create("Combien coûte un plombier à Lyon ? Écris-leur");
+        let chat = created.json["chat_id"].as_str().unwrap().to_owned();
+        let pending = setup.pending(&chat);
+        assert_eq!(pending["kind"], "queries");
+        let id = pending["id"].as_str().unwrap();
+        let shown: Vec<String> = pending["queries"].as_array().unwrap().iter().map(|q| q.as_str().unwrap().into()).collect();
+        let other = protocol::queries_digest(id, &["autre chose".into()]);
+        assert_eq!(setup.post("/v1/confirm", setup.confirm_body(&pending, &other)).json["error"], "signature does not verify");
+        let content = protocol::queries_digest(id, &shown);
+        assert_eq!(pending["content"], content);
+        assert_eq!(setup.post("/v1/confirm", setup.confirm_body(&pending, &content)).status, 200);
+
+        for _ in 0..40 {
+            setup.engine.tick();
+        }
+        let view = setup.post(&format!("/v1/chats/{chat}/view"), json!({"token": setup.paired.token}));
+        let items = view.json["chat"]["items"].as_array().unwrap();
+        assert_eq!(view.json["chat"]["status"], "idle");
+        assert!(items.iter().any(|i| i["kind"] == "answer"));
+        assert!(items.iter().any(|i| i["kind"] == "action" && i["state"] == "suggested"));
+        for path in [format!("/v1/chats/{chat}/actions"), "/v1/actions".to_owned(), format!("/v1/chats/{chat}/action")] {
+            assert_eq!(setup.post(&path, json!({"token": setup.paired.token, "index": 0, "to": "a@b.example"})).status, 404);
+        }
+    }
+
     #[test]
     fn the_pool_portfolio_needs_the_token() {
         let mut setup = Setup::new();
