@@ -20,6 +20,13 @@ core is `crates/ona-core/src/research.rs`; its module comment lists the guardrai
    action, confirms it (`research_action_prepare`, then `research_action_confirm` with its digest), and it is carried out
    once (`research_action_do`): a message opens in the person's own mail program (`mailto:`), the person sends it; a
    payment goes through `Payments` under the cap.
+   **Money guardrails** (since 13/11/2026): a payment recipient must be one the person allowed (the `payees` given to
+   `research_open`, or the directory's accounts) and must not be on the list of fraudulent accounts
+   (`crates/ona-core/data/blocked-accounts.txt`, which wins over the person's list). A refused recipient is refused
+   before anything is prepared, and the journal keeps a `gate_decision` with `refused` and the reason (`blocked` or
+   `not_allowed`), never the recipient. The fraud list is empty: on 13/11/2026 no maintained public list of fraudulent
+   NEAR account ids was found (the public lists found cover phishing web domains). Nobody's profile is reported:
+   ONA does not know it.
 6. **What left** (`research_exposure`): every query, page, model call and action.
 
 ## Core commands
@@ -28,7 +35,7 @@ All through `Core::dispatch`, every reply with `ok` and `mode`.
 
 | Command | Fields | Reply |
 |---|---|---|
-| `research_open` | `question`, optional `protected` (terms) | `opened`, `web` (`mock` on the demo web, `real` through Tor) |
+| `research_open` | `question`, optional `protected` (terms), optional `payees` (NEAR accounts the person allows to be paid, at most 32) | `opened`, `web` (`mock` on the demo web, `real` through Tor) |
 | `research_propose` | | `queries` |
 | `research_accept` | `queries` (1 to 3 strings, at most 120 characters each) | `accepted` |
 | `research_step` | | `done`, `event` (`searched` with `query` and `sources` [`handle`, `title`, `site`]; `read` with `handle` and `notes`; `unreadable`, `unread` or `refused` with `handle` and `error`; `answered`) |

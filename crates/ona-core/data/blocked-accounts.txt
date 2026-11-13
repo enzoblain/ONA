@@ -1,0 +1,6 @@
+# NEAR accounts known to be fraudulent: ONA never pays them, even when the person allowed them.
+# One account per line; `#` starts a comment; names are compared lowercased.
+#
+# Empty on 13/11/2026: no maintained public list of fraudulent NEAR account ids was found. The public
+# lists found cover phishing web domains, not accounts. Add an account here only with its public source
+# and date on the same line.

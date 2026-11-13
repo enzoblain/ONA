@@ -36,6 +36,8 @@ pub const MODE: &str = "mock";
 pub const MAX_PLAN_STEPS: usize = 12;
 /// Longest request line `serve` accepts.
 pub const MAX_REQUEST_BYTES: usize = 65_536;
+/// Most recipients a person may allow for one research's payments.
+pub const MAX_PAYEES: usize = 32;
 /// Said in every exposure report with a real model call, until enclave quotes are verified here.
 pub const RELAY_CAN_READ_WARNING: &str =
     "enclave quotes are not verified by this client: the relay can read what was sent to the model and make up its replies";
@@ -994,6 +996,8 @@ pub fn demo_policy() -> Policy {
         network: "sandbox".to_string(),
         payment_contract: "mint.test".to_string(),
         yocto_per_cent: DEMO_YOCTO_PER_CENT,
+        allowed_payees: BTreeSet::new(),
+        blocked_accounts: gate::blocked_accounts(),
     }
 }
 
@@ -1107,6 +1111,17 @@ impl Core {
                     return Err(format!("at most {MAX_TERMS} protected terms"));
                 }
                 policy.protected_terms.extend(terms);
+            }
+            // The recipients the person allows for this research's payments, besides the directory's.
+            if let Some(items) = request["payees"].as_array() {
+                if items.len() > MAX_PAYEES {
+                    return Err(format!("at most {MAX_PAYEES} allowed recipients"));
+                }
+                for item in items {
+                    let account = item.as_str().ok_or("allowed recipients must be NEAR accounts")?.trim().to_lowercase();
+                    ona_near::check_account_id(&account).map_err(|e| format!("allowed recipient: {e}"))?;
+                    policy.allowed_payees.insert(account);
+                }
             }
             let model = self.free_model()?;
             let web: Box<dyn research::OpenWeb> = match &self.web {

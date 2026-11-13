@@ -26,6 +26,7 @@ pub enum GateError {
     UnknownFirm,
     MessageTooLong,
     RecipientNotAllowed,
+    RecipientBlocked,
     AmountOverCap,
     ZeroAmount,
     ConfirmationMismatch,
@@ -44,6 +45,7 @@ impl GateError {
             Self::UnknownFirm => "firm is not in the directory",
             Self::MessageTooLong => "message too long",
             Self::RecipientNotAllowed => "recipient is not in the list chosen by the user",
+            Self::RecipientBlocked => "recipient is on the list of fraudulent accounts",
             Self::AmountOverCap => "amount over the cap",
             Self::ZeroAmount => "amount must be positive",
             Self::ConfirmationMismatch => "confirmation does not match this payment",
@@ -78,6 +80,50 @@ pub struct Policy {
     /// yoctoNEAR per cent of offer price. Set by the user, never read from a page. Zero refuses
     /// every payment, since then no amount can be tied to an offer.
     pub yocto_per_cent: u128,
+    /// Accounts the person allows as payment recipients, besides the directory's. A free research pays only these.
+    pub allowed_payees: BTreeSet<String>,
+    /// Accounts known to be fraudulent: never paid, even when allowed. See `blocked_accounts`.
+    pub blocked_accounts: BTreeSet<String>,
+}
+
+/// Why a payment recipient was refused. Written to the journal as is, without the recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayeeRefusal {
+    Blocked,
+    NotAllowed,
+}
+
+impl PayeeRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::NotAllowed => "not_allowed",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Blocked => "recipient is on the list of fraudulent accounts",
+            Self::NotAllowed => "recipient is not in the list chosen by the user",
+        }
+    }
+}
+
+/// The built-in list of fraudulent NEAR accounts: one account per line, `#` starts a comment. Empty on
+/// 13/11/2026: no maintained public list of NEAR account ids was found (lists found cover phishing web domains).
+const BLOCKED_ACCOUNTS: &str = include_str!("../data/blocked-accounts.txt");
+
+/// Parses a list of accounts, one per line; blank lines and `#` comments are skipped, names are lowercased.
+pub fn parse_account_list(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim().to_lowercase())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// The built-in list of fraudulent accounts.
+pub fn blocked_accounts() -> BTreeSet<String> {
+    parse_account_list(BLOCKED_ACCOUNTS)
 }
 
 /// The encoding used for signed and hashed messages (same as the phone protocol): for each
@@ -130,6 +176,20 @@ impl Policy {
         self.check_terms(message)
     }
 
+    /// A payment recipient must not be on the fraud list, and must be one the person allowed (directory or
+    /// `allowed_payees`). Account names are compared lowercased.
+    pub fn check_payee(&self, to: &str) -> Result<(), PayeeRefusal> {
+        let to = to.trim().to_lowercase();
+        if self.blocked_accounts.contains(&to) {
+            return Err(PayeeRefusal::Blocked);
+        }
+        let allowed = self.allowed_payees.contains(&to) || self.directory.values().any(|a| a.to_lowercase() == to);
+        if !allowed {
+            return Err(PayeeRefusal::NotAllowed);
+        }
+        Ok(())
+    }
+
     /// The amount an offer price stands for, with the user's conversion rate.
     pub fn amount_for_offer(&self, price_cents: u32) -> Result<u128, GateError> {
         if self.yocto_per_cent == 0 {
@@ -142,6 +202,9 @@ impl Policy {
     /// nonce is drawn for each payment, so its digest cannot be computed in advance or reused.
     pub fn build_payment(&self, firm: &str, amount: u128, mission_id: &str) -> Result<PaymentIntent, GateError> {
         let to = self.directory.get(firm).ok_or(GateError::RecipientNotAllowed)?;
+        if self.blocked_accounts.contains(&to.to_lowercase()) {
+            return Err(GateError::RecipientBlocked);
+        }
         if amount == 0 {
             return Err(GateError::ZeroAmount);
         }
@@ -165,6 +228,9 @@ impl Policy {
     pub fn check_payment(&self, intent: &PaymentIntent, confirmed: &str, mission_id: &str) -> Result<(), GateError> {
         if intent.network != self.network || intent.contract != self.payment_contract || intent.mission_id != mission_id {
             return Err(GateError::WrongPaymentContext);
+        }
+        if self.blocked_accounts.contains(&intent.to.to_lowercase()) {
+            return Err(GateError::RecipientBlocked);
         }
         if !self.directory.values().any(|account| account == &intent.to) {
             return Err(GateError::RecipientNotAllowed);
@@ -233,5 +299,30 @@ impl PaymentIntent {
         } else {
             format!("{whole}.{fraction}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_lists_skip_comments_and_blank_lines() {
+        let list = parse_account_list("# fraud list\n\nArnaque.testnet  # source, date\n  vol.near\n");
+        assert_eq!(list, ["arnaque.testnet", "vol.near"].iter().map(|s| s.to_string()).collect());
+        assert!(blocked_accounts().is_empty(), "no public list of NEAR accounts was found on 13/11/2026");
+    }
+
+    #[test]
+    fn a_payee_must_be_allowed_and_not_blocked() {
+        let mut policy = Policy::default();
+        policy.directory.insert("cabinet".into(), "cabinet.testnet".into());
+        assert_eq!(policy.check_payee("cabinet.testnet"), Ok(()), "the directory counts as allowed");
+        assert_eq!(policy.check_payee("autre.testnet"), Err(PayeeRefusal::NotAllowed));
+        policy.allowed_payees.insert("autre.testnet".into());
+        assert_eq!(policy.check_payee(" autre.testnet "), Ok(()));
+        policy.blocked_accounts.insert("cabinet.testnet".into());
+        assert_eq!(policy.check_payee("cabinet.testnet"), Err(PayeeRefusal::Blocked), "the fraud list wins");
+        assert_eq!(policy.build_payment("cabinet", 1, "m").unwrap_err(), GateError::RecipientBlocked);
     }
 }

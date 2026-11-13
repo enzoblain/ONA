@@ -490,6 +490,11 @@ impl<M: Model, W: OpenWeb, P: Payments> Research<M, W, P> {
             }
             Suggested::Payment { amount, .. } => {
                 ona_near::check_account_id(&to).map_err(|e| format!("recipient: {e}"))?;
+                // Refused before anything is prepared; the journal keeps why, never who.
+                if let Err(refusal) = self.policy.check_payee(&to) {
+                    self.journal.append(Kind::GateDecision, json!({"decision": "refused", "what": "payment", "reason": refusal.as_str()}));
+                    return Err(refusal.message().into());
+                }
                 if *amount == 0 || *amount > self.policy.amount_cap {
                     return Err("the amount is over the cap set for payments".into());
                 }
@@ -992,7 +997,11 @@ mod tests {
         let sent = r.do_action().unwrap();
         assert!(sent["mailto"].as_str().unwrap().starts_with("mailto:contact@plomberie.example?subject="));
         assert!(r.prepare_action(0, "contact@plomberie.example").unwrap_err().contains("already"));
-        // A payment: a NEAR account from the person, under the cap.
+        // A payment: a NEAR account from the person, one they allowed, under the cap.
+        assert!(r.prepare_action(1, "plomberie.testnet").unwrap_err().contains("not in the list"));
+        r.policy.allowed_payees.insert("plomberie.testnet".into());
+        let pay = r.prepare_action(1, "Plomberie.testnet").unwrap_err();
+        assert!(pay.contains("recipient"), "an account id is lowercase: {pay}");
         let pay = r.prepare_action(1, "plomberie.testnet").unwrap();
         r.confirm_action(pay["digest"].as_str().unwrap()).unwrap();
         let paid = r.do_action().unwrap();
@@ -1001,6 +1010,25 @@ mod tests {
         assert_eq!(r.payments.paid[0].amount, 100_000_000_000_000_000_000_000);
         let exposure = r.exposure();
         assert_eq!(exposure["outputs"]["message"], 1);
+    }
+
+    #[test]
+    fn a_blocked_or_unlisted_recipient_is_refused_and_logged_without_its_name() {
+        let mut r = research("Trouve un plombier à Lyon et écris-lui pour un devis, paie 0.1 NEAR d'acompte");
+        r.propose().unwrap();
+        r.accept(&["plombier Lyon".into()]).unwrap();
+        run(&mut r);
+        r.policy.allowed_payees.insert("arnaque.testnet".into());
+        r.policy.blocked_accounts.insert("arnaque.testnet".into());
+        let blocked = r.prepare_action(1, "arnaque.testnet").unwrap_err();
+        assert!(blocked.contains("fraudulent"), "the fraud list wins over the person's list: {blocked}");
+        let unlisted = r.prepare_action(1, "inconnu.testnet").unwrap_err();
+        assert!(unlisted.contains("not in the list"), "{unlisted}");
+        assert!(r.do_action().is_err(), "nothing was prepared");
+        assert!(r.payments.paid.is_empty());
+        let journal = serde_json::to_string(&r.journal.entries()).unwrap();
+        assert!(journal.contains("\"reason\":\"blocked\"") && journal.contains("\"reason\":\"not_allowed\""), "{journal}");
+        assert!(!journal.contains("arnaque") && !journal.contains("inconnu"), "the journal never names the recipient");
     }
 
     #[test]
