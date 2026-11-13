@@ -261,6 +261,22 @@ window and the phone are not held. The phone sees a `pool` item kind it does not
 `ChatMessages.swift`; how the iOS app draws it was not checked) and cannot answer it; its protocol and digests are
 unchanged.
 
+**Safeguards added after review (14/11/2026).**
+- No wallet page (connect or deposit) replaces a deposit in progress (still to be sent, or sent and waiting for the
+  agent's message to be signed, and not expired): its last step would be refused and the cash never issued. The app
+  answers "Finish or cancel the deposit in your wallet page first"; the sidebar shows the deposit in progress. Before
+  it is sent, it can be cancelled (`wallet_cancel`, after a warning to cancel only if the wallet did not confirm the
+  transaction); once sent, cancelling is refused: only the signature on that page finishes it.
+- The first card shows the entry's storage fee (one `NOTE_STORAGE_FEE` per cash note). If the prepared entry would
+  leave money in the pool's cash, or costs another fee, it is not run: the chat says why and shows a second card;
+  **Yes** runs that very preparation (within its 5 minutes), **No** leaves the cash notes in the pool wallet.
+- A queued cash issue counts as done only once `pool_recover` has brought back as many signatures as this deposit
+  issued cash notes and none waits any more; if nothing waits but fewer came (the agent dropped it), the chat stops,
+  says the cash issue was not completed (with the agent's error if any) and does not enter older cash. The signatures
+  counted are all those `pool_recover` reports, not only this deposit's (it does not say which notes they were).
+Run in the outside harness: 94 tests passed, no warning (four new: the second card, the dropped cash issue, a cancelled
+wallet page, and the worker refusing to replace or cancel a deposit in progress).
+
 **Pool screen.** Reads `pool_portfolio`, `pool_privacy` and `pool_info` together, each shown if it came, with its exact
 error and a **Retry** button otherwise. Top: the connected wallet with Connect / Forget. Then the total value (as on the
 phone), the simulation label in mock mode, the privacy summary, and the holdings: the cash (value; each tier's held

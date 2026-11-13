@@ -60,6 +60,12 @@ async fn wallet_connect(worker: State<'_, Worker>) -> Reply {
     call(&worker, |app| app.open_wallet_connect().map(Value::String))
 }
 
+/// Cancels the wallet page's deposit, only while it has not been sent (then a new page can open).
+#[tauri::command]
+async fn wallet_cancel(worker: State<'_, Worker>) -> Reply {
+    call(&worker, |app| app.cancel_wallet().map(|_| Value::Null))
+}
+
 /// Forgets the connected wallet's account.
 #[tauri::command]
 async fn wallet_forget(worker: State<'_, Worker>) -> Reply {
@@ -192,7 +198,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             state, chat, create_chat, post_message, delete_chat, confirm, research_action_prepare, research_action_do,
-            confirm_code, forget_phone, set_mode, pool, wallet_open, pool_card, wallet_connect, wallet_forget
+            confirm_code, forget_phone, set_mode, pool, wallet_open, pool_card, wallet_connect, wallet_forget, wallet_cancel
         ])
         .build(tauri::generate_context!())
         .expect("ONA could not start");

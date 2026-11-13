@@ -163,6 +163,12 @@ pub const WALLET_ACCOUNT_FILE: &str = "wallet_account";
 /// Selector remembers it per address); another one chosen by the system when it is taken.
 const WALLET_PORT: u16 = 8797;
 
+/// Why no new wallet page opens while a deposit is in progress on the current one.
+pub const WALLET_BUSY: &str = "Finish or cancel the deposit in your wallet page first";
+pub const WALLET_SENT: &str = "Finish the deposit in your wallet page first: it was sent, and the pool agent's message \
+    still needs your signature there to issue your cash notes (cancelling now would leave the deposit in the contract \
+    until its refund delay)";
+
 fn load_wallet_account(data_dir: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(data_dir.join(WALLET_ACCOUNT_FILE)).ok()?;
     Some(text.trim().to_owned()).filter(|a| crate::wallet::is_account(a))
@@ -346,7 +352,37 @@ impl App {
         }
     }
 
+    /// The deposit the wallet page is in the middle of: still to be sent, or sent and waiting for the agent's message
+    /// to be signed, and not expired. Another page must not replace it (its last step would then be refused).
+    fn deposit_in_progress(&self) -> Option<&crate::wallet::Session> {
+        use crate::wallet::Step;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(u64::MAX);
+        self.wallet.as_ref().filter(|s| matches!(s.step, Step::Deposit | Step::Sign(_)) && !s.expired(now))
+    }
+
+    /// Cancels the wallet page's deposit, only while it has not been sent: once sent, cancelling would leave the money
+    /// in the contract without its cash notes, so the person is told to sign instead.
+    pub fn cancel_wallet(&mut self) -> Result<(), String> {
+        use crate::wallet::Step;
+        let Some(session) = self.deposit_in_progress() else {
+            self.wallet = None;
+            return Ok(());
+        };
+        if session.executing || matches!(session.step, Step::Sign(_)) {
+            return Err(WALLET_SENT.into());
+        }
+        let chat = session.chat.clone();
+        self.wallet = None;
+        if let Some((chat, card)) = chat {
+            self.engine.pool_wallet_cancelled(&chat, &card);
+        }
+        Ok(())
+    }
+
     fn open_session(&mut self, session: crate::wallet::Session) -> Result<String, String> {
+        if let Some(current) = self.deposit_in_progress() {
+            return Err(if matches!(current.step, crate::wallet::Step::Sign(_)) { WALLET_SENT } else { WALLET_BUSY }.into());
+        }
         if self.wallet_server.is_none() {
             let worker = Worker { jobs: self.jobs.clone() };
             let handler: server::Handler = Arc::new(move |request: http::Request| wallet_request(&worker, request));
@@ -509,6 +545,8 @@ impl App {
             "last_request": self.last_request,
             "relay_client": relay_client,
             "wallet_account": self.engine.wallet_account,
+            // "deposit" or "sign" while the wallet page holds a deposit in progress (no new page opens meanwhile).
+            "wallet_page": self.deposit_in_progress().map(|s| s.state()["step"].clone()),
             "chats": self.engine.list_json(),
         })
     }
@@ -654,6 +692,41 @@ mod tests {
         worker.call(|app| app.forget_wallet()).unwrap().unwrap();
         assert!(worker.call(|app| app.view()["wallet_account"].is_null()).unwrap());
         assert_eq!(load_wallet_account(&dir), None);
+        worker.call(|app| app.stop()).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// No wallet page replaces a deposit in progress: before it is sent it can be cancelled; once sent, only the
+    /// signature on that page finishes it (a new page would make its last step refused).
+    #[test]
+    fn a_deposit_in_progress_is_not_replaced() {
+        let dir = std::env::temp_dir().join(format!("ona-worker-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mode"), "local").unwrap(); // no tor in a test
+        let worker = Worker::start("PC".into(), dir.clone(), 18798);
+        let prepared = json!({"ok": true, "prepared_id": "p1", "summary": {"op": "deposit", "account": "alice.testnet",
+            "network": "testnet", "expires_at": 4_000_000_000_000_000_000u64,
+            "wallet_call": {"receiver": "pool.testnet", "method": "deposit", "args": {}, "attached": "1010000000000000000000000"}}});
+        let first = prepared.clone();
+        worker.call(move |app| app.open_wallet(&first)).unwrap().unwrap();
+        assert_eq!(worker.call(|app| app.view()["wallet_page"].clone()).unwrap(), "deposit");
+        assert_eq!(worker.call(|app| app.open_wallet_connect()).unwrap(), Err(WALLET_BUSY.to_owned()));
+        let again = prepared.clone();
+        assert_eq!(worker.call(move |app| app.open_wallet(&again)).unwrap(), Err(WALLET_BUSY.to_owned()));
+        // Not sent yet: cancelled, and a new page opens.
+        worker.call(|app| app.cancel_wallet()).unwrap().unwrap();
+        assert!(worker.call(|app| app.view()["wallet_page"].is_null()).unwrap());
+        let second = prepared.clone();
+        worker.call(move |app| app.open_wallet(&second)).unwrap().unwrap();
+        // Sent, waiting for the signature: neither replaced nor cancelled.
+        worker.call(|app| app.wallet.as_mut().unwrap().step = crate::wallet::Step::Sign(json!({"message": "m"}))).unwrap();
+        assert_eq!(worker.call(|app| app.view()["wallet_page"].clone()).unwrap(), "sign");
+        assert_eq!(worker.call(|app| app.open_wallet_connect()).unwrap(), Err(WALLET_SENT.to_owned()));
+        assert_eq!(worker.call(|app| app.cancel_wallet()).unwrap(), Err(WALLET_SENT.to_owned()));
+        // Done: a new page may open.
+        worker.call(|app| app.wallet.as_mut().unwrap().step = crate::wallet::Step::Done).unwrap();
+        assert!(worker.call(|app| app.open_wallet_connect()).unwrap().is_ok());
         worker.call(|app| app.stop()).unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }

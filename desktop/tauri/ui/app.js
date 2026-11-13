@@ -49,15 +49,41 @@ function toast(message, ms = 3500) {
 }
 
 let walletAccount = null; // the connected NEAR wallet's account (state.wallet_account), or null
+let walletPage = null;    // "deposit" or "sign" while the wallet page holds a deposit in progress
 
 function drawWallet(state) {
   walletAccount = state.wallet_account || null;
-  $("wallet-dot").className = walletAccount ? "dot ok" : "dot";
-  $("wallet-label").textContent = walletAccount ? `Wallet: ${walletAccount}` : "Connect wallet";
+  walletPage = state.wallet_page || null;
+  $("wallet-dot").className = walletPage ? "dot warn" : walletAccount ? "dot ok" : "dot";
+  $("wallet-label").textContent = walletPage === "sign" ? "Sign in your wallet page"
+    : walletPage === "deposit" ? "Deposit in your wallet page"
+    : walletAccount ? `Wallet: ${walletAccount}` : "Connect wallet";
+}
+
+/**
+ * A deposit is in progress on the wallet page: no other page opens meanwhile. Before it is sent it can be cancelled
+ * here; once sent, only signing the agent's message on that page finishes it.
+ */
+async function offerCancel() {
+  if (walletPage === "sign") {
+    toast("Your deposit was sent: sign the pool agent's message in your wallet page to get your cash notes.", 8000);
+    return false;
+  }
+  if (!await ask("Cancel the deposit in progress?", "Only if you did NOT confirm the deposit transaction in your wallet. If you did, go back to the wallet page and finish it there.", "Cancel the deposit")) return false;
+  try {
+    await run("wallet_cancel");
+  } catch {
+    return false;
+  }
+  lastState = "";
+  lastChat = "";
+  await refresh();
+  return true;
 }
 
 /** Opens the wallet page in the browser to connect a NEAR wallet (Meteor and the others of NEAR Wallet Selector). */
 async function connectWallet() {
+  if (walletPage && !await offerCancel()) return;
   let url;
   try {
     url = await run("wallet_connect");
@@ -68,6 +94,7 @@ async function connectWallet() {
 }
 
 async function walletButton() {
+  if (walletPage) return offerCancel();
   if (!walletAccount) return connectWallet();
   if (await ask("Connected wallet", `ONA uses ${walletAccount} as the depositing account of your pool requests, and pays cash out to it only. Your wallet signs every deposit; ONA never holds its keys.`, "Connect another wallet")) {
     await connectWallet();
@@ -254,6 +281,7 @@ function vaultName(v) {
 
 function poolCard(c, state) {
   if (c.op === "portfolio") return chatPortfolio(c);
+  if (c.op === "enter") return entryCard(c, state);
   const open = state === "pending";
   const deposit = c.op === "deposit";
   const title = deposit
@@ -265,6 +293,7 @@ function poolCard(c, state) {
     rows.push(line("Vault", c.vault ? vaultName(c.vault) : "None: stays as cash in the pool"));
     rows.push(line("Your wallet sends", near(c.attached || "0")));
     if (c.cash_notes?.length) rows.push(line("Cash notes", c.cash_notes.map((n) => `${n.count} × ${near(n.note_value)}`).join(" + ")));
+    if (c.vault && c.entry_fee) rows.push(line("Vault entry fee (storage)", near(c.entry_fee)));
     notes.push(el("p", {}, blendsLine(c.blends_with, c.vault ? `once in vault ${c.vault.vault}` : "as cash")),
       el("p", { class: "help" }, "Without ONA, a direct staking deposit is tied to your account: 1. This is an upper bound; someone who cross-checks dates and amounts can rule some notes out."));
     const recommended = (c.recommended || []).map((r) => near(r)).join(", ");
@@ -285,12 +314,35 @@ function poolCard(c, state) {
     el("div", { class: "sub" }, `Network ${c.network}, contract ${c.contract}.${c.mode === "mock" ? " Simulation: fake pool." : ""}`),
     open
       ? el("div", { class: "actions" },
-          el("button", { class: "secondary", onclick: () => decidePool(c.id, false) }, "No"),
-          el("button", { class: "primary", onclick: () => decidePool(c.id, true) }, deposit ? "Yes, open my wallet" : "Yes, pay out"))
+          el("button", { class: "secondary", onclick: () => decidePool(c.id, false, c.op) }, "No"),
+          el("button", { class: "primary", onclick: () => decidePool(c.id, true, c.op) }, deposit ? "Yes, open my wallet" : "Yes, pay out"))
       : el("div", { class: `state ${state === "failed" ? "rejected" : state}` }, POOL_STATE_LABELS[state] || state));
 }
 
-async function decidePool(card, accept) {
+/** The second card: the entry differs from what the first card said (money left in cash, another fee). */
+function entryCard(c, state) {
+  const open = state === "pending";
+  const fees = Object.entries(c.fees || {}).map(([k, v]) => line(`Fee: ${k}`, /^\d+$/.test(String(v)) ? near(String(v)) : String(v)));
+  return el("div", { class: "card pool-card" },
+    el("h3", {}, `Put ${near(c.amount)} of cash into vault ${c.vault?.vault}?`),
+    line("Vault", vaultName(c.vault)),
+    line("Shares received (value)", near(c.shares_value || "0")),
+    line("Left in the pool's cash (lost)", near(c.left_in_cash || "0")),
+    ...fees,
+    ...(c.reasons || []).map((r) => el("p", { class: "warn" }, `Differs from the first card: ${r}.`)),
+    el("ol", {}, (c.steps || []).map((s) => el("li", {}, s))),
+    el("div", { class: "sub" }, `Network ${c.network}, contract ${c.contract}.${c.mode === "mock" ? " Simulation: fake pool." : ""}`),
+    open
+      ? el("div", { class: "actions" },
+          el("button", { class: "secondary", onclick: () => decidePool(c.id, false, "enter") }, "No, keep the cash"),
+          el("button", { class: "primary", onclick: () => decidePool(c.id, true, "enter") }, "Yes, put it in"))
+      : el("div", { class: `state ${state === "failed" ? "rejected" : state}` },
+          state === "rejected" ? "Declined: the cash stays in your pool wallet" : (POOL_STATE_LABELS[state] || state)));
+}
+
+async function decidePool(card, accept, op) {
+  // A deposit already waits on the wallet page: a new deposit's page would not open (payouts and entries need none).
+  if (accept && op === "deposit" && walletPage && !await offerCancel()) return;
   try {
     await run("pool_card", { chat: selected, card, accept });
   } catch {
@@ -865,6 +917,7 @@ function showSummary(prepared) {
 
 /** Opens the wallet page in the browser; the deposit then goes on there. */
 async function openWallet(prepared) {
+  if (walletPage && !await offerCancel()) return;
   let url;
   try {
     url = await run("wallet_open", { prepared });
