@@ -10,8 +10,8 @@ core is `crates/ona-core/src/research.rs`; its module comment lists the guardrai
 2. **Queries, confirmed before anything leaves.** The planner proposes up to 3 queries (`research_propose`). The person
    accepts them, on the computer or the phone, or edits them on the computer (`research_accept` with the final list). A
    query holding a protected term is refused.
-3. **Search and reading, through Tor.** Step by step (`research_step`): each query searched (DuckDuckGo's onion
-   service), the first 2 results of each read, at most 5 pages, one per site, https to a public host name or http to an
+3. **Search and reading, through Tor.** Step by step (`research_step`): each query searched (Brave Search, through
+   Tor; a refusal is tried again on up to 2 new circuits; a query that fails does not stop the others), the first 2 results of each read, at most 5 pages, one per site, https to a public host name or http to an
    onion address only. The model never chooses an address.
 4. **Answer with sources** (`research_result`): written from notes whose quotes were found word for word in the pages,
    citing them.
@@ -71,7 +71,14 @@ On macOS (13/11/2026): the `mailto:` link of a message, made by the real core th
 message was not sent. The message leaves from the person's own e-mail address: Tor does not cover it, and the recipient
 sees that address.
 
+On 13/11/2026, end to end through Tor with the real model (`ona real`, the team's test relay, a phone's shared
+connection): the question « Combien coûte un plombier à Lyon, et sous quel délai ? » gave 2 queries proposed by the model,
+2 searches on Brave Search through Tor, 4 pages chosen; one page read (the three others: HTTP 503, and two timeouts);
+4 notes, each quote found in the page; an answer citing them; 4 model calls, 12,332 tokens, about 12 minutes in all.
+DuckDuckGo, onion service included, answered every request through Tor with a bot challenge that day, hence Brave Search.
+
 ## Not tested
 
-Through Tor end to end: the network used for development blocked Tor on 13/11/2026; the search engine and page reading
-were checked directly (DuckDuckGo's HTML page and near.org). With the real model: not yet (the relay is not published).
+In the apps end to end with the real model and the real web (the Tauri app's search failed on DuckDuckGo before the
+change above). The path to the relay through Tor was slow and uneven on that connection: the same request took 6 s to
+106 s before its first byte.

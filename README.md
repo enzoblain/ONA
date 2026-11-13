@@ -85,8 +85,10 @@ Real and tested:
 
 Simulated or not done (everything simulated says `mode: mock`):
 
-- **the model**: fake in missions and research until the relay is published (one real NEAR AI call passed);
-- **the web through Tor**: research was checked against DuckDuckGo and a real page directly, not yet through Tor;
+- **the model**: fake in the apps unless `model.json` names a relay; one mission and one research ran with the real model
+  through Tor and the team's test relay on 13/11/2026 ([docs/INSTALL.md](docs/INSTALL.md), [docs/research.md](docs/research.md));
+- **the web through Tor**: one research ran end to end through Tor with the real model on 13/11/2026 (Brave Search, 4
+  pages chosen, 1 read, about 12 minutes), not yet in the apps;
 - **payments**: simulated in missions and actions; the mint and the pool are not on testnet;
 - **enclave quotes** are not verified by the client yet: the relay could read a request;
 - **not run**: the iPhone on a real device, the Tauri app on real Windows and Linux machines, a deposit from a real
