@@ -469,10 +469,14 @@ impl<T: Transport> E2eeClient<T> {
             _ => reserved,
         };
 
-        let encrypted = response["choices"][0]["message"]["content"]
-            .as_str()
-            .and_then(from_hex)
-            .ok_or("reply has no encrypted content")?;
+        // No content at all (null, as NEAR AI sends when thinking used up every token, or missing) is the same case as an
+        // empty one below.
+        let content = &response["choices"][0]["message"]["content"];
+        let encrypted = if content.is_null() {
+            Vec::new()
+        } else {
+            content.as_str().and_then(from_hex).ok_or("reply has no encrypted content")?
+        };
         // Too short to be ciphertext, for example when thinking used up every token. Not an attack.
         if encrypted.len() < MIN_CIPHERTEXT_LEN {
             return Err("reply has no content; the token limit may be too low".into());
@@ -503,6 +507,7 @@ mod tests {
         signature_calls: u32,
         encrypt_to_other_key: bool,
         empty_content: bool,
+        null_content: bool,
         signature_not_ready: u32,
         chats: u32,
         request: Vec<u8>,
@@ -521,6 +526,7 @@ mod tests {
             signature_calls: 0,
             encrypt_to_other_key: false,
             empty_content: false,
+            null_content: false,
             signature_not_ready: 0,
             chats: 0,
             request: vec![],
@@ -569,7 +575,13 @@ mod tests {
             let client_key: [u8; 32] = from_hex(named).unwrap().try_into().unwrap();
             let recipient = if self.encrypt_to_other_key { ClientKey::generate().public_bytes() } else { client_key };
             let reply = encrypt_to(&recipient, b"secret reply").unwrap();
-            let content = if self.empty_content { String::new() } else { to_hex(&reply) };
+            let content = if self.null_content {
+                Value::Null
+            } else if self.empty_content {
+                json!("")
+            } else {
+                json!(to_hex(&reply))
+            };
             let mut response = json!({"id": self.reply_id, "choices": [{"message": {"content": content}}]});
             if !self.usage.is_null() {
                 response["usage"] = self.usage.clone();
@@ -701,6 +713,17 @@ mod tests {
     fn an_empty_signed_reply_is_not_called_a_relay_alert() {
         let mut t = fake(json!({"total_tokens": 40}));
         t.empty_content = true;
+        let mut c = client(&mut t, 100, 1000);
+        let error = c.chat("x").unwrap_err();
+        assert!(!error.starts_with(DISHONEST_RELAY_ALERT), "{error}");
+        assert!(error.contains("token limit"), "{error}");
+    }
+
+    /// What NEAR AI sent on 13/11/2026 when a reasoning model spent its 512 tokens thinking: `"content": null`.
+    #[test]
+    fn a_signed_reply_with_null_content_points_at_the_token_limit() {
+        let mut t = fake(json!({"total_tokens": 40}));
+        t.null_content = true;
         let mut c = client(&mut t, 100, 1000);
         let error = c.chat("x").unwrap_err();
         assert!(!error.starts_with(DISHONEST_RELAY_ALERT), "{error}");
