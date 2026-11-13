@@ -128,9 +128,9 @@ cargo run -p ona-core --bin ona -- real
 
 ### Go through Tor
 
-With `ONA_TOR_SOCKS` set, **everything** `ona` sends to the network goes through that local Tor daemon: the relay (`ona real`), the
-pool agent and the NEAR RPC nodes of the pool commands. Without it, `ona real` and the pool commands print on stderr, at start, that
-the relay, the agent and the RPC nodes see this computer's IP address. `ona demo` and plain `ona` without a pool touch no network.
+With `ONA_TOR_SOCKS` set, **everything** `ona` sends to the network goes through that local Tor daemon: the relay (`ona real`), Intel's
+collateral service for the model key check of `ona real`, the pool agent and the NEAR RPC nodes of the pool commands. Without it, `ona real` and the pool commands print on stderr, at start, that
+the relay, Intel's collateral service, the agent and the RPC nodes see this computer's IP address. `ona demo` and plain `ona` without a pool touch no network.
 
 | Variable | Value |
 |---|---|
@@ -180,8 +180,12 @@ ONA_CHECK_RELAY_URL=http://127.0.0.1:8787 ONA_CHECK_MODEL=<model> cargo run -p o
 | `ONA_CHECK_MODEL` | model name, required |
 | `ONA_CHECK_MAX_TOKENS` | optional, most reply tokens, default 200 |
 | `ONA_CHECK_VERSION` | optional, `2` to compare with encryption version 2; version 3 otherwise |
+| `ONA_TOR_SOCKS`, `ONA_REQUIRE_TOR` | optional, as for `ona`: the relay and Intel's collateral service are then reached through Tor |
 
-It prints whether the reply was decrypted and its signature checked. One run spends at most the reply ceiling plus the prompt.
+Before sending anything it checks the model key as the app does (SPEC.md, "Model key check"), which fetches Intel's collateral from
+`api.trustedservices.intel.com` and `certificates.trustedservices.intel.com`; a refused key stops the run before the prompt leaves. It
+prints whether the key passed, the reply was decrypted and its signature checked. One run spends at most the reply ceiling plus the
+prompt. Since the quote check was added (13/11/2026) it has not been run.
 
 ## Measure gas on a local node
 

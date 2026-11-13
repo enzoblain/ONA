@@ -4,7 +4,7 @@
 use std::cell::Cell;
 
 use ona_core::quote::{
-    observed_2026_11_10, observed_compose_2026_11_10, verify_model_attestation, IntelQuoteVerifier, IntelVerdict,
+    check_gpu_evidence, observed_2026_11_10, observed_compose_2026_11_10, verify_model_attestation, IntelQuoteVerifier, IntelVerdict,
     Measurements, NvidiaVerifier, Policy, TcbStatus,
 };
 use serde_json::{json, Value};
@@ -127,7 +127,9 @@ fn composes() -> Vec<[u8; 32]> {
 
 fn check_with(r: &Value, intel: &dyn IntelQuoteVerifier, systems: &[Measurements], composes: &[[u8; 32]]) -> Result<[u8; 32], String> {
     let policy = policy(systems, composes);
-    verify_model_attestation(r, &nonce(&report()), &policy, intel, &Nras::pass())
+    let key = verify_model_attestation(r, &nonce(&report()), &policy, intel)?;
+    check_gpu_evidence(r, &nonce(&report()), &Nras::pass())?;
+    Ok(key)
 }
 
 fn check(r: &Value, intel: &dyn IntelQuoteVerifier) -> Result<[u8; 32], String> {
@@ -378,13 +380,13 @@ fn another_nonce_is_refused() {
     let (s, c) = (systems(), composes());
     let policy = policy(&s, &c);
     for bad in ["22".repeat(32), String::new(), "abc".into(), "zz".repeat(32), "22".repeat(33)] {
-        assert!(verify_model_attestation(&r, &bad, &policy, &AnyQuote, &Nras::pass()).is_err(), "{bad}");
+        assert!(verify_model_attestation(&r, &bad, &policy, &AnyQuote).is_err(), "{bad}");
     }
 
     let mut r = report();
     let ours = "33".repeat(32);
     r["request_nonce"] = Value::String(ours.clone());
-    assert!(verify_model_attestation(&r, &ours, &policy, &AnyQuote, &Nras::pass()).is_err());
+    assert!(verify_model_attestation(&r, &ours, &policy, &AnyQuote).is_err());
 }
 
 #[test]
@@ -393,15 +395,16 @@ fn the_gpu_evidence_must_answer_our_nonce_and_pass() {
     let n = nonce(&r);
     let (s, c) = (systems(), composes());
     let policy = policy(&s, &c);
+    assert!(verify_model_attestation(&r, &n, &policy, &exact()).is_ok(), "the GPU evidence is checked apart");
     let nras = Nras::fail();
-    assert!(verify_model_attestation(&r, &n, &policy, &exact(), &nras).is_err());
+    assert!(check_gpu_evidence(&r, &n, &nras).is_err());
     assert_eq!(nras.calls.get(), 1);
 
     let mut r = report();
     let payload = r["nvidia_payload"].as_str().unwrap().replacen(&n, &"44".repeat(32), 1);
     r["nvidia_payload"] = Value::String(payload);
     let nras = Nras::pass();
-    assert!(verify_model_attestation(&r, &n, &policy, &AnyQuote, &nras).unwrap_err().contains("GPU"));
+    assert!(check_gpu_evidence(&r, &n, &nras).unwrap_err().contains("GPU"));
     assert_eq!(nras.calls.get(), 0, "a stale payload is not even sent");
 }
 
@@ -472,7 +475,7 @@ fn a_tcb_status_the_policy_does_not_accept_is_refused() {
     let (s, c) = (systems(), composes());
     let policy = Policy { accepted_tcb: &lenient, ..policy(&s, &c) };
     let verdict = IntelVerdict { tcb_status: TcbStatus::SwHardeningNeeded, ..up_to_date(&quote_bytes(&r)) };
-    assert!(verify_model_attestation(&r, &nonce(&r), &policy, &Reports(verdict), &Nras::pass()).is_ok());
+    assert!(verify_model_attestation(&r, &nonce(&r), &policy, &Reports(verdict)).is_ok());
 }
 
 #[test]

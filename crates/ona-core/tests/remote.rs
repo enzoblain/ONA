@@ -12,6 +12,15 @@ use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+/// Takes the reported model key without checking its quote: these tests are about the client around the key.
+/// The real check is tested in `tests/attestation.rs`.
+struct Unverified;
+impl ona_core::e2ee::ModelKeyVerifier for Unverified {
+    fn model_key(&mut self, report: &Value, nonce: &str) -> Result<[u8; 32], String> {
+        ona_core::e2ee::reported_model_key(report, nonce)
+    }
+}
+
 const MODEL: &str = "test/model";
 const SALT: [u8; 32] = [3u8; 32];
 const MISSION: &str = "dossier confidentiel Dupont";
@@ -186,7 +195,7 @@ fn plan_cost() -> u64 {
 type RealMission = Mission<RemoteModel<Fake>, MockWeb, MockPayments>;
 
 fn mission_on(fake: &Fake, cfg: RemoteConfig, web: MockWeb) -> RealMission {
-    let model = RemoteModel::new(fake.clone(), cfg).unwrap();
+    let model = RemoteModel::new(fake.clone(), Box::new(Unverified), cfg).unwrap();
     Mission::open(model, web, MockPayments::default(), demo_policy(), SALT, MISSION)
 }
 
@@ -434,7 +443,7 @@ fn a_real_cost_above_the_reply_ceiling_is_charged_in_full() {
 #[test]
 fn an_oversized_mission_is_refused_before_any_call() {
     let fake = Fake::new(honest);
-    let model = RemoteModel::new(fake.clone(), config(100, 100_000)).unwrap();
+    let model = RemoteModel::new(fake.clone(), Box::new(Unverified), config(100, 100_000)).unwrap();
     let text = "x".repeat(remote::MAX_MISSION_BYTES + 1);
     let mut m = Mission::open(model, MockWeb::demo(), MockPayments::default(), demo_policy(), SALT, &text);
     assert_eq!(m.propose_plan().unwrap_err(), "input too large");
@@ -667,7 +676,7 @@ fn dispatch(core: &mut Core, request: Value) -> Value {
 
 fn core_on(fake: &Fake, cfg: RemoteConfig) -> Core {
     let mut core = Core::new();
-    core.set_model(Box::new(RemoteModel::new(fake.clone(), cfg).unwrap())).unwrap();
+    core.set_model(Box::new(RemoteModel::new(fake.clone(), Box::new(Unverified), cfg).unwrap())).unwrap();
     core
 }
 

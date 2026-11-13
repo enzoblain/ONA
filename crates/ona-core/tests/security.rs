@@ -16,6 +16,15 @@ use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+/// Takes the reported model key without checking its quote: these tests are about the client around the key.
+/// The real check is tested in `tests/attestation.rs`.
+struct Unverified;
+impl ona_core::e2ee::ModelKeyVerifier for Unverified {
+    fn model_key(&mut self, report: &Value, nonce: &str) -> Result<[u8; 32], String> {
+        ona_core::e2ee::reported_model_key(report, nonce)
+    }
+}
+
 const SALT: [u8; 32] = [5u8; 32];
 
 fn hex(b: &[u8]) -> String {
@@ -262,7 +271,7 @@ fn party<'a>(report: &'a Value, name: &str) -> &'a Value {
 fn requests_that_reached_the_relay_are_exposure_not_refusals() {
     let net = Net::default();
     net.0.borrow_mut().attestation_status = 500;
-    let model = RemoteModel::new(net.clone(), config(None, vec![])).unwrap();
+    let model = RemoteModel::new(net.clone(), Box::new(Unverified), config(None, vec![])).unwrap();
     let mut m = Mission::open(model, MockWeb::demo(), MockPayments::default(), demo_policy(), SALT, "secret mission");
     for _ in 0..3 {
         assert!(m.propose_plan().is_err());
@@ -275,7 +284,7 @@ fn requests_that_reached_the_relay_are_exposure_not_refusals() {
     assert!(relay["bytes_sent"].as_u64().unwrap() > 0);
     assert_eq!(report["model_calls_real"], 0, "the prompt itself never left");
     assert_eq!(report["content_readable_by_relay"], true);
-    assert_eq!(report["warnings"][0], RELAY_CAN_READ_WARNING);
+    assert_eq!(report["warnings"][0], ENCLAVE_TRUST_WARNING);
 }
 
 #[test]
@@ -415,11 +424,11 @@ fn file_config(path: &PathBuf) -> RemoteConfig {
 #[test]
 fn a_second_model_cannot_spend_from_the_same_tokens_file() {
     let path = tokens_path("two");
-    let a = RemoteModel::new(Net::default(), file_config(&path)).unwrap();
-    let refused = RemoteModel::new(Net::default(), file_config(&path));
+    let a = RemoteModel::new(Net::default(), Box::new(Unverified), file_config(&path)).unwrap();
+    let refused = RemoteModel::new(Net::default(), Box::new(Unverified), file_config(&path));
     assert_eq!(refused.err().unwrap(), "the request tokens file is in use by another process");
     drop(a);
-    assert!(RemoteModel::new(Net::default(), file_config(&path)).is_ok(), "free again once the first one is gone");
+    assert!(RemoteModel::new(Net::default(), Box::new(Unverified), file_config(&path)).is_ok(), "free again once the first one is gone");
 }
 
 #[test]
@@ -429,7 +438,7 @@ fn tokens_are_read_again_under_the_lock() {
     std::fs::write(&path, "tok-3\n").unwrap();
     let net = Net::default();
     net.0.borrow_mut().attestation_status = 200;
-    let mut model = RemoteModel::new(net, stale).unwrap();
+    let mut model = RemoteModel::new(net, Box::new(Unverified), stale).unwrap();
     let _ = model.plan("m");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "tok-1 and tok-2, spent elsewhere, did not come back");
 }
@@ -447,7 +456,7 @@ fn a_tokens_file_other_accounts_can_read_is_refused() {
         _ => None,
     };
     assert!(RemoteConfig::from_lookup(lookup).unwrap_err().contains("owner only"));
-    assert!(RemoteModel::new(Net::default(), config(Some(path.clone()), vec!["tok-1".into()])).is_err());
+    assert!(RemoteModel::new(Net::default(), Box::new(Unverified), config(Some(path.clone()), vec!["tok-1".into()])).is_err());
 }
 
 #[test]
@@ -455,7 +464,7 @@ fn the_rewritten_tokens_file_stays_private_and_leaves_no_copy() {
     let path = tokens_path("rewrite");
     let net = Net::default();
     net.0.borrow_mut().attestation_status = 200;
-    let mut model = RemoteModel::new(net, file_config(&path)).unwrap();
+    let mut model = RemoteModel::new(net, Box::new(Unverified), file_config(&path)).unwrap();
     let _ = model.plan("m");
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     let names: Vec<String> = std::fs::read_dir(path.parent().unwrap())

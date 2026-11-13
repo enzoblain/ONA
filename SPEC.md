@@ -446,7 +446,9 @@ firm, recipient, amount and transaction in clear. Nothing in the mission calls t
   the relay, the NEAR AI model through the relay) with its requests, bytes sent and bytes received. Bytes are those handed to the
   transport (path, headers, body), without HTTP framing or TLS; for the fake web they are the query, the handle and the message. A
   request that reached the relay is never counted as a gate refusal, even when only the attestation request left
-  (`outcome: prompt_not_sent`). `content_readable_by_relay` and `warnings` say when a real call was made without quote verification.
+  (`outcome: prompt_not_sent`). `content_readable_by_relay` is set when a real request was made, and `warnings` then holds
+  `ENCLAVE_TRUST_WARNING`: what the model key check covers (an Intel-signed quote binding the key and the request, on the observed
+  system and deployment) and what it does not (the NVIDIA GPU evidence, what the deployment's code does with the prompt).
 - **CLI**: a line that is not UTF-8 or is longer than 64 KiB gets an error reply; the loop goes on.
 
 ## Journal anchoring (`crates/ona-core/src/checkpoint.rs`, `crates/ona-anchor`)
@@ -518,24 +520,51 @@ failed call never falls back to it. Version 3 does not bind a reply to one preci
 processed, and the relay still sees sizes and counters. Each request gets a new client key and a fresh attestation nonce. A reply counts only
 if the signature comes from the attested model key (`provider_tee`) and covers the exact bytes sent and received. Every request carries
 `max_tokens`, and a per-client budget stops calls before they spend. The relay sees the usage counters, so pricing must be flat per
-request. TDX and NVIDIA quotes are not verified yet, so the relay that delivers the attestation report can answer with its own key,
-read every prompt and sign replies of its own: nothing in the client detects it. The HTTP transport ignores proxies named in the
+request. The model key comes from the attestation report through a `ModelKeyVerifier`, which every client must be given; the app's is
+`attestation::near_ai_verifier` (below). A relay answering with its own key is then refused before the prompt is encrypted (tested on
+13/11/2026 with a relay that relabels the real report with the client's nonce and its own key: refused, nothing posted). The HTTP transport ignores proxies named in the
 environment, follows no redirect and sends no `User-Agent`. A reply id must be 1 to 128 letters, digits, `-`, `_` or `.` before it is
 used in a request path. Reply signatures are checked with strict ed25519 verification.
 
-`crates/ona-core/src/quote.rs` checks a model attestation, not yet called by the client. **It is worth nothing until the Intel signature
-check is implemented:** that check (meant for `dcap-qvl`, which was not available offline when this was written) and NVIDIA's service are
-traits with no implementation, so nothing passes outside tests, and without the signature anyone can write a quote holding any value. The
-Intel trait returns a verdict: TCB status, advisory ids, collateral issue date and the verified report body. The policy lists the accepted
-TCB statuses and the oldest collateral accepted at a given time; the report fields are read from the verified body, which must equal the
-quote's. With it, a quote passes only if MRTD and RTMR0 to RTMR2 are
-on the caller's list, the event log replays to RTMR3, its `os-image-hash` and `compose-hash` events name a listed image and the hash of the
-reported `app_compose`, `report_data = signing_address || nonce` (32 + 32 bytes), `mr_config_id = 0x01 || compose hash || 15 zero bytes`,
-the enclave is not in debug mode, and the deployment hash is listed. `mr_config_id` alone proves nothing: the host chooses it. **The GPU
-evidence is not bound to the TDX quote:** its nonce shows it is fresh, but a relay can copy a genuine payload from another machine.
-Formats were checked on one real report (2026-11-10) that NEAR AI's official verifier accepted, not against the verifier's source. RTMR3
-events carry no digest in the log: each is `sha384(event_type as u32 little-endian || ":" || event || ":" || payload)`. The listed values
-in `observed_2026_11_10` were seen in that report, not published by NEAR AI, and change with each image update.
+### Model key check (`crates/ona-core/src/attestation.rs`, `crates/ona-core/src/quote.rs`)
+Stated as of 13/11/2026. For each request, `attestation::near_ai_verifier` takes the model attestation answering the request's nonce and:
+1. fetches Intel's collateral for the quote's platform (FMSPC and PCK CA read from the PCK certificate chain the quote carries): PCK CRL,
+   TCB info and QE identity from Intel's PCS (`https://api.trustedservices.intel.com`, `/sgx/certification/v4/pckcrl`,
+   `/tdx/certification/v4/tcb`, `/tdx/certification/v4/qe/identity`, `update=standard`), and the root CA CRL from the address in Intel's
+   root certificate (`https://certificates.trustedservices.intel.com/IntelSGXRootCA.der`). These requests go through the client's
+   `Network`, so through Tor (one circuit each) when `ONA_TOR_SOCKS` is set; the relay is not involved. Collateral is reused for one hour.
+   **Not run against Intel yet:** on 13/11/2026 Intel's host could not be reached from the development machine, so this fetch has never been tried for real;
+   the code follows `dcap-qvl`'s own client;
+2. verifies with `dcap-qvl` 0.7.1 (`ring` backend, Intel's root certificate built into the crate) the quote's signature, the QE report,
+   the PCK chain to Intel's root, the CRLs, the signatures and validity dates of the TCB info and QE identity, and the TCB level.
+   `dcap-qvl` also refuses a debug, migratable or profiling TD and a `Revoked` platform. The verified TD report body must be the quote's;
+3. applies the policy: TCB status `UpToDate` or `SWHardeningNeeded` (the platform is at Intel's latest level; Intel lists advisories whose
+   mitigation is software inside the enclave, which its collateral cannot assess; the advisory ids are reported). Refused:
+   `ConfigurationNeeded`, `ConfigurationAndSWHardeningNeeded`, `OutOfDate`, `OutOfDateConfigurationNeeded`, `Revoked` and any other
+   status. TCB info and QE identity issued more than 30 days before (their `issueDate`) are refused;
+4. runs `quote::verify_model_attestation`: MRTD and RTMR0 to RTMR2 on the list, the event log replays to RTMR3, its `os-image-hash` and
+   `compose-hash` events name a listed image and the hash of the reported `app_compose`, `report_data = signing_address || nonce`
+   (32 + 32 bytes) with `signing_address` equal to `signing_public_key`, `mr_config_id = 0x01 || compose hash || 15 zero bytes`, the
+   enclave is not in debug mode, and the deployment hash is listed. Any failure refuses the key and nothing is sent to the model.
+
+On the real report of 2026-11-10 (model `z-ai/glm-5.3-flash`, `tests/data/model-attestation.json`), `report_data` holds the ed25519
+public key itself followed by the nonce. Its measurements are the only ones listed (`observed_2026_11_10`, `dstack-nvidia-0.5.11`): values
+seen in that one report, not published by NEAR AI. Whether other NEAR AI model machines show the same values is not verified: two
+different gateway quotes were seen on 13/11/2026, so NEAR AI runs several machines, and a model machine with other values is refused
+until they are added. Formats were checked on that report, which NEAR AI's official verifier accepted, not
+against the verifier's source. RTMR3 events carry no digest in the log: each is
+`sha384(event_type as u32 little-endian || ":" || event || ":" || payload)`.
+
+Tested offline on 13/11/2026 (`tests/attestation.rs`): a real TDX quote and its Intel collateral shipped with `dcap-qvl` (issued
+2025-06-19) pass as `UpToDate`; a changed byte of the quote (header, measurements, `report_data`, signature, attestation key, QE report,
+PCK certificates), changed collateral, and collateral judged after its `nextUpdate` or before its `issueDate` are refused. On the NEAR AI
+report, with Intel's check replaced by one accepting only that exact quote (no collateral for it could be fetched): the report passes, and
+another valid key, a changed quote byte and another nonce are refused. **Not verified:** the NEAR AI quote against Intel's real
+collateral (`the_real_near_ai_quote_passes_with_live_collateral`, ignored, needs the network), so its real TCB status is unknown.
+
+**The GPU evidence is not bound to the TDX quote:** its nonce shows it is fresh, but a relay can copy a genuine payload from another
+machine. The client does not check it and does not contact NVIDIA; `quote::check_gpu_evidence` exists for that check alone. Nothing here
+checks what the code of the listed deployment does with the prompt: the compose hash pins it, it is not reviewed.
 
 ## Wallet (`crates/ona-wallet`)
 Append-only encrypted file, synced before the action it protects: token secrets before the deposit, spending mark before a spend.

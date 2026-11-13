@@ -25,6 +25,8 @@ ureq = { version = "3", default-features = false, features = ["rustls", "socks-p
 zeroize = "1"
 unicode-normalization = "=0.1.26"
 base64 = "0.22"
+# Intel TDX quote verification. No `report` feature: collateral is fetched through our own transport.
+dcap-qvl = { version = "=0.7.1", default-features = false, features = ["ring", "default-x509"] }
 ona-near = { path = "../ona-near" }
 ona-token = { path = "../ona-token" }
 ona-wallet = { path = "../ona-wallet" }

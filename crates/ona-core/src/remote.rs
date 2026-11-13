@@ -13,7 +13,8 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde_json::Value;
 
-use crate::e2ee::{E2eeClient, Transport};
+use crate::attestation::near_ai_verifier;
+use crate::e2ee::{E2eeClient, ModelKeyVerifier, Transport};
 use crate::private_fs::{self, OwnerOnly};
 use crate::tor::{NetTransport, Network};
 use crate::{Model, ModelFailure, ModelReply, RealCall};
@@ -322,6 +323,8 @@ impl<T: Transport> Transport for Recording<T> {
 
 pub struct RemoteModel<T> {
     transport: Recording<T>,
+    /// Kept from call to call, so Intel's collateral is not fetched again for each one.
+    verifier: Box<dyn ModelKeyVerifier>,
     relay: String,
     model: String,
     max_tokens: u32,
@@ -336,8 +339,9 @@ fn refusal(reason: &'static str) -> ModelFailure {
 
 impl<T: Transport> RemoteModel<T> {
     /// With a request tokens file, takes its lock (refused if another process holds it) and reads
-    /// the tokens again from the file under the lock.
-    pub fn new(transport: T, config: RemoteConfig) -> Result<Self, String> {
+    /// the tokens again from the file under the lock. `verifier` decides which model key is
+    /// trusted: `http_model` uses `attestation::near_ai_verifier`.
+    pub fn new(transport: T, verifier: Box<dyn ModelKeyVerifier>, config: RemoteConfig) -> Result<Self, String> {
         config.validate()?;
         let tokens = match config.request_tokens_file {
             Some(path) => Some(RequestTokens::from_file(path)?),
@@ -355,6 +359,7 @@ impl<T: Transport> RemoteModel<T> {
                 prompt_bytes: 0,
                 tokens,
             },
+            verifier,
             relay: config.relay_url,
             model: config.model,
             max_tokens: config.max_tokens_per_call,
@@ -394,7 +399,8 @@ impl<T: Transport> RemoteModel<T> {
         self.transport.reset();
         let token = self.transport.tokens.as_ref().and_then(|t| t.queue.front().cloned());
         let remaining = self.budget.saturating_sub(self.spent);
-        let mut client = E2eeClient::new(&mut self.transport, &self.model, self.max_tokens, remaining);
+        let mut client =
+            E2eeClient::new(&mut self.transport, &mut *self.verifier, &self.model, self.max_tokens, remaining);
         let result = match &token {
             Some(token) => client.chat_with_token(&prompt, token),
             None => client.chat(&prompt),
@@ -473,8 +479,9 @@ impl<T: Transport> Model for RemoteModel<T> {
 }
 
 /// The model used by `Core` in real mode, reaching the relay through `network`: through Tor, each request has its own
-/// circuit; an onion relay without Tor, or a local relay through Tor, is refused before anything is sent.
+/// circuit; an onion relay without Tor, or a local relay through Tor, is refused before anything is sent. The model
+/// key is checked with `attestation::near_ai_verifier`, whose requests to Intel also go through `network`.
 pub fn http_model(config: RemoteConfig, network: &Network) -> Result<RemoteModel<NetTransport>, String> {
     let transport = network.transport(&config.relay_url).map_err(|e| format!("relay URL: {e}"))?;
-    RemoteModel::new(transport, config)
+    RemoteModel::new(transport, Box::new(near_ai_verifier(network)), config)
 }
