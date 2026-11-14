@@ -7,7 +7,7 @@ stdin and through the C bridge (`OnaCoreBridge`, `ona_core_dispatch`, which pass
 Status: the commands run end to end only against a fake contract, with a fake agent (`crates/ona-core/tests/pool.rs`) and with
 the real agent, `ona-agent`, over HTTP on the same machine (`crates/ona-agent/tests/agent.rs`). Without `ONA_POOL_AGENT_URL`,
 `pool_execute` answers `no connection to the pool agent yet`, no agent call is made, no note is spent, and the notes it had
-prepared for the operation are forgotten. The pool contract and the agent have never run on a real chain.
+prepared for the operation are forgotten. The pool contract was deployed on testnet on 13/11/2026 and the agent ran against it on 14/11/2026.
 
 **Do not send a deposit from a NEAR wallet while no agent runs for the pool:** nobody could turn it into cash notes, and the money
 would wait in the contract until the account asks for a refund (`request_refund`, then `refund_deposit` after the escape delay).

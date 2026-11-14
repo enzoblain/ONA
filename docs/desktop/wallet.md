@@ -57,6 +57,5 @@ browser's `crypto.getRandomValues`, `util.format`), and the bundle gets a minima
   against a fake pool), including the refused `Host` and `Origin`.
 - The page in a browser against a stand-in for the app: it reads the state, shows the deposit, and NEAR Wallet
   Selector lists the four wallets.
-- **Not tested:** a deposit with a real wallet. That needs the pool on testnet and a funded testnet account; nothing
-  has been sent from a real wallet, and the NEP-413 layout of `ona-agent` has not been checked against a real wallet's
-  signature.
+- **With a real wallet:** tested on 14/11/2026 with Meteor on testnet, from the Tauri app: deposit, cash notes, entry
+  into a vault; the agent accepted the wallet's NEP-413 signature. The other three wallets were not tried.

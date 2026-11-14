@@ -70,8 +70,9 @@ With these variables set, `ona` also answers `pool_portfolio`, `pool_prepare`, `
 `pool_request_exit` and `pool_escape_exit` (inputs,
 outputs and the confirmation flow: [docs/desktop/pool-commands.md](desktop/pool-commands.md)). They read the pool contract, views
 only, and never contact the relay. Agent calls go to `ona-agent` (see "Run the pool agent") when `ONA_POOL_AGENT_URL` is set;
-without it `pool_execute` answers `no connection to the pool agent yet` and no agent call is made. The commands have run only
-against a fake pool, with a fake agent and with the real agent over HTTP on this machine. A deposit's `pool_execute` runs twice: the
+without it `pool_execute` answers `no connection to the pool agent yet` and no agent call is made. The commands have run
+against a fake pool, with a fake agent, with the real agent on a local NEAR node, and, through the desktop app, against the
+pool and agent on testnet (14/11/2026). A deposit's `pool_execute` runs twice: the
 first call returns `sign_message`, which the depositing account's own wallet must sign (NEP-413 `signMessage`, recipient the pool),
 and the second carries `depositor_signature`. **Do not send a pool deposit from a wallet until an agent runs for that pool**: nobody
 could turn it into cash notes, and it would wait in the contract for a refund.
@@ -156,7 +157,8 @@ SafeSocks 1
 ```
 
 `SafeSocks 1` makes Tor refuse a request carrying an IP address. `docs/torrc.client.example` and [docs/TOR.md](TOR.md) have more.
-None of this has run on the real Tor network: only against a fake SOCKS server on this machine.
+On 13/11/2026 a mission and a research ran this way through the real Tor network to the team's test relay (an onion
+service). That each request had its own circuit there was not verified; the tests use a fake SOCKS server.
 
 Each call reserves its reply ceiling plus one token per byte of prompt before it is sent. That reservation stays spent if the call fails,
 and only the usage in a validly signed reply replaces it, so the real cost of a call can exceed the ceiling. A mission is limited to 4 KB and
@@ -166,7 +168,8 @@ the payments stay fake, and those replies still say `"mode":"mock"`. For each re
 the token count and salted fingerprints, never the content. The exposure report counts real and fake calls apart (`model_calls_real`,
 `model_calls_mock`, `real_calls`), and its `mode` is `mixed` when real calls and fake parts are both present. Its `parties` list names the
 relay and the model with the requests and bytes each received, attestation and signature requests included, and
-`content_readable_by_relay` is `true` as soon as one request reached the relay. This mode has never run against NEAR AI.
+`content_readable_by_relay` is `true` as soon as one request reached the relay. This mode ran against NEAR AI on 13/11/2026
+(above).
 
 To check one encrypted call against NEAR AI without a mission, run a relay that holds the key, then:
 
@@ -231,8 +234,8 @@ after the last `unstake`. The program then, on one local node:
 
 It stops at the first step that fails, names it, and prints what was verified before, then the gas burnt by every transaction,
 the agent's included, as a table ready for SPEC. Run to the end on 13/11/2026: 34 checks passed, escape exits included; the gas measured is in SPEC.
-The deposit's wallet signature is made with the agent's own NEP-413 layout, so the run does not check that layout against a real
-wallet. Run it from a normal terminal, as above.
+The deposit's wallet signature is made with the agent's own NEP-413 layout, so this run does not check that layout against a real
+wallet; on testnet on 14/11/2026 a message signed by a real wallet (Meteor) was accepted by the agent. Run it from a normal terminal, as above.
 
 With `--serve`, the program stops after the deposit and the cash issue, writes a wallet, its key and a `pool.json` for a desktop
 app (development build, `"local_node": true`) into `ONA_SANDBOX_DIR` (default: a folder in the system's temporary directory), and
@@ -269,7 +272,8 @@ with the same key read the same nonce, and one of them is refused.
 Testnet or a local node only. Mainnet is refused from the names given, from a `.near` parent account, and from the chain id the node
 reports, which is asked before anything is sent. Build the contracts with `verify.sh`, and create the signer keys as below. Each
 contract becomes `mint.<parent>`, `registry.<parent>` or `pool.<parent>`, created and initialized in one transaction, with no access key.
-None of them has been deployed on testnet yet, and the pool has never been deployed anywhere.
+The pool was deployed on testnet with this tool on 13/11/2026 (test build, code hash checked: README, claim C6); the mint
+and the registry have not been deployed on testnet.
 
 Before sending, the tool checks that every role account is well formed, exists and holds only one role, then prints the plan (roles,
 funding, size and SHA-256 of the contract) and **waits for you to type the new account name** on the terminal. After the deployment it
@@ -390,7 +394,8 @@ If the store reports a write error, every further write is refused until the rel
 
 ## Run the pool agent
 
-**Never run against a real chain yet, and not in an enclave: whoever runs it sees which note asks for which vault.**
+**Ran on testnet on 14/11/2026 with demo settings (batches of one request, no delay), not in an enclave: whoever runs it
+sees which note asks for which vault.**
 
 ```
 cargo run -p ona-agent -- init-keys agent-keys.bin 3 3 3
@@ -492,7 +497,8 @@ compares pooled and individual yield and suggestions; the configuration must giv
 [crates/ona-crowd/PARADES.md](../crates/ona-crowd/PARADES.md): varied deposit amounts are the main leak, and simulated yield cannot be
 played on a chain.
 
-`ona-crowd run crowd.json out/` also plays the timeline on a local node or testnet. **It has never run.** It ignores the configured
+`ona-crowd run crowd.json out/` also plays the timeline on a local node or testnet. **It has never run** (the testnet crowd
+of 14/11/2026 used `ona-crowd-run`, see "Run a crowd on testnet"). It ignores the configured
 seed and draws a secret one from the system, never stored. It refuses mainnet, by name and by the chain id the node reports, and
 lending vaults (no adapter yet). Before writing any file or sending anything, it computes everything the funder account will send and
 stops if that is above `ONA_CROWD_MAX_SPEND_NEAR`. An error from the node stops the run; nothing is taken back from the fake accounts
@@ -515,8 +521,8 @@ cannot serve 1, 10 and 100 at once.
 
 ## Run a crowd on testnet
 
-Written on 14/11/2026. **It has not run live yet**: it is compiled and its planning, spend and refusal rules are unit-tested
-(`cargo test -p ona-sandbox --bin ona-crowd-run`); no transaction has been sent with it.
+Ran on testnet on 14/11/2026: 8 users of 8 deposited and entered vault 1 of the test pool, with gaps of 5 to 40 s between
+users. Its planning, spend and refusal rules are unit-tested (`cargo test -p ona-sandbox --bin ona-crowd-run`).
 
 `ona-crowd-run` puts a few real users into a deployed pool, so that the notes of a demo user are not alone in their tiers. Each
 user is an implicit NEAR account (its id is the hex of a fresh ed25519 public key), created by a transfer from one funder account.
@@ -598,4 +604,5 @@ home page name their source in `site/src/components/Metrics.tsx`.
 
 ## Not available yet
 
-No NEAR testnet deployment, tested real model connection, Tor, enclave, anchoring program, desktop app or iOS app. See the status table in the [README](../README.md).
+The mint and the registry on testnet, the `ona-relay` program, an enclave for the relay or the agent, an anchoring program,
+lending vaults. State of each component: the [README](../README.md#state-of-each-component-14112026) and [STATUS.md](STATUS.md).

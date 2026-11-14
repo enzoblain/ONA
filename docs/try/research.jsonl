@@ -1,6 +1,6 @@
-{"cmd":"research_open","question":"Combien coûte un plombier à Lyon, et sous quel délai ?"}
+{"cmd":"research_open","question":"How much does a plumber cost in Lyon, and how soon can one come?"}
 {"cmd":"research_propose"}
-{"cmd":"research_accept","queries":["plombier Lyon tarif délai"]}
+{"cmd":"research_accept","queries":["plumber Lyon price delay"]}
 {"cmd":"research_step"}
 {"cmd":"research_step"}
 {"cmd":"research_step"}

@@ -90,8 +90,8 @@ Debug.
 - iPhone 17 simulator against the mock computer: pairing, same 6-digit code on both sides (871 519), signed
   confirmations accepted, unsigned confirmation refused, pairing kept after an app restart and a signature with the
   reloaded key accepted.
-- **The simulator has no Secure Enclave**: it uses a software key (shown as such in the app). The Secure Enclave +
-  Face ID path has not run yet.
+- **The simulator has no Secure Enclave**: it uses a software key (shown as such in the app). On a real iPhone 16
+  on 14/11/2026, the Secure Enclave key asked for Face ID; signing a confirmation with it was not verified.
 
 ### Step 4 (Tor), state on 2026-11-10
 

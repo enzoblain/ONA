@@ -665,7 +665,8 @@ note kept by the wallet is paid by the contract.
   to the machine itself; through Tor `https` to a host name or `http` to an onion service; a final `/` ignored; no redirect, no proxy
   from the environment). Each operation opens a new connection, so a cash issue and the entry that follows share none; through Tor
   each request draws new SOCKS credentials, so Tor keeps each operation on its own circuit (`IsolateSOCKSAuth`, Tor's default;
-  tested against a fake SOCKS server only, not over the real Tor network). 200 is
+  tested against a fake SOCKS server; on 13/11/2026 a mission and a research ran through the real Tor network, where circuit
+  separation was not verified). 200 is
   done; 202, a 5xx or a transport failure is an unknown outcome; any other status is a certain refusal. Without the variable the agent is
   `NoAgent`, which refuses every call before anything is sent; the notes prepared for a refused operation are forgotten.
 - **Not built.** Configuring a pool wallet through the C bridge. Checking on chain that the user's deposit arrived before asking for
@@ -697,11 +698,12 @@ transport (`remote::http_model`), the pool agent's (`HttpAgent::through`) and th
   and a signature request through `HttpAgent` use three different user names and the onion name unresolved; two RPC reads use two;
   the relay's requests one each; with Tor down every call fails. The unit tests of `tor.rs` check, with a listener standing for the
   destination, that nothing reaches it directly when Tor is down, refuses or does not speak SOCKS.
-- **Not covered**: the real Tor network (circuits, exits accepting NEAR RPC, TLS through the tunnel); timing and size of the traffic,
+- **Not covered by tests**: the real Tor network (circuits, exits accepting NEAR RPC, TLS through the tunnel; one mission and one
+  research ran through it on 13/11/2026, circuit separation not verified); timing and size of the traffic,
   which Tor does not hide from an observer of both ends; `examples/e2ee_check.rs`, a manual check tool, which still connects directly.
 
 ## Pool agent (`crates/ona-agent`)
-**Never run against a real chain, not in an enclave.** The program that acts on `ona-pool` for its users.
+**Ran on testnet on 14/11/2026 with demo settings (batches of one request, no delay); not in an enclave.** The program that acts on `ona-pool` for its users.
 - **Keys.** One blind-signing BLS key per cash tier and per tier of each vault, in one file readable by its owner only, after the type
   line `ONA-POOL-AGENT-KEYS-V1`. The agent refuses to start unless they are the contract's keys and its account is the pool's agent.
 - **Store.** A key-value log built like the relay's: created once with the keys (`init-store`), a first line binding it to the keys and
@@ -890,8 +892,8 @@ gives the hash, `Client::send_signed` then sends as above, so a caller can recor
 The account key file is opened once without following symbolic links, and must be a regular file of at most 4 KiB, owned by the current
 user, readable by them only. The decoded key material is wiped from memory after use; the key text in the caller's environment is not.
 
-Since the `ona-sandbox` run of 2026-11-10 this client changed (required finality, failed receipts listed, status checks). It has not run
-against a node since.
+Since the `ona-sandbox` run of 2026-11-10 this client changed (required finality, failed receipts listed, status checks). Since then it
+ran against testnet: the pool deployment of 13/11/2026 and the agent and crowd runs of 14/11/2026.
 
 ## Deployment (`crates/ona-deploy`)
 

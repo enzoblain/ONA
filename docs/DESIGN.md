@@ -42,7 +42,8 @@ transliterated, a rephrasing); a name split by a line break without a hyphen (`D
 numeric reference whose digits run into the next letters (`&#x2019Brien` reads `&#x2019B`, as a browser does); and the context around
 a name (job, city, dates, a rare situation), which can be enough to identify someone.
 
-This is the design. Today the model, the web and the payments in the app are still fakes; see
+This is the design. In the apps the model and the web are the demo ones unless a relay is configured, and payments in
+missions are simulated (the pool runs on testnet); see
 [what works today](STATUS.md) and the [known limitations](#known-limitations).
 
 Example: find an employment lawyer and compare fees on a generic version of your case, without the firms you did not pick
@@ -94,7 +95,8 @@ and next to each vault offered for an entry (docs/desktop/privacy.md). The "with
 
 ## Known limitations
 
-- At launch the anonymity set is one, so ONA claims no unlinkability until a measured number of users is published.
+- ONA claims no unlinkability beyond the number the app measures on chain ("blends in with at most N notes"). On testnet
+  on 14/11/2026 the crowd was 8 test accounts funded by one account, so it can be told apart from real users.
 - Deposits are public on chain and show that an account uses ONA.
 - Every program trusts the NEAR RPC node it is given: no proof is checked, so a lying node can make the signer sign for a deposit
   that does not exist. Run your own node for the signer and the relay.
