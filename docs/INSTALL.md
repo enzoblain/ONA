@@ -578,6 +578,24 @@ agent's cash issue or entry before counting the user as not done, default 40).
 | `ONA_CROWD_MAX_SPEND_NEAR` | optional, most NEAR the run may spend from the funder, default 6 (`ona-crowd run` reads the same variable with its own default of 10) |
 | `ONA_CROWD_PER_HOUR_NEAR` | optional, most NEAR planned into one vault in any 60 minutes, default 1.8, at most 20. Above the vault's `hourly_cap` the entries still go in (the contract caps placements and leaves, not entries) and the agent places the rest in later hours |
 
+## The website
+
+The site in `site/` (home, demo, downloads) is a React app built with Vite. It needs Node 24 and npm, and is not part of
+`verify.sh`. It is a draft and is not deployed.
+
+```
+cd site
+npm ci             # the exact versions of package-lock.json
+npm run dev        # http://127.0.0.1:5173, reloads on change
+npm run build      # type-check, then the static site in site/dist
+npm run preview    # serves site/dist on http://127.0.0.1:4173 with the headers of vercel.json
+```
+
+On Vercel, set the project's root directory to `site`; `site/vercel.json` gives the build command, the rewrites for the three
+routes and the security headers (no third-party origin is allowed). The demo page replays `site/src/data/demo.json`, the recorded
+output of `cargo run --locked -p ona-core --bin ona -- demo`; record it again when that output changes. Figures shown on the
+home page name their source in `site/src/components/Metrics.tsx`.
+
 ## Not available yet
 
 No NEAR testnet deployment, tested real model connection, Tor, enclave, anchoring program, desktop app or iOS app. See the status table in the [README](../README.md).

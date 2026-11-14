@@ -1,0 +1,288 @@
+{
+ "source": "cargo run --locked -p ona-core --bin ona -- demo",
+ "commit": "8f1b633",
+ "recorded": "2026-11-12",
+ "steps": [
+  {
+   "send": {
+    "cmd": "open",
+    "mission": "Trouver un avocat en droit du travail pour M. Dupont",
+    "protected": [
+     "M. Dupont"
+    ]
+   },
+   "reply": {
+    "mode": "mock",
+    "ok": true,
+    "opened": true
+   }
+  },
+  {
+   "send": {
+    "cmd": "propose_plan"
+   },
+   "reply": {
+    "mode": "mock",
+    "ok": true,
+    "plan": [
+     "search",
+     "read",
+     "read",
+     "compare",
+     "confirm_recipient",
+     "contact",
+     "prepare_payment",
+     "confirm_payment",
+     "pay"
+    ]
+   }
+  },
+  {
+   "send": {
+    "cmd": "accept_plan"
+   },
+   "reply": {
+    "accepted": true,
+    "mode": "mock",
+    "ok": true
+   }
+  },
+  {
+   "send": {
+    "cmd": "search",
+    "template": "lawyer",
+    "value": "paris"
+   },
+   "reply": {
+    "handles": [
+     "h1",
+     "h2"
+    ],
+    "mode": "mock",
+    "ok": true
+   }
+  },
+  {
+   "send": {
+    "cmd": "read",
+    "handle": "h1"
+   },
+   "reply": {
+    "mode": "mock",
+    "offer": {
+     "delay_days": 7,
+     "firm_id": "cabinet-a",
+     "price_cents": 90000,
+     "source_spans": [
+      "Consultation 900 euros, sous 7 jours"
+     ],
+     "specialties": [
+      "labour"
+     ]
+    },
+    "ok": true
+   }
+  },
+  {
+   "send": {
+    "cmd": "read",
+    "handle": "h2"
+   },
+   "reply": {
+    "mode": "mock",
+    "offer": {
+     "delay_days": 10,
+     "firm_id": "cabinet-b",
+     "price_cents": 60000,
+     "source_spans": [
+      "Forfait 600 euros, sous 10 jours"
+     ],
+     "specialties": [
+      "labour"
+     ]
+    },
+    "ok": true
+   }
+  },
+  {
+   "send": {
+    "cmd": "compare"
+   },
+   "reply": {
+    "mode": "mock",
+    "ok": true,
+    "ranked": [
+     {
+      "delay_days": 10,
+      "firm_id": "cabinet-b",
+      "price_cents": 60000,
+      "source_spans": [
+       "Forfait 600 euros, sous 10 jours"
+      ],
+      "specialties": [
+       "labour"
+      ]
+     },
+     {
+      "delay_days": 7,
+      "firm_id": "cabinet-a",
+      "price_cents": 90000,
+      "source_spans": [
+       "Consultation 900 euros, sous 7 jours"
+      ],
+      "specialties": [
+       "labour"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "send": {
+    "cmd": "confirm_recipient",
+    "firm": "cabinet-b"
+   },
+   "reply": {
+    "firm": "cabinet-b",
+    "mode": "mock",
+    "ok": true
+   }
+  },
+  {
+   "send": {
+    "cmd": "contact",
+    "message": "Bonjour, demande de devis pour un litige prud'homal."
+   },
+   "reply": {
+    "mode": "mock",
+    "ok": true,
+    "sent": true
+   }
+  },
+  {
+   "send": {
+    "cmd": "prepare_payment"
+   },
+   "reply": {
+    "amount_near": "0.6",
+    "digest": "8832caf492bed8ed1ba00bffd2a1e1c0447a3e0adbbb0cc0f80a90bc4775bb5b",
+    "mode": "mock",
+    "ok": true,
+    "payment": {
+     "amount": "600000000000000000000000",
+     "contract": "mint.test",
+     "mission_id": "d49f9ed072df73bde5af0ac9070356f4",
+     "network": "sandbox",
+     "nonce": "da9b39ced836b33a33cec93ccfe165bb",
+     "to": "cabinet-b.testnet"
+    },
+    "screen": "Pay 600000000000000000000000 yoctoNEAR to cabinet-b.testnet"
+   }
+  },
+  {
+   "send": {
+    "cmd": "confirm_payment",
+    "digest": "8832caf492bed8ed1ba00bffd2a1e1c0447a3e0adbbb0cc0f80a90bc4775bb5b"
+   },
+   "reply": {
+    "confirmed": true,
+    "mode": "mock",
+    "ok": true
+   }
+  },
+  {
+   "send": {
+    "cmd": "pay"
+   },
+   "reply": {
+    "mode": "mock",
+    "ok": true,
+    "tx": "mock-tx-8832caf492bed8ed"
+   }
+  },
+  {
+   "send": {
+    "cmd": "close"
+   },
+   "reply": {
+    "entries": 21,
+    "head": "4cb914841a6e35ce601e31ce44479f27ebed4b9db12a001bf794215c20a14a3e",
+    "mode": "mock",
+    "ok": true
+   }
+  },
+  {
+   "send": {
+    "cmd": "exposure"
+   },
+   "reply": {
+    "content_readable_by_relay": false,
+    "firms_contacted": [
+     "cabinet-b"
+    ],
+    "mode": "mock",
+    "model_calls": 3,
+    "model_calls_mock": 3,
+    "model_calls_real": 0,
+    "ok": true,
+    "outputs": {
+     "contact": 1,
+     "fetch": 2,
+     "search": 1
+    },
+    "parties": [
+     {
+      "bytes_received": 0,
+      "bytes_sent": 159,
+      "kind": "chain",
+      "mode": "mock",
+      "party": "chain sandbox, contract mint.test",
+      "requests": 1
+     },
+     {
+      "bytes_received": 0,
+      "bytes_sent": 52,
+      "kind": "contacted firm",
+      "mode": "mock",
+      "party": "firm cabinet-b",
+      "requests": 1
+     },
+     {
+      "bytes_received": 0,
+      "bytes_sent": 29,
+      "kind": "search engine",
+      "mode": "mock",
+      "party": "search engine",
+      "requests": 1
+     },
+     {
+      "bytes_received": 0,
+      "bytes_sent": 2,
+      "kind": "website",
+      "mode": "mock",
+      "party": "site h1",
+      "requests": 1
+     },
+     {
+      "bytes_received": 0,
+      "bytes_sent": 2,
+      "kind": "website",
+      "mode": "mock",
+      "party": "site h2",
+      "requests": 1
+     }
+    ],
+    "payments": [
+     {
+      "amount": "600000000000000000000000",
+      "to": "cabinet-b.testnet"
+     }
+    ],
+    "pseudonyms_replaced": 1,
+    "real_calls": [],
+    "refused_by_gate": {},
+    "warnings": []
+   }
+  }
+ ]
+}
