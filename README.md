@@ -29,6 +29,8 @@ so that no single party receives both who the person is and what they asked:
 - After each conversation, an **exposure report** lists every party that received something, with request and byte
   counts (never the content).
 
+The eight privacy layers and the pool, each in plain terms with its state today: [docs/PRIVACY.md](docs/PRIVACY.md).
+
 ## What NEAR does in it
 
 | NEAR piece | Role in ONA | State |

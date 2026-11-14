@@ -4,6 +4,7 @@ Start with the [README](../README.md).
 
 ## State and design
 
+- [PRIVACY.md](PRIVACY.md): the eight privacy layers and the pool, in plain terms, with the state of each.
 - [STATUS.md](STATUS.md): what works today, per component, and what each part was tested on.
 - [DESIGN.md](DESIGN.md): the problem, what pseudonyms cover, the architecture, how paying works, next steps, known limitations.
 - [SPEC.md](../SPEC.md): the build spec (contracts, tokens, measured gas).
