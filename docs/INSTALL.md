@@ -513,6 +513,70 @@ cannot serve 1, 10 and 100 at once.
 | `ONA_CROWD_UNIT_MILLI_NEAR` | optional, value of one unit of the asset, default 100 |
 | `ONA_CROWD_SPEED` | optional, simulated seconds per real second, default 1; 0 plays without waiting |
 
+## Run a crowd on testnet
+
+Written on 14/11/2026. **It has not run live yet**: it is compiled and its planning, spend and refusal rules are unit-tested
+(`cargo test -p ona-sandbox --bin ona-crowd-run`); no transaction has been sent with it.
+
+`ona-crowd-run` puts a few real users into a deployed pool, so that the notes of a demo user are not alone in their tiers. Each
+user is an implicit NEAR account (its id is the hex of a fresh ed25519 public key), created by a transfer from one funder account.
+Each one then goes through the same client code as the desktop app (`ona-core`'s pool commands and `HttpAgent`), as
+`ona-sandbox-pool` does on a local node: a `deposit` transaction signed with its own key, cash notes made by the client and saved
+in its own wallet, the issue message signed with its key (NEP-413, with `ona-agent`'s own layout, not checked against a real
+wallet), the agent's cash issue, then an entry into a vault with all its cash and `pool_recover` until the share notes are signed.
+Each step is logged with the transaction hash when the user sends one; the agent's own transactions are not seen by the client.
+A user that fails does not stop the others; a summary follows, then the notes in circulation per tier of the cash and of each
+vault used, read from the contract.
+
+```
+ONA_POOL=<pool account> ONA_CROWD_FUNDER_ACCOUNT=<funder>.testnet \
+  cargo run -p ona-sandbox --bin ona-crowd-run -- --dry-run
+
+ONA_CHAIN_ID=testnet ONA_RPC_URL=https://test.rpc.fastnear.com ONA_RPC_URL_2=https://testnet-rpc.intea.rs \
+ONA_POOL=<pool account> ONA_POOL_AGENT_URL=http://127.0.0.1:8788 \
+ONA_CROWD_FUNDER_ACCOUNT=<funder>.testnet ONA_CROWD_FUNDER_KEY_FILE=/path/to/funder.key \
+  cargo run -p ona-sandbox --bin ona-crowd-run -- --out /path/outside/the/repo/crowd-1
+```
+
+`--dry-run` prints the plan and the total spend, checks the names that are set, and sends nothing, reads nothing from the network
+and writes no file. Options: `--users N` (default 8, at most 64), `--vaults 1[,0...]` (default vault 1; each user draws one),
+`--amounts 0.1,0.5,0.6` (NEAR, default those three; each must be a sum of the 0.1 and 0.5 NEAR cash notes; each user draws one),
+`--min-gap-secs` and `--max-gap-secs` (random gap between two users, default 60 to 600), `--wait-mins` (how long to wait for the
+agent's cash issue or entry before counting the user as not done, default 40).
+
+- **Hourly plan.** At most 1.8 NEAR goes into one vault in any 60 minutes; a user whose vault is full waits. In the pool contract
+  as read on 14/11/2026, a vault's `hourly_cap` (2 NEAR on the testnet vaults) limits the agent's placements and the leaves of each
+  calendar hour, not the entries: staying under it lets the agent place what the crowd brings within the hour. Before sending
+  anything the program also checks that the pool has the 0.1 and 0.5 NEAR cash notes, that each vault used is open and has room under
+  its `max_assets`, and that each cash note planned for a vault becomes share notes there. Vault 1 (share tiers of 0.498, 0.098,
+  0.01 and 0.001 NEAR at the starting price) takes both cash notes whole; in vault 0 (tiers of 0.1 and 0.5 NEAR) a 0.1 NEAR cash
+  note becomes no share at all, so the program refuses it, and a 0.5 NEAR note becomes 0.4 NEAR of shares, 0.098 NEAR staying in
+  the cash.
+- **Cost.** The funder sends each user its amount plus 0.07 NEAR: the deposit's storage margin of 0.01 NEAR (`DEPOSIT_MARGIN`; less the
+  storage of the account's record, it stays in the pool as a deposit not turned into cash), a gas reserve of 0.05 NEAR (the deposit used 2.4 Tgas on a local node;
+  it is sent with 30 Tgas) and 0.01 NEAR for the new account's own storage; 0.001 NEAR per transfer is counted for the funder's gas.
+  With the defaults (8 users, 0.1, 0.5 or 0.6 NEAR each) the total is at most 5.368 NEAR. The total is printed before anything is
+  sent, and the run is refused above `ONA_CROWD_MAX_SPEND_NEAR` (default 6) or above the funder's balance. About 0.06 NEAR stays in
+  each crowd account, and the crowd's money stays in the vault as share notes: this program takes nothing back. Its wallets and keys
+  are kept, so the notes can be taken out later with the pool commands (`ONA_WALLET_FILE` and `ONA_WALLET_KEY_FILE` of one user).
+- **The crowd is recognizable on chain.** Every crowd account is funded by the same account, just before its deposit, so anyone can
+  list these accounts and set them apart from real users. The crowd fills the tiers; it is not independent.
+- **Keys.** Before the first transaction, the program creates the `--out` folder (it must not exist, and must be outside the
+  repository), writes each user's account key and wallet into `keys.json`, and each wallet key into `wallets/user-NN.key`, all new
+  files readable by their owner only. No key is printed; the account ids are, as they are public on chain anyway.
+- **Mainnet is refused** by name (chain id, RPC address, `.near` accounts; on testnet a named account must end with `.testnet`) and
+  by the chain id both RPC nodes report, asked before anything is sent.
+
+| Variable | Value |
+|---|---|
+| `ONA_RPC_URL` | NEAR RPC endpoint, `https` (plain `http` to this machine only); every transaction is sent here |
+| `ONA_RPC_URL_2` | optional, a second endpoint of another operator that the client's recovery reads must agree with |
+| `ONA_CHAIN_ID` | optional, the chain id the nodes must report, default `testnet`; mainnet is refused |
+| `ONA_POOL` | the pool contract account |
+| `ONA_POOL_AGENT_URL` | optional, the pool agent's address, default `http://127.0.0.1:8788` |
+| `ONA_CROWD_FUNDER_ACCOUNT`, `ONA_CROWD_FUNDER_KEY_FILE` | the account that funds every crowd user, and its key (`ed25519:<base58>`) in a file readable by its owner only |
+| `ONA_CROWD_MAX_SPEND_NEAR` | optional, most NEAR the run may spend from the funder, default 6 (`ona-crowd run` reads the same variable with its own default of 10) |
+
 ## Not available yet
 
 No NEAR testnet deployment, tested real model connection, Tor, enclave, anchoring program, desktop app or iOS app. See the status table in the [README](../README.md).

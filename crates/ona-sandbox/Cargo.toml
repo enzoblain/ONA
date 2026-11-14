@@ -10,6 +10,10 @@ default-run = "ona-sandbox"
 name = "ona-sandbox-pool"
 path = "src/bin/pool.rs"
 
+[[bin]]
+name = "ona-crowd-run"
+path = "src/bin/crowd_run.rs"
+
 [dependencies]
 ona-token = { path = "../ona-token" }
 ona-near = { path = "../ona-near" }
