@@ -305,6 +305,62 @@ wallet page in a browser, Meteor or any real wallet, the testnet pool. The walle
 not be rebuilt in the sandbox (it cannot read the wallet libraries' `*keystore*` files): the change of `src/main.js` was
 applied to the bundle by exact text replacements; `npm ci && npm run build` regenerates it from the source.
 
+## The chat pilots the pool; a simpler Pool screen (14/11/2026)
+
+The same fixed patterns (`src/pool_chat.rs`, no model, messages typed in this window only) now also read the
+operations on notes already in the pool, and questions about the person's pool. Amounts come only from the words
+(`NEAR` required; no amount means all); vaults by number or kind.
+
+| Typed | Read as | Core command |
+|---|---|---|
+| `put 2 NEAR of my cash in vault 0`, `move 1 NEAR from cash to the staking vault`, `put my cash in vault 0`, `put all my cash into vault 1`, `move my cash to vault 0` | cash into a vault | `pool_prepare` `enter` |
+| `move vault 0 to vault 1`, `switch 1 NEAR from vault 0 to vault 1`, `move vault 1 to the staking vault` | switch | `pool_prepare` `switch` |
+| `take my NEAR out of vault 0`, `take 0.5 NEAR out of vault 0`, `move vault 0 to cash`, `leave vault 0`, `withdraw 1 NEAR from vault 0`, `exit the staking vault`, `get my NEAR out of the staking vault` | leave to cash (kept in the pool) | `pool_prepare` `exit` |
+| `withdraw 0.5 NEAR`, `exit 1 NEAR to cash`, `cash out 1 NEAR`, `pay out 0.6 NEAR` | payout to the connected account (unchanged) | `exit_cash` |
+| `how much do I have?`, `what's my balance?`, `what do I have?` | total | reads |
+| `what's in vault 0?`, `how much do I have in vault 1?` | one vault | reads |
+| `how private is my position?`, `am I anonymous?` | privacy | reads |
+| `how much can I withdraw?`, `what can I take out?` | what can be withdrawn | reads |
+| `what vaults are there?`, `which vaults can I use` | the vaults | reads |
+| `show my portfolio` (and the earlier forms) | the portfolio card (unchanged) | reads |
+
+A question must be short (at most 10 words), start with a question word or end with "?", and, for the person's
+figures, say "my" or "I"; "how much does a plumber cost?" still goes to the research. Since this round "withdraw 1
+NEAR from vault 0" leaves the vault to cash (before, it went to the research).
+
+**Cash entry, switch, leave.** No wallet account is needed (ONA signs with the notes' own keys). The engine reads
+`pool_info`, checks the vaults (a destination must exist and be open; a source must exist, a frozen one can be left; the
+same vault twice is refused), runs `pool_prepare`, and for an entry or a switch `pool_privacy` with the value the
+preparation puts in the destination. The card shows that very preparation: amount (or all), from / into, shares
+received or new shares or cash notes received (value), share price, left in the pool's cash, fees, "blends in with at
+most N notes" in the destination (for a leave: the cash notes in circulation per value), the upper-bound caveat, a
+warning when a leave exceeds the vault's hourly exit cap, and the steps. **Yes** runs that preparation's
+`pool_execute` (within its 5 minutes; nothing is prepared again); **No** sends nothing (its notes stay reserved until the
+preparation expires). The outcome is reported: queued by the agent (normally), done, or refused with the reason. A switch
+stops after its leave, as ona-core does with the real agent: the chat says to ask "put my cash in vault N" once Recover
+has the cash notes. Refusals read: "you have no notes as cash available for this…", "… cannot be made exactly from your
+notes…", "there is no vault N…", "vault N is frozen…", "these shares are already in vault N…".
+
+**Questions** are answered in the chat from `pool_info`, `pool_portfolio` and `pool_privacy`, computed in the app (no
+model, no relay): figures in NEAR, the holdings by vault with kind and target, operations in progress, the payout
+account and the cash payout cap, the vaults with their state and price, and the privacy line (least protected note,
+"blends in with at most N", "without ONA … 1", upper bounds). A question from the phone stays a free research.
+
+**Pool screen.** At the top: the wallet line, the total value, one line per holding (cash, each vault) with its value,
+its privacy figure, an "operation in progress" marker and Switch / Leave for a vault, then **Deposit**, **Put cash in a
+vault**, **Withdraw**, and a hint of chat phrases. Everything else is in **Details**, closed: the privacy summary, the
+notes per tier, all vaults, the deposit figures, network and contract, **Recover pending operations**. The stray "null"
+under the total value came from `replaceChildren` writing a `null` argument as text; null entries are now left out.
+
+**What was run (14/11/2026, macOS sandbox).** The worktree could not move to the latest main (its git refs cannot be
+written here); the changes are on the previous commit, and main's newer commit only rebuilt the wallet page's bundle.
+`cargo test --locked` in `src-tauri` still cannot unpack `bit-vec`; every module except `main.rs` passed in the outside
+harness: 100 tests, no compiler warning, no new clippy warning (new: the parser's moves and questions, cash entry with an
+amount and with all, switch then leave with the cap warning and No, refusals, seven question answers checked against
+their expected text, a phone question not answered). ona-core was not changed. The window's new code ran in Node with a stand-in
+DOM and a fake bridge (move cards, the simpler Pool screen, no "null"). **Not run:** the real window, a click, the real
+testnet pool for these operations, and the real agent's replies to a switch or a leave.
+
 ## Tor client authorization
 
 In Tor mode the onion service is published for the paired phone's client key only (Tor "restricted discovery"): a Tor

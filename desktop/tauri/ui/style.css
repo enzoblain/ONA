@@ -159,6 +159,9 @@ button.chip:hover { border-color: var(--accent); }
 .wallet-row .who { flex: 1; }
 .card.pool-card ol { font-size: 12.5px; }
 .card .ok-text { color: var(--ok); font-size: 12.5px; margin: 0; }
+.pool details.details { border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 10px; }
+.pool details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.pool details[open] > *:not(summary) { margin-top: 10px; }
 
 /* Free research: queries, answer, actions */
 .card h4 { font-size: 12.5px; color: var(--muted); font-weight: 600; margin: 4px 0 0; }
