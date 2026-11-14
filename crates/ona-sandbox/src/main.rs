@@ -415,12 +415,12 @@ async fn main() -> Result<()> {
     let unblinded = unblind(&blind_sig, &wallet[0].1).map_err(|x| anyhow!("{x}"))?;
     let mut request_token = wallet[0].0.to_vec();
     request_token.extend_from_slice(&unblinded);
-    let (status, reply) = relay_node.chat(&json!({"token":hex(&request_token),"prompt":"bonjour"}));
+    let (status, reply) = relay_node.chat(&json!({"token":hex(&request_token),"prompt":"hello"}));
     println!("chat with a request token: status {status}, {reply}");
     if status != 200 {
         bail!("chat failed: {status} {reply}");
     }
-    let (status, _) = relay_node.chat(&json!({"token":hex(&request_token),"prompt":"encore"}));
+    let (status, _) = relay_node.chat(&json!({"token":hex(&request_token),"prompt":"again"}));
     println!("same request token used twice: status {status}");
 
     let guardian = e.guardian.clone();

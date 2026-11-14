@@ -125,7 +125,7 @@ def valid_counter(value) -> int | None:
 class Pairing:
     """One computer key, one pairing code, at most one paired phone (enough for the mock).
 
-    The mock has no screen to click « Les codes sont identiques »: it prints the code and confirms it itself.
+    The mock has no screen to click "The codes match": it prints the code and confirms it itself.
     """
 
     def __init__(self, name: str, address: str | None, onion: str | None = None):

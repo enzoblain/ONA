@@ -1,14 +1,14 @@
 {
  "source": "cargo run --locked -p ona-core --bin ona -- demo",
- "commit": "8f1b633",
- "recorded": "2026-11-12",
+ "commit": "454e9a2",
+ "recorded": "2026-11-14",
  "steps": [
   {
    "send": {
     "cmd": "open",
-    "mission": "Trouver un avocat en droit du travail pour M. Dupont",
+    "mission": "Find an employment lawyer for Mr Dupont",
     "protected": [
-     "M. Dupont"
+     "Mr Dupont"
     ]
    },
    "reply": {
@@ -74,7 +74,7 @@
      "firm_id": "cabinet-a",
      "price_cents": 90000,
      "source_spans": [
-      "Consultation 900 euros, sous 7 jours"
+      "Consultation 900 euros, within 7 days"
      ],
      "specialties": [
       "labour"
@@ -95,7 +95,7 @@
      "firm_id": "cabinet-b",
      "price_cents": 60000,
      "source_spans": [
-      "Forfait 600 euros, sous 10 jours"
+      "Flat fee 600 euros, within 10 days"
      ],
      "specialties": [
       "labour"
@@ -117,7 +117,7 @@
       "firm_id": "cabinet-b",
       "price_cents": 60000,
       "source_spans": [
-       "Forfait 600 euros, sous 10 jours"
+       "Flat fee 600 euros, within 10 days"
       ],
       "specialties": [
        "labour"
@@ -128,7 +128,7 @@
       "firm_id": "cabinet-a",
       "price_cents": 90000,
       "source_spans": [
-       "Consultation 900 euros, sous 7 jours"
+       "Consultation 900 euros, within 7 days"
       ],
       "specialties": [
        "labour"
@@ -151,7 +151,7 @@
   {
    "send": {
     "cmd": "contact",
-    "message": "Bonjour, demande de devis pour un litige prud'homal."
+    "message": "Hello, I would like a quote for an employment dispute."
    },
    "reply": {
     "mode": "mock",
@@ -165,15 +165,15 @@
    },
    "reply": {
     "amount_near": "0.6",
-    "digest": "8832caf492bed8ed1ba00bffd2a1e1c0447a3e0adbbb0cc0f80a90bc4775bb5b",
+    "digest": "a71732ff2804971f402df19f872ec69703206358c39b7916d644f53a29ed5f77",
     "mode": "mock",
     "ok": true,
     "payment": {
      "amount": "600000000000000000000000",
      "contract": "mint.test",
-     "mission_id": "d49f9ed072df73bde5af0ac9070356f4",
+     "mission_id": "064d7a0d75ce8ecb2459616541145fb3",
      "network": "sandbox",
-     "nonce": "da9b39ced836b33a33cec93ccfe165bb",
+     "nonce": "f74c005b5db35506624ce21171e5e1c3",
      "to": "cabinet-b.testnet"
     },
     "screen": "Pay 600000000000000000000000 yoctoNEAR to cabinet-b.testnet"
@@ -182,7 +182,7 @@
   {
    "send": {
     "cmd": "confirm_payment",
-    "digest": "8832caf492bed8ed1ba00bffd2a1e1c0447a3e0adbbb0cc0f80a90bc4775bb5b"
+    "digest": "a71732ff2804971f402df19f872ec69703206358c39b7916d644f53a29ed5f77"
    },
    "reply": {
     "confirmed": true,
@@ -197,7 +197,7 @@
    "reply": {
     "mode": "mock",
     "ok": true,
-    "tx": "mock-tx-8832caf492bed8ed"
+    "tx": "mock-tx-a71732ff2804971f"
    }
   },
   {
@@ -206,7 +206,7 @@
    },
    "reply": {
     "entries": 21,
-    "head": "4cb914841a6e35ce601e31ce44479f27ebed4b9db12a001bf794215c20a14a3e",
+    "head": "9b3fd34492ad3a3aa28ba192ec61a464bf10cc9bbc21a3fbecbbea2b8054035b",
     "mode": "mock",
     "ok": true
    }
@@ -241,7 +241,7 @@
      },
      {
       "bytes_received": 0,
-      "bytes_sent": 52,
+      "bytes_sent": 54,
       "kind": "contacted firm",
       "mode": "mock",
       "party": "firm cabinet-b",
@@ -249,7 +249,7 @@
      },
      {
       "bytes_received": 0,
-      "bytes_sent": 29,
+      "bytes_sent": 23,
       "kind": "search engine",
       "mode": "mock",
       "party": "search engine",

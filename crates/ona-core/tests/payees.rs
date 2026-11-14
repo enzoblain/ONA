@@ -8,14 +8,14 @@ fn call(core: &mut Core, request: Value) -> Value {
     serde_json::from_str(&core.dispatch(&request.to_string())).unwrap()
 }
 
-const QUESTION: &str = "Trouve un plombier à Lyon et écris-lui pour un devis, paie 0.1 NEAR d'acompte";
+const QUESTION: &str = "Find a plumber in Lyon and write to them for a quote, pay a 0.1 NEAR deposit";
 
 /// A research run to its answer, with `payees` as given; returns the payment action's index.
 fn answered(core: &mut Core, payees: Value) -> u64 {
     let opened = call(core, json!({"cmd": "research_open", "question": QUESTION, "payees": payees}));
     assert_eq!(opened["ok"], true, "{opened}");
     assert_eq!(call(core, json!({"cmd": "research_propose"}))["ok"], true);
-    assert_eq!(call(core, json!({"cmd": "research_accept", "queries": ["plombier Lyon"]}))["ok"], true);
+    assert_eq!(call(core, json!({"cmd": "research_accept", "queries": ["plumber Lyon"]}))["ok"], true);
     for _ in 0..20 {
         if call(core, json!({"cmd": "research_step"}))["done"] == true {
             break;
@@ -29,11 +29,11 @@ fn answered(core: &mut Core, payees: Value) -> u64 {
 #[test]
 fn an_allowed_payee_is_paid_and_another_is_refused() {
     let mut core = Core::new();
-    let index = answered(&mut core, json!([" Plomberie.testnet "]));
-    let refused = call(&mut core, json!({"cmd": "research_action_prepare", "index": index, "to": "autre.testnet"}));
+    let index = answered(&mut core, json!([" Plumbing.testnet "]));
+    let refused = call(&mut core, json!({"cmd": "research_action_prepare", "index": index, "to": "other.testnet"}));
     assert_eq!(refused["ok"], false);
     assert!(refused["error"].as_str().unwrap().contains("not in the list"), "{refused}");
-    let prepared = call(&mut core, json!({"cmd": "research_action_prepare", "index": index, "to": "plomberie.testnet"}));
+    let prepared = call(&mut core, json!({"cmd": "research_action_prepare", "index": index, "to": "plumbing.testnet"}));
     assert_eq!(prepared["ok"], true, "the allowed name was trimmed and lowercased: {prepared}");
     let confirmed = call(&mut core, json!({"cmd": "research_action_confirm", "digest": prepared["digest"]}));
     assert_eq!(confirmed["ok"], true);
@@ -45,7 +45,7 @@ fn an_allowed_payee_is_paid_and_another_is_refused() {
 fn without_payees_only_the_directory_can_be_paid() {
     let mut core = Core::new();
     let index = answered(&mut core, json!([]));
-    let refused = call(&mut core, json!({"cmd": "research_action_prepare", "index": index, "to": "plomberie.testnet"}));
+    let refused = call(&mut core, json!({"cmd": "research_action_prepare", "index": index, "to": "plumbing.testnet"}));
     assert_eq!(refused["ok"], false, "{refused}");
 }
 
@@ -53,7 +53,7 @@ fn without_payees_only_the_directory_can_be_paid() {
 fn a_bad_payee_list_is_refused_at_open() {
     let mut core = Core::new();
     let too_many: Vec<String> = (0..=ona_core::MAX_PAYEES).map(|i| format!("p{i}.testnet")).collect();
-    for payees in [json!(too_many), json!([42]), json!(["pas un compte!"])] {
+    for payees in [json!(too_many), json!([42]), json!(["not an account!"])] {
         let opened = call(&mut core, json!({"cmd": "research_open", "question": QUESTION, "payees": payees}));
         assert_eq!(opened["ok"], false, "{opened}");
     }

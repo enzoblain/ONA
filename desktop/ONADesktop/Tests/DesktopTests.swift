@@ -26,8 +26,8 @@ struct ProtocolBytesTests {
     /// The queries digest of a free research (docs/research.md): same vector in the Tauri app and the iPhone app.
     @Test func queriesDigestVector() {
         let id = "c-0123456789abcdef0123456789abcdef"
-        let queries = ["plombier Lyon", "tarif déplacement plombier"]
-        let digest = "8174711c622fea16bd82439613d544f31d2c2d8c3fb4bc1e22414a092a7cb01c"
+        let queries = ["plumber Lyon", "plumber call-out fee in €"]
+        let digest = "9d6f191e63db66db31141a4b0f27a2253f476ed9cc0329bbe829a174ed369abf"
         #expect(ProtocolBytes.queriesDigest(id: id, queries: queries) == digest)
         // fields(domain, id, q1, q2): no count.
         let fields = ProtocolBytes.encode([.text("ona/queries/v1"), .text(id)] + queries.map { .text($0) })
@@ -49,8 +49,8 @@ struct ProtocolBytesTests {
         let confirm = ProtocolBytes.confirmMessage(pairingID: Vector.pairingID, counter: 7, id: "c-1", decision: "accept",
                                                    firm: nil, digest: "ab", content: "cd")
         #expect(sha(confirm) == "1c61312dbd420b5f78b85dc82cf6f3c505386043f9704f4cd087f882a9389139")
-        #expect(sha(ProtocolBytes.chatMessage(pairingID: Vector.pairingID, counter: 8, chatID: nil, text: "bonjour"))
-                == "7f4041bdaaef1fae3f26bd2abf1ad93d65e5f0b086c585ac5cb2e5979e5da082")
+        #expect(sha(ProtocolBytes.chatMessage(pairingID: Vector.pairingID, counter: 8, chatID: nil, text: "hello"))
+                == "bbd789ac3408fd211ada877e56cdc981f0d37ce8c6ba1f115d7d92ec2b5f8634")
         #expect(sha(ProtocolBytes.deleteMessage(pairingID: Vector.pairingID, counter: 9, chatID: "chat-1"))
                 == "ee3c7db20a817bb5c643f005a052fbf5af413ce9780a6fa31f3acc0e91ed959c")
         #expect(sha(ProtocolBytes.replyMessage(nonce: Vector.phoneNonce, method: "POST", path: "/v1/chats/list",
@@ -58,8 +58,8 @@ struct ProtocolBytesTests {
                 == "c9e6dc8eb32a3f5a97b226281a3151a023754cf518c0828468f3b25dd4e855b0")
         #expect(ProtocolBytes.planDigest(id: "c-1", steps: ["search", "read"])
                 == "10b2ecd6ff60485e505b911709ed14b162137f0237abaa8aed21eee7c26edb84")
-        #expect(ProtocolBytes.offersDigest(id: "c-2", offers: [("cabinet-b", 60000, 10, ["Forfait 600 euros, sous 10 jours"])])
-                == "5127c86b14fc1406536bc274ea9c5b9e85e4a9b7e2adaf0c7b156ccf2dfb97b6")
+        #expect(ProtocolBytes.offersDigest(id: "c-2", offers: [("cabinet-b", 60000, 10, ["Flat fee 600 euros, within 10 days"])])
+                == "1335a1d0959d1c26f748ad05c45f86544f82830315a1c56fd72feb93be264c07")
         #expect(ProtocolBytes.paymentDigestV2(network: "testnet", contract: "pay.ona.testnet", missionID: "m-1",
                                               nonce: Vector.phoneNonce, to: "cabinet-b.testnet",
                                               amount: "1000000000000000000000000")
@@ -177,7 +177,7 @@ struct PairingTests {
         #expect(authority.pairingCode == nil)
         // Nothing saved before the comparison.
         #expect(try store.load()?.phone == nil)
-        let message = { (p: String, c: UInt64) in ProtocolBytes.chatMessage(pairingID: p, counter: c, chatID: nil, text: "bonjour") }
+        let message = { (p: String, c: UInt64) in ProtocolBytes.chatMessage(pairingID: p, counter: c, chatID: nil, text: "hello") }
         let counter = phone.next()
         let signature = phone.sign(message(paired.id, counter))
         #expect(authority.check(token: paired.token, pairingID: paired.id, counter: counter, signature: signature,
@@ -323,7 +323,7 @@ struct EngineTests {
 
     @Test func fullMissionDrivenByOnaCore() throws {
         let engine = ChatEngine(makeCore: { OnaCoreMission() }, newChats: .mission)
-        let chat = try engine.create("Trouve-moi un avocat en droit du travail").get()
+        let chat = try engine.create("Find me an employment lawyer").get()
         let plan = try #require(chat.pending)
         guard case .plan(let steps) = plan.request else { Issue.record("plan"); return }
         #expect(steps.first == "search")
@@ -363,8 +363,8 @@ struct EngineTests {
     /// Ids never repeat (they used to restart at chat-1-c-1).
     @Test func idsAreRandomAndNeverReused() throws {
         let engine = ChatEngine(makeCore: { OnaCoreMission() }, newChats: .mission)
-        let chat = try engine.create("Trouve un avocat").get()
-        let other = try engine.create("Trouve un avocat").get()
+        let chat = try engine.create("Find a lawyer").get()
+        let other = try engine.create("Find a lawyer").get()
         #expect(chat.id != other.id)
         #expect(chat.id.hasPrefix("chat-") && ProtocolBytes.isHex(String(chat.id.dropFirst(5)), length: 32))
         let first = try #require(chat.pending)
@@ -386,7 +386,7 @@ struct EngineTests {
         }
         var made = 0
         let engine = ChatEngine(makeCore: { made += 1; return Failing() }, newChats: .mission)
-        let chat = try engine.create("Trouve un avocat").get()
+        let chat = try engine.create("Find a lawyer").get()
         #expect(chat.status == .idle)
         #expect(engine.post("Recommence", to: chat.id) == nil)
         #expect(made == 2)
@@ -419,7 +419,7 @@ struct EngineTests {
 
     @Test func listAndChatJSONMatchWhatThePhoneDecodes() throws {
         let engine = ChatEngine(makeCore: { OnaCoreMission() }, newChats: .mission)
-        let chat = try engine.create("Bonjour").get()
+        let chat = try engine.create("Hello").get()
         let list = engine.listJSON()
         #expect(list["mode"] as? String == "mock")
         let view = try #require(engine.chatJSON(chat.id)?["chat"] as? [String: Any])
@@ -511,7 +511,7 @@ struct RouterTests {
     /// Reads need the token; browsers and foreign Host values are refused.
     @Test func readsNeedTheTokenAndBrowsersAreRefused() throws {
         let setup = Setup()
-        let (_, chat) = setup.create("Trouve un avocat")
+        let (_, chat) = setup.create("Find a lawyer")
         let chatID = try #require(chat)
         #expect(setup.post("/v1/chats/list", [:]).status == 403)
         #expect(setup.post("/v1/chats/\(chatID)/view", ["token": "x"]).status == 403)
@@ -528,7 +528,7 @@ struct RouterTests {
     /// A recorded request replayed as is is refused.
     @Test func refusesReplays() throws {
         let setup = Setup()
-        let (body, chat) = setup.create("Trouve un avocat")
+        let (body, chat) = setup.create("Find a lawyer")
         #expect(chat != nil)
         #expect(setup.post("/v1/chats", body).json["error"] as? String == "replayed request")
         let pending = try #require(setup.engine.chats.first?.pending)
@@ -540,7 +540,7 @@ struct RouterTests {
     /// A confirmation signed over other content does not verify.
     @Test func aConfirmationSignedOverOtherContentIsRefused() throws {
         let setup = Setup()
-        _ = setup.create("Trouve un avocat")
+        _ = setup.create("Find a lawyer")
         let pending = try #require(setup.engine.chats.first?.pending)
         let shown = ProtocolBytes.planDigest(id: pending.id, steps: ["search"])
         #expect(setup.post("/v1/confirm", setup.confirmBody(pending, content: shown)).json["error"] as? String
@@ -571,7 +571,7 @@ struct RouterTests {
     /// An answer the agent refuses does not block the next answer to the same confirmation.
     @Test func aRefusedAnswerDoesNotBlockTheConfirmation() throws {
         let setup = Setup()
-        _ = setup.create("Trouve un avocat")
+        _ = setup.create("Find a lawyer")
         let pending = try #require(setup.engine.chats.first?.pending)
         let counter = setup.phone.next()
         let signature = setup.phone.sign(ProtocolBytes.confirmMessage(pairingID: setup.id, counter: counter, id: pending.id,
@@ -585,7 +585,7 @@ struct RouterTests {
 
     @Test func deletingNeedsItsOwnSignature() throws {
         let setup = Setup()
-        let (body, chat) = setup.create("Trouve un avocat")
+        let (body, chat) = setup.create("Find a lawyer")
         let chatID = try #require(chat)
         var wrong = body
         wrong["counter"] = setup.phone.next()
@@ -711,7 +711,7 @@ struct OnionPublishedTests {
     @Test func aSlowCoreDoesNotBlockTheEngine() throws {
         let engine = ChatEngine(makeCore: { Slow() }, newChats: .mission)
         let started = Date.now
-        _ = try engine.create("Trouve-moi un avocat en droit du travail à Paris").get()
+        _ = try engine.create("Find me an employment lawyer in Paris").get()
         engine.tick()
         #expect(Date.now.timeIntervalSince(started) < 1.0)
         #expect(engine.chats.first?.status == .working)
@@ -826,7 +826,7 @@ struct OnionPublishedTests {
         let engine = ChatEngine(makeCore: { chatCores += 1; return OnaCoreMission() },
                                 makePoolCore: { let core = FakePool(); made.append(core); return core })
         for cmd in ["open", "pay", "pool_request_exit", "confirm_payment"] {
-            #expect(await engine.pool(["cmd": cmd])["error"] as? String == "commande du pool inconnue")
+            #expect(await engine.pool(["cmd": cmd])["error"] as? String == "unknown pool command")
         }
         #expect(await engine.pool(["foo": 1])["ok"] as? Bool == false)
         #expect(made.isEmpty)
@@ -895,7 +895,7 @@ struct OnionPublishedTests {
     }
 
     @Test func buildsThePrepareRequests() throws {
-        let enter = try PoolRequest.prepare(.enter, amount: "tout", vault: 2).get()
+        let enter = try PoolRequest.prepare(.enter, amount: "all", vault: 2).get()
         #expect(enter["cmd"] as? String == "pool_prepare" && enter["op"] as? String == "enter")
         #expect(enter["amount"] as? String == "all" && enter["vault"] as? Int == 2)
         let move = try PoolRequest.prepare(.switch, amount: "1", vault: 0, to: 1).get()
@@ -904,8 +904,8 @@ struct OnionPublishedTests {
         #expect(pay["to"] as? String == "alice.testnet" && pay["op"] as? String == "exit_cash")
         let deposit = try PoolRequest.prepare(.deposit, amount: "100", account: "alice.testnet").get()
         #expect(deposit["account"] as? String == "alice.testnet")
-        // "tout" only for what is already held; never a zero or unreadable amount.
-        #expect(throws: ProtocolErrorText.self) { try PoolRequest.prepare(.deposit, amount: "tout", account: "a.testnet").get() }
+        // "all" only for what is already held; never a zero or unreadable amount.
+        #expect(throws: ProtocolErrorText.self) { try PoolRequest.prepare(.deposit, amount: "all", account: "a.testnet").get() }
         #expect(throws: ProtocolErrorText.self) { try PoolRequest.prepare(.exitCash, amount: "all", account: "a.testnet").get() }
         #expect(throws: ProtocolErrorText.self) { try PoolRequest.prepare(.exit, amount: "0", vault: 0).get() }
         #expect(throws: ProtocolErrorText.self) { try PoolRequest.prepare(.exitCash, amount: "1", account: " ").get() }
@@ -926,27 +926,27 @@ struct OnionPublishedTests {
                                    "from": 0, "left_in_cash": "170000000000000000000000", "network": "sandbox",
                                    "new_shares_value": "810000000000000000000000", "op": "switch",
                                    "share_price": "1000000000000000000", "to": 1])
-        #expect(summary.title == "Changer de vault")
-        #expect(summary.rows.map(\.label) == ["Montant", "Depuis le vault", "Vers", "Nouvelles parts (valeur)",
-                                              "Laissé dans le cash du pool (perdu)", "Frais : storage"])
+        #expect(summary.title == "Switch vaults")
+        #expect(summary.rows.map(\.label) == ["Amount", "From vault", "To", "New shares (value)",
+                                              "Left in the pool's cash (lost)", "Fees: storage"])
         #expect(summary.rows.map(\.value) == ["1 NEAR", "0", "1", "0.81 NEAR", "0.17 NEAR", "0.02 NEAR"])
         #expect(!summary.rows.contains { $0.value.contains("1000000000000000000") }) // no share price
         #expect(summary.expiresAt == Date(timeIntervalSince1970: 1000000300))
-        let deposit = PoolSummary(["op": "deposit", "account": "alice.test", "warning": "montant peu courant",
+        let deposit = PoolSummary(["op": "deposit", "account": "alice.test", "warning": "unusual amount",
                                    "fees": ["refundable": "unused margin"],
                                    "wallet_call": ["receiver": "pool.test", "method": "deposit", "args": [:], "attached": "11010000000000000000000000"]])
-        #expect(deposit.warnings == ["montant peu courant"])
-        #expect(deposit.rows.last == PoolSummary.Row(label: "Frais : refundable", value: "unused margin"))
+        #expect(deposit.warnings == ["unusual amount"])
+        #expect(deposit.rows.last == PoolSummary.Row(label: "Fees: refundable", value: "unused margin"))
         #expect(deposit.walletCall == #"{"args":{},"attached":"11010000000000000000000000","method":"deposit","receiver":"pool.test"}"#)
     }
 
     @Test func saysWhatAnExecutionDid() {
         #expect(PoolOutcome.execute(["ok": false, "error": "outcome unknown, run pool_recover later: timeout"])
-            == "Envoyée à l'agent du pool : le résultat arrivera plus tard (Récupérer).")
-        #expect(PoolOutcome.execute(["ok": true, "complete": true]) == "Opération faite.")
-        #expect(PoolOutcome.execute(["ok": false, "error": "no vault 9"]) == "Opération refusée : no vault 9")
+            == "Sent to the pool agent: the result will come later (Recover).")
+        #expect(PoolOutcome.execute(["ok": true, "complete": true]) == "Operation done.")
+        #expect(PoolOutcome.execute(["ok": false, "error": "no vault 9"]) == "Operation refused: no vault 9")
         #expect(PoolOutcome.recover(["ok": true, "spent": 2, "held_again": 1, "still_spending": 0, "agent_error": "down"])
-            == "Récupération : 2 faites, 1 revenues, 0 en attente (agent : down).")
+            == "Recovery: 2 done, 1 returned, 0 pending (agent: down).")
     }
 }
 
@@ -1093,13 +1093,13 @@ struct OnionPublishedTests {
             "vaults": [["vault": 0, "if_entered": 401, "gain": 398], ["vault": 1, "if_entered": 1, "gain": -2], ["vault": 2, "frozen": true]]]
         let privacy = PoolPrivacy(reply)
         #expect(privacy?.smallestSet == 3)
-        #expect(privacy?.line.contains("au plus 3 billets") == true)
-        #expect(privacy?.label(vault: 0) == " — parmi 401 billets, +398")
-        #expect(privacy?.label(vault: 1) == " — parmi 1 billets, -2")
+        #expect(privacy?.line.contains("at most 3 notes") == true)
+        #expect(privacy?.label(vault: 0) == " — among 401 notes, +398")
+        #expect(privacy?.label(vault: 1) == " — among 1 notes, -2")
         #expect(privacy?.label(vault: 2) == "", "a frozen vault is not offered")
         let alone = PoolPrivacy(["ok": true, "wallet": ["smallest_set": 1]])
-        #expect(alone?.line.contains("seul") == true)
-        #expect(PoolPrivacy(["ok": true, "wallet": ["smallest_set": NSNull()]])?.line.contains("Aucun billet") == true)
+        #expect(alone?.line.contains("the only one") == true)
+        #expect(PoolPrivacy(["ok": true, "wallet": ["smallest_set": NSNull()]])?.line.contains("No notes") == true)
         #expect(PoolPrivacy(["ok": false]) == nil)
     }
 }
@@ -1107,7 +1107,7 @@ struct OnionPublishedTests {
 @MainActor
 @Suite("Free research over the real ona-core (fake model, demo web)")
 struct ResearchTests {
-    static let question = "Trouve un plombier à Lyon et écris-lui pour un devis, paie 0.1 NEAR d'acompte"
+    static let question = "Find a plumber in Lyon and write to them for a quote, pay a 0.1 NEAR deposit"
 
     func run(_ engine: ChatEngine, _ chat: Chat, until status: ChatStatus, limit: Int = 40) {
         for _ in 0..<limit where chat.status != status { engine.tick() }
@@ -1151,7 +1151,7 @@ struct ResearchTests {
         #expect(shown["queries"] as? [String] == queries)
         #expect(shown["content"] as? String == pending.content)
         // A message while the queries wait does not start anything else.
-        #expect(engine.post("Alors ?", to: chat.id) == nil)
+        #expect(engine.post("So?", to: chat.id) == nil)
         #expect(chat.pending?.id == pending.id)
     }
 
@@ -1164,21 +1164,21 @@ struct ResearchTests {
                                queries: [String(repeating: "x", count: 121)]) != nil)
         #expect(chat.pending?.id == pending.id)
         #expect(engine.confirm(id: pending.id, decision: "accept", firm: nil, digest: nil,
-                               queries: [" plombier Lyon ", "", "tarif déplacement plombier"]) == nil)
+                               queries: [" plumber Lyon ", "", "plumber call-out price"]) == nil)
         #expect(chat.status == .working)
         #expect(chat.state(of: pending) == .accepted)
         run(engine, chat, until: .idle)
-        #expect(texts(chat, tool: "search") == ["Recherche « plombier Lyon » : 2 sources",
-                                                "Recherche « tarif déplacement plombier » : 0 source"])
-        #expect(texts(chat, tool: "read") == ["Lecture de annuaire.example.net : 2 notes",
-                                              "Lecture de guide.example.org : 2 notes"])
+        #expect(texts(chat, tool: "search") == ["Search “plumber Lyon”: 2 sources",
+                                                "Search “plumber call-out price”: 0 sources"])
+        #expect(texts(chat, tool: "read") == ["Read directory.example.net: 2 notes",
+                                              "Read guide.example.org: 2 notes"])
         let answer = try #require(chat.items.lazy.compactMap { item -> ResearchAnswer? in
             if case .answer(let answer) = item.content { return answer }
             return nil
         }.first)
         #expect(!answer.answer.isEmpty)
         #expect(!answer.notes.isEmpty && answer.notes.allSatisfy { !$0.quote.isEmpty })
-        #expect(answer.sources.map(\.host) == ["annuaire.example.net", "guide.example.org"])
+        #expect(answer.sources.map(\.host) == ["directory.example.net", "guide.example.org"])
         let suggested = actions(chat).map(\.action)
         #expect(suggested.count == 2)
         #expect(suggested.first.map { if case .message = $0.kind { true } else { false } } == true)
@@ -1213,14 +1213,14 @@ struct ResearchTests {
         let zeros = String(repeating: "0", count: 64)
 
         // A message: an e-mail address typed by the person.
-        guard case .failure = engine.prepareAction(chat: chat.id, item: message.id, to: "pas une adresse") else {
+        guard case .failure = engine.prepareAction(chat: chat.id, item: message.id, to: "not an address") else {
             Issue.record("bad address accepted"); return
         }
         guard case .failure = engine.doAction(chat: chat.id, item: message.id, digest: zeros) else {
             Issue.record("done without preparing"); return
         }
-        let prepared = try engine.prepareAction(chat: chat.id, item: message.id, to: " contact@plomberie.example ").get()
-        #expect(prepared.kind == "message" && prepared.to == "contact@plomberie.example")
+        let prepared = try engine.prepareAction(chat: chat.id, item: message.id, to: " contact@plumbing.example ").get()
+        #expect(prepared.kind == "message" && prepared.to == "contact@plumbing.example")
         #expect(prepared.seenInPages == false)
         guard case .message(let text) = message.action.kind else { Issue.record("message"); return }
         #expect(prepared.content == text)
@@ -1229,15 +1229,15 @@ struct ResearchTests {
         }
         let sent = try engine.doAction(chat: chat.id, item: message.id, digest: prepared.digest).get()
         guard case .message(let mailto) = sent else { Issue.record("mailto"); return }
-        #expect(mailto.absoluteString.hasPrefix("mailto:contact@plomberie.example?subject="))
+        #expect(mailto.absoluteString.hasPrefix("mailto:contact@plumbing.example?subject="))
         #expect(chat.doneActions == [message.id])
-        guard case .failure = engine.prepareAction(chat: chat.id, item: message.id, to: "contact@plomberie.example") else {
+        guard case .failure = engine.prepareAction(chat: chat.id, item: message.id, to: "contact@plumbing.example") else {
             Issue.record("done twice"); return
         }
 
         // A payment: a NEAR account typed by the person, the amount from the answer. Only an allowed account can be
         // paid (ona-core's money guardrails): this app sends no allowed list, so only the demo directory's accounts.
-        guard case .failure = engine.prepareAction(chat: chat.id, item: payment.id, to: "plomberie.testnet") else {
+        guard case .failure = engine.prepareAction(chat: chat.id, item: payment.id, to: "plumbing.testnet") else {
             Issue.record("an account the person did not allow was accepted"); return
         }
         let pay = try engine.prepareAction(chat: chat.id, item: payment.id, to: "cabinet-b.testnet").get()
@@ -1265,7 +1265,7 @@ struct ResearchTests {
         let report = try #require(exposure(chat)?.report)
         #expect((report["outputs"] as? [String: Int])?["search"] == nil)
         // A new message starts a new research.
-        #expect(engine.post("Cherche plutôt un électricien", to: chat.id) == nil)
+        #expect(engine.post("Look for an electrician instead", to: chat.id) == nil)
         #expect(chat.pending.map { $0.id != pending.id } == true)
     }
 }
@@ -1283,7 +1283,7 @@ struct ResearchRouterTests {
         let id = try #require(shown["id"] as? String), queries = try #require(shown["queries"] as? [String])
         let pending = try #require(setup.engine.chats.first?.pending)
         // Signed over other queries: refused.
-        let other = ProtocolBytes.queriesDigest(id: id, queries: ["autre chose"])
+        let other = ProtocolBytes.queriesDigest(id: id, queries: ["something else"])
         #expect(setup.post("/v1/confirm", setup.confirmBody(pending, content: other)).json["error"] as? String
                 == "signature does not verify")
         // The phone recomputes the digest from the queries it shows.

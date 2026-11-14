@@ -44,11 +44,11 @@ enum LinkError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .unreachable(let message): message
-        case .refused(_, let code): code.map(ComputerMessages.french) ?? "L'ordinateur a refusé la demande."
-        case .notAuthenticated: "Ordinateur non authentifié : la réponse ne vient pas de l'ordinateur appairé."
-        case .failed(503): "L'ordinateur est en train de s'arrêter. Réessayez dans un instant."
-        case .failed: "L'ordinateur n'a pas pu lire la demande. Mettez ONA à jour des deux côtés."
-        case .badReply: "L'ordinateur a répondu de façon inattendue. Mettez ONA à jour des deux côtés."
+        case .refused(_, let code): code.map(ComputerMessages.english) ?? "The computer refused the request."
+        case .notAuthenticated: "Computer not authenticated: the reply does not come from the paired computer."
+        case .failed(503): "The computer is shutting down. Try again in a moment."
+        case .failed: "The computer could not read the request. Update ONA on both devices."
+        case .badReply: "The computer gave an unexpected reply. Update ONA on both devices."
         }
     }
 
@@ -59,36 +59,36 @@ enum LinkError: LocalizedError, Equatable {
     }
 }
 
-/// French text for the error codes the computer sends back (protocol-draft.md).
+/// English text for the error codes the computer sends back (protocol-draft.md).
 enum ComputerMessages {
-    static func french(_ error: String) -> String {
+    static func english(_ error: String) -> String {
         switch error {
-        case "stale confirmation": "Cette demande a changé entre-temps : rouvrez-la."
+        case "stale confirmation": "This request changed in the meantime: open it again."
         case "not paired", "unknown pairing", "missing or wrong token":
-            "L'ordinateur ne reconnaît plus ce téléphone : refaites l'appairage."
-        case "unknown or used pairing code": "Ce code d'appairage a déjà servi : affichez-en un nouveau sur l'ordinateur."
-        case "expired pairing code": "Ce code d'appairage a expiré : affichez-en un nouveau sur l'ordinateur."
+            "The computer no longer recognizes this phone: pair again."
+        case "unknown or used pairing code": "This pairing code was already used: show a new one on the computer."
+        case "expired pairing code": "This pairing code has expired: show a new one on the computer."
         case "pairing commitment does not match", "pairing signature does not verify":
-            "L'appairage a échoué : scannez le nouveau code affiché sur l'ordinateur."
+            "Pairing failed: scan the new code shown on the computer."
         case "signature does not verify", "missing or malformed signature":
-            "L'ordinateur a rejeté la signature de ce téléphone."
-        case "replayed request": "Cette action a déjà été faite."
-        case "could not save on the computer": "L'ordinateur n'a pas pu enregistrer : réessayez."
-        case "unknown chat": "Cette conversation n'existe plus."
-        case "no pool wallet configured": "Le pool n'est pas encore configuré sur l'ordinateur."
-        case "no connection to the pool agent yet": "L'ordinateur n'est pas encore relié à l'agent du pool."
-        case "empty or too long message": "Message vide ou trop long."
+            "The computer rejected this phone's signature."
+        case "replayed request": "This action was already done."
+        case "could not save on the computer": "The computer could not save: try again."
+        case "unknown chat": "This conversation no longer exists."
+        case "no pool wallet configured": "The pool is not set up on the computer yet."
+        case "no connection to the pool agent yet": "The computer is not connected to the pool agent yet."
+        case "empty or too long message": "The message is empty or too long."
         case "payment digest does not match", "digest does not match the payment screen":
-            "Le paiement a changé : vérifiez-le à nouveau."
+            "The payment changed: check it again."
         case "unexpected host", "browser requests are refused":
-            "L'ordinateur a refusé la connexion : mettez ONA à jour des deux côtés."
-        default: "L'ordinateur a refusé la demande (\(error))."
+            "The computer refused the connection: update ONA on both devices."
+        default: "The computer refused the request (\(error))."
         }
     }
 }
 
 /// The protocol on top of a link: a fresh nonce per request, and every reply checked with the computer's key before
-/// it is read (docs/ios/protocol-draft.md, « Réponses signées par l'ordinateur »).
+/// it is read (docs/ios/protocol-draft.md, "Replies signed by the computer").
 struct ComputerClient: Sendable {
     let link: any ComputerLink
     /// The computer's P-256 public key, from the pairing QR.
@@ -164,7 +164,7 @@ struct HTTPComputerLink: ComputerLink {
             let (data, response) = try await session.data(for: request)
             return RawReply(status: (response as? HTTPURLResponse)?.statusCode ?? 0, body: data)
         } catch {
-            throw LinkError.unreachable("Impossible de joindre l'ordinateur. Vérifiez qu'il est allumé et sur le même réseau.")
+            throw LinkError.unreachable("Cannot reach the computer. Check that it is on and on the same network.")
         }
     }
 }

@@ -900,15 +900,15 @@ impl Model for MockModel {
         let (question, notes) = input.split_once("\n\nNotes:\n").unwrap_or((input, "[]"));
         let notes: Vec<Value> = serde_json::from_str(notes).unwrap_or_default();
         let claims: Vec<&str> = notes.iter().filter_map(|n| n["claim"].as_str()).collect();
-        let answer = if claims.is_empty() { "Aucune source lue ne répond à la question.".to_string() } else { claims.join(" ") };
+        let answer = if claims.is_empty() { "None of the sources read answers the question.".to_string() } else { claims.join(" ") };
         let lower = question.to_lowercase();
         let mut actions = Vec::new();
-        if ["écri", "ecri", "contact", "message"].iter().any(|w| lower.contains(w)) {
-            actions.push(json!({"kind": "message", "purpose": "Demande de devis",
-                "text": "Bonjour, je souhaite un devis. Pouvez-vous me dire vos disponibilités et votre tarif ? Merci."}));
+        if ["write", "contact", "message", "e-mail", "email"].iter().any(|w| lower.contains(w)) {
+            actions.push(json!({"kind": "message", "purpose": "Quote request",
+                "text": "Hello, I would like a quote. Could you tell me when you are available and what you charge? Thank you."}));
         }
-        if ["paie", "payer", "paye", "acompte"].iter().any(|w| lower.contains(w)) {
-            actions.push(json!({"kind": "payment", "purpose": "Acompte", "amount_near": "0.1"}));
+        if ["pay", "deposit"].iter().any(|w| lower.contains(w)) {
+            actions.push(json!({"kind": "payment", "purpose": "Deposit", "amount_near": "0.1"}));
         }
         let cites: Vec<usize> = (1..=notes.len()).collect();
         Ok(ModelReply { text: json!({"answer": answer, "cites": cites, "actions": actions}).to_string(), mode: MODE, call: None })
@@ -932,8 +932,8 @@ impl MockWeb {
             )
         };
         let mut pages = BTreeMap::new();
-        pages.insert("h1".to_string(), offer("cabinet-a", 90_000, 7, "Consultation 900 euros, sous 7 jours"));
-        pages.insert("h2".to_string(), offer("cabinet-b", 60_000, 10, "Forfait 600 euros, sous 10 jours"));
+        pages.insert("h1".to_string(), offer("cabinet-a", 90_000, 7, "Consultation 900 euros, within 7 days"));
+        pages.insert("h2".to_string(), offer("cabinet-b", 60_000, 10, "Flat fee 600 euros, within 10 days"));
         let mut sources = BTreeMap::new();
         sources.insert("h1".to_string(), "cabinet-a".to_string());
         sources.insert("h2".to_string(), "cabinet-b".to_string());
@@ -982,7 +982,7 @@ pub fn demo_policy() -> Policy {
     templates.insert(
         "lawyer".to_string(),
         gate::SearchTemplate {
-            text: "avocat droit du travail {}".to_string(),
+            text: "employment lawyer {}".to_string(),
             allowed_values: ["paris", "lyon"].iter().map(|s| s.to_string()).collect(),
         },
     );

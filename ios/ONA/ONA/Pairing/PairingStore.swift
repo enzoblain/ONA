@@ -34,7 +34,7 @@ enum PairingStoreError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .keychain(let status): "Trousseau : erreur \(status)"
+        case .keychain(let status): "Keychain error \(status)"
         }
     }
 }

@@ -49,8 +49,8 @@ Each step: what to run, and what you should see. Requirements: Rust 1.99.1 ([doc
    ending with an exposure report: `"outputs":{"contact":1,"fetch":2,"search":1}`, `"mode":"mock"`.
 2. **A free research with sources, on the demo web.**
    `cargo run -p ona-core --bin ona < docs/try/research.jsonl`
-   → the proposed query, then the answer (`research_result`) with notes such as « Le déplacement coûte souvent entre 40
-   et 80 euros. », each with its source `s1`/`s2` and a quote found word for word in that page; then the exposure
+   → the proposed query, then the answer (`research_result`) with notes such as "Travel often costs between 40 and
+   80 euros.", each with its source `s1`/`s2` and a quote found word for word in that page; then the exposure
    report (`"outputs":{"fetch":2,"search":1}`).
 3. **Every test, and the contracts built reproducibly.**
    `./verify.sh` (after `cargo fetch` once; needs the `wasm32-unknown-unknown` target)
@@ -96,8 +96,11 @@ Simulated or not done (everything simulated says `mode: mock`):
 - **enclave quotes**: since 13/11/2026 the client uses a model key only if Intel's signature over its quote checks out and the quote
   binds that key and the request, on the one NEAR AI machine setup observed so far; the real NEAR AI quote (report of 10/11/2026)
   passed it once on 13/11/2026 with Intel's live collateral (fetched directly, not through Tor); the NVIDIA GPU evidence is not checked;
-- **not run**: the iPhone on a real device, the Tauri app on real Windows and Linux machines, a deposit from a real
-  wallet;
+- **partly run** (14/11/2026): the iPhone app on a real device (iPhone 16) paired with the Tauri app through Tor in
+  about 90 s and its Secure Enclave key asked for Face ID; sending a message was not verified. The Tauri app was
+  started on GitHub's Windows and Linux machines (window shown; on Linux its onion address was published), not used
+  there. One deposit from a real wallet reached the pool contract on testnet (1.00822 NEAR credited to the depositing
+  account), but its cash notes were not issued: the app was closed before the agent's message was signed;
 - **Windows file permissions**: the secret files (onion key, model settings, request tokens) get mode 600 on macOS and
   Linux, and a file other accounts can read is refused; on Windows no access list is set or checked, so they rely on
   the user's profile folder.

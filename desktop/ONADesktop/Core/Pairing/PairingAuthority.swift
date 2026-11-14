@@ -182,7 +182,7 @@ public final class PairingAuthority {
             // The record exists but cannot be read: show it, write nothing, offer no QR code (a new key would
             // silently replace this computer's identity and forget the phone).
             record = PairingRecord(computerKey: P256.Signing.PrivateKey().rawRepresentation, phone: nil)
-            unreadable = "Appairage illisible (\(error.localizedDescription)) : rien n'a été modifié."
+            unreadable = "Unreadable pairing (\(error.localizedDescription)): nothing was changed."
             storageError = unreadable
             return
         }
@@ -390,7 +390,7 @@ public final class PairingAuthority {
             storageError = nil
             return true
         } catch {
-            storageError = "Enregistrement de l'appairage impossible : \(error.localizedDescription)"
+            storageError = "Could not save the pairing: \(error.localizedDescription)"
             return false
         }
     }

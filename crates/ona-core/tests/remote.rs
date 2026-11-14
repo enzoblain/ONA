@@ -23,7 +23,7 @@ impl ona_core::e2ee::ModelKeyVerifier for Unverified {
 
 const MODEL: &str = "test/model";
 const SALT: [u8; 32] = [3u8; 32];
-const MISSION: &str = "dossier confidentiel Dupont";
+const MISSION: &str = "confidential case file Dupont";
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -286,12 +286,12 @@ fn each_role_sees_only_its_own_input() {
     assert_eq!(prompts.len(), 3);
     let (planner, first, second) = (&prompts[0], &prompts[1], &prompts[2]);
 
-    assert!(planner.contains("dossier confidentiel"));
+    assert!(planner.contains("confidential case file"));
     assert!(!planner.contains("Dupont"), "the protected name is replaced by a pseudonym");
     assert!(m.propose_plan().is_err(), "the planner cannot be asked again once pages were read");
     assert_eq!(fake.chats(), 3, "so no page can ever reach it");
-    assert!(first.contains("Consultation 900") && !first.contains(MISSION) && !first.contains("Forfait"));
-    assert!(second.contains("Forfait 600") && !second.contains(MISSION) && !second.contains("Consultation"));
+    assert!(first.contains("Consultation 900") && !first.contains(MISSION) && !first.contains("Flat fee"));
+    assert!(second.contains("Flat fee 600") && !second.contains(MISSION) && !second.contains("Consultation"));
 
     for body in &fake.0.borrow().bodies {
         assert_eq!(body["messages"].as_array().unwrap().len(), 1, "no history");

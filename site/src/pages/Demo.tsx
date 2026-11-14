@@ -218,8 +218,8 @@ function pseudonymize(input: string, declared: string, table: Map<string, string
 }
 
 function Playground() {
-  const [terms, setTerms] = useState("M. Dupont, Acme Logistics");
-  const [text, setText] = useState("M. Dupont was dismissed by Acme Logistics after twelve years. Which labour lawyers in Paris handle this, and what do they charge?");
+  const [terms, setTerms] = useState("Mr Dupont, Acme Logistics");
+  const [text, setText] = useState("Mr Dupont was dismissed by Acme Logistics after twelve years. Which employment lawyers in Paris handle this, and what do they charge?");
   const table = useRef(new Map<string, string>()); // like the app's table: one pseudonym per term, kept while the page is open
   const pieces = pseudonymize(text, terms, table.current);
 
@@ -258,7 +258,7 @@ export function Demo() {
           <span className="pill"><span className="dot" />mode: mock · recorded {demo.recorded}</span>
           <h1>A mission, replayed command by command.</h1>
           <p>
-            Find a labour lawyer for M. Dupont and compare fees, without the firms learning who he is. This is the recorded output of{" "}
+            Find a employment lawyer for Mr Dupont and compare fees, without the firms learning who he is. This is the recorded output of{" "}
             <code>ona demo</code>, the mission core running against a fake model, a fake web and fake payments. Nothing below touched a network.
           </p>
         </motion.div>

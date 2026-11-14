@@ -1,206 +1,199 @@
-# App iOS ONA — étapes 2 à 4 (écrans, appairage, signatures, Tor)
+# ONA iOS app: screens, pairing, signatures, Tor (steps 2 to 4)
 
-Document interne. Créé le 2026-11-10.
+Created on 2026-11-10.
 
-## Ce qui existe
+## What exists
 
-| Chemin | Rôle |
+| Path | Role |
 |---|---|
-| `ios/ONA/` | App SwiftUI « ONA » (iOS 18+) : appairage par QR, suivi de mission, trois confirmations signées, relevé d'exposition, transport par Tor (Arti embarqué) quand le QR donne une adresse `.onion`. |
-| `ios/ONA/ONA/Tor/` | `ArtiTor` (pont Rust `ios/ArtiBridge`) et `TorComputerLink` : le protocole en HTTP/1.0 vers le port 80 du service onion de l'ordinateur. Dans l'app seulement, pas dans `Package.swift`. |
-| `ios/ONA/ONATests/` | Tests unitaires (Swift Testing) : paiement, messages, appairage, octets signés, signatures, Trousseau simulé. |
-| `ios/ONA/Package.swift` | Fait tourner la partie sans interface (`Protocol/`, `Pairing/`, `Remote/`) et ses tests sur le Mac : `cd ios/ONA && swift test`. |
-| `ios/MockComputer/mock_computer.py` | Faux ordinateur (Python, bibliothèque standard seulement), suit `protocol-draft.md`. Tout ce qu'il renvoie porte `mode: mock`. |
-| `ios/MockComputer/pairing.py`, `p256.py` | Appairage et vérification des signatures du faux ordinateur. `p256.py` : P-256 en Python pur, **pour le faux ordinateur seulement** (ni revu, ni à temps constant). |
-| `ios/MockComputer/pairing_qr.swift` | Affiche le QR d'appairage en image (`--qr`). |
-| `ios/MockComputer/run_onion.sh` | Étape 4 : le faux ordinateur joignable seulement par Tor (service onion C Tor, clé hors du dépôt), QR avec l'adresse `.onion`. |
-| `ios/MockComputer/test_*.py` | Tests du faux ordinateur. |
-| `docs/ios/protocol-draft.md` | Brouillon du protocole téléphone ↔ ordinateur, à valider avec Hugo. |
+| `ios/ONA/` | SwiftUI app "ONA" (iOS 18+): pairing by QR code, mission tracking, three signed confirmations, exposure report, transport through Tor (embedded Arti) when the QR code gives a `.onion` address. |
+| `ios/ONA/ONA/Tor/` | `ArtiTor` (Rust bridge `ios/ArtiBridge`) and `TorComputerLink`: the protocol over HTTP/1.0 to port 80 of the computer's onion service. In the app only, not in `Package.swift`. |
+| `ios/ONA/ONATests/` | Unit tests (Swift Testing): payment, messages, pairing, signed bytes, signatures, simulated Keychain. |
+| `ios/ONA/Package.swift` | Runs the part without a user interface (`Protocol/`, `Pairing/`, `Remote/`) and its tests on the Mac: `cd ios/ONA && swift test`. |
+| `ios/MockComputer/mock_computer.py` | Mock computer (Python, standard library only), follows `protocol-draft.md`. Everything it returns carries `mode: mock`. |
+| `ios/MockComputer/pairing.py`, `p256.py` | Pairing and signature checks of the mock computer. `p256.py`: P-256 in pure Python, **for the mock computer only** (not reviewed, not constant-time). |
+| `ios/MockComputer/pairing_qr.swift` | Shows the pairing QR code as an image (`--qr`). |
+| `ios/MockComputer/run_onion.sh` | Step 4: the mock computer reachable only through Tor (C Tor onion service, key outside the repository), QR code with the `.onion` address. |
+| `ios/MockComputer/test_*.py` | Tests of the mock computer. |
+| `docs/ios/protocol-draft.md` | The phone ↔ computer protocol. |
 
-## Lancer
+## Run
 
 ```bash
-ios/ArtiBridge/build-xcframework.sh                         # une fois : Arti pour l'app (~5 min)
-ios/MockComputer/run_onion.sh --qr                          # étape 4 : faux ordinateur derrière un .onion
-python3 ios/MockComputer/mock_computer.py --qr              # sans Tor, simulateur iOS ; ouvre aussi le QR en image
-python3 ios/MockComputer/mock_computer.py --host 0.0.0.0 --qr   # iPhone sur le même réseau
+ios/ArtiBridge/build-xcframework.sh                         # once: Arti for the app (~5 min)
+ios/MockComputer/run_onion.sh --qr                          # step 4: mock computer behind a .onion
+python3 ios/MockComputer/mock_computer.py --qr              # without Tor, iOS simulator; also opens the QR code as an image
+python3 ios/MockComputer/mock_computer.py --host 0.0.0.0 --qr   # iPhone on the same network
 open ios/ONA/ONA.xcodeproj
 ```
 
-Le terminal du faux ordinateur affiche le texte du QR (usage unique) et, après l'appairage, le code à 6 chiffres.
-Sur iPhone : scanner le QR. Dans le simulateur (pas de caméra) : bouton « Coller », ou au lancement
-`xcrun simctl launch <simulateur> org.ona.remote -ONAPairingText 'ona-pair:…'` (Debug + simulateur seulement, absent
-des builds pour iPhone). Un nouveau QR : `curl -X POST http://127.0.0.1:8790/v0/mock/unpair`.
+The mock computer's terminal shows the text of the QR code (single use) and, after pairing, the 6-digit code.
+On an iPhone: scan the QR code. In the simulator (no camera): the "Paste" button, or at launch
+`xcrun simctl launch <simulator> org.ona.remote -ONAPairingText 'ona-pair:…'` (Debug + simulator only, absent from
+builds for iPhone). A new QR code: `curl -X POST http://127.0.0.1:8790/v0/mock/unpair`.
 
 ## Interface
 
-Barre d'onglets en bas (Liquid Glass à partir d'iOS 26) :
+Tab bar at the bottom (Liquid Glass from iOS 26):
 
-- **Accueil** : appairage (scan du QR, ou coller son texte), puis **liste des conversations** avec l'agent (bouton
-  « + » en haut à droite, suppression par balayage, appui long ou menu « … »). Une conversation ressemble à Claude ou
-  ChatGPT : messages, étapes de l'agent groupées et repliables (« 3 étapes »), ligne « en cours », cartes de
-  confirmation en Liquid Glass, relevé d'exposition à la fin, champ de saisie flottant (texte seulement). Un badge
-  sur l'onglet compte les conversations qui attendent une confirmation. Cible : iOS 26.
-- **Tor** : état de Tor (arrêté, démarrage avec progression, connecté, erreur avec « Détails »), démarrer / arrêter,
-  données Tor gardées sur le téléphone et bouton pour les effacer (remplace le « démarrage à froid » de l'ancienne app
-  de test), version d'Arti.
-- **Réglages** : ordinateur appairé et « Oublier cet ordinateur », données gardées sur le téléphone, version de l'app.
-  Les boutons de simulation n'apparaissent qu'avec un ordinateur simulé.
+- **Home**: pairing (scan the QR code, or paste its text), then the **list of conversations** with the agent ("+"
+  button at the top right, delete by swiping, long press or the "…" menu). A conversation looks like Claude or
+  ChatGPT: messages, agent steps grouped and collapsible ("3 steps"), an "in progress" line, confirmation cards in
+  Liquid Glass, exposure report at the end, floating input field (text only). A badge on the tab counts the
+  conversations waiting for a confirmation. Target: iOS 26.
+- **Tor**: Tor state (stopped, starting with progress, connected, error with "Details"), start / stop, Tor data kept
+  on the phone and a button to erase it (replaces the "cold start" of the earlier test app), Arti version.
+- **Settings**: paired computer and "Forget this computer", data kept on the phone, app version. The simulation
+  buttons appear only with a simulated computer.
 
-Les messages d'erreur sont en français et sans détail technique ; le détail d'une erreur Tor est dans « Détails ».
-Les journaux d'Arti ne sont activés qu'en Debug.
+Error messages carry no technical detail; the detail of a Tor error is under "Details". Arti's logs are enabled only in
+Debug.
 
-## Comportement
+## Behavior
 
-- **Simulation visible** : un bandeau jaune « SIMULATION » s'affiche dès qu'une réponse dit `mode` ≠ `real`, et reste
-  jusqu'à la fermeture de l'app. Le relevé d'exposition d'une mission simulée le dit aussi.
-- **Pas de push** : l'app interroge l'ordinateur toutes les 3 s, seulement au premier plan.
-- **Rien sur le disque sauf l'appairage** : session `URLSession` éphémère (pas de cache, pas de cookies). L'appairage
-  (nom, adresse, clé publique de l'ordinateur, identifiant, référence de la clé du téléphone) est un seul élément du
-  Trousseau, « cet appareil seulement », jamais synchronisé. « Oublier cet ordinateur » l'efface.
-- **Appairage** : QR `ona-pair:…` → le téléphone crée sa clé P-256 (Secure Enclave, Face ID ou code à chaque usage),
-  prouve qu'il la détient, puis affiche un code à 6 chiffres à comparer avec l'ordinateur.
-- **Confirmations signées** : plan, destinataire, paiement et refus sont signés (`protocol-draft.md`). Le faux
-  ordinateur refuse une confirmation non signée, mal signée ou d'un autre appairage.
-- **Paiement vérifié sur le téléphone** : l'app recalcule l'empreinte (mêmes octets qu'`ona-core`) et le texte de
-  l'écran à partir du montant et du destinataire. Si l'un ne correspond pas, le bouton « Confirmer » est désactivé.
-  L'empreinte envoyée est celle calculée par le téléphone.
-- **Refus** : chaque confirmation peut être refusée, ce qui arrête la mission.
+- **Visible simulation**: a yellow "SIMULATION" banner appears as soon as a reply says `mode` ≠ `real`, and stays until
+  the app is closed. The exposure report of a simulated mission says so too.
+- **No push**: the app polls the computer every 3 s, only in the foreground.
+- **Nothing on disk except the pairing**: ephemeral `URLSession` session (no cache, no cookies). The pairing (name,
+  address, public key of the computer, identifier, reference to the phone's key) is a single Keychain item, "this
+  device only", never synced. "Forget this computer" erases it.
+- **Pairing**: QR code `ona-pair:…` → the phone creates its P-256 key (Secure Enclave, Face ID or passcode on each use),
+  proves it holds it, then shows a 6-digit code to compare with the computer.
+- **Signed confirmations**: plan, recipient, payment and refusal are signed (`protocol-draft.md`). The mock computer
+  refuses a confirmation that is unsigned, wrongly signed or from another pairing.
+- **Payment checked on the phone**: the app recomputes the digest (same bytes as `ona-core`) and the screen text from
+  the amount and the recipient. If either does not match, the "Confirm" button is disabled. The digest sent is the one
+  computed by the phone.
+- **Refusal**: every confirmation can be refused, which stops the mission.
 
-## Vérifié le 2026-11-10
+## Checked on 2026-11-10
 
-- Tests de l'app sur le Mac (`swift test`, Swift 6.4) : 16 tests, 20 cas, tous passés. Dont : l'empreinte calculée
-  en Swift est celle d'`ona-core` ; un autre destinataire, un autre montant ou un texte d'écran différent sont refusés.
-- Les mêmes tests dans Xcode sur simulateur iOS 27 : le lanceur de tests ne se connecte pas (« test runner hung »,
-  « unable to connect … service hub »), sur deux simulateurs. Problème de Xcode 27 bêta, l'app elle-même tourne.
-- Tests du faux ordinateur : 6/6 (Python 3.14.7). L'empreinte du paiement de démonstration est identique à celle
-  imprimée par `ona demo` (branche `main`) : `a43ba249…fa31`. (Ce condensé v0 n'existe plus depuis le protocole v1 :
-  voir « Protocole v1 » plus bas.) Le relevé d'exposition a les mêmes valeurs que celui
-  d'`ona demo` (`search` 1, `fetch` 2, `contact` 1, 3 appels au modèle, 1 paiement).
-- Simulateur iPhone 17 (iOS 27.0, Xcode 27.0 bêta) contre le faux ordinateur : une mission complète déroulée à la main
-  (plan validé → cabinet-b choisi → paiement vérifié puis confirmé → relevé affiché).
-- `localhost` ne marchait pas de façon fiable depuis le simulateur (requêtes expirées, serveur lié en IPv4) :
-  l'adresse par défaut est `127.0.0.1`.
+- App tests on the Mac (`swift test`, Swift 6.4): 16 tests, 20 cases, all passed. Among them: the digest computed in
+  Swift is the one from `ona-core`; another recipient, another amount or a different screen text are refused.
+- The same tests in Xcode on an iOS 27 simulator: the test runner does not connect ("test runner hung", "unable to
+  connect … service hub"), on two simulators. An Xcode 27 beta problem; the app itself runs.
+- Mock computer tests: 6/6 (Python 3.14.7). The digest of the demo payment is identical to the one printed by
+  `ona demo` (branch `main`): `a43ba249…fa31`. (This v0 digest no longer exists since protocol v1: see "Protocol v1"
+  below.) The exposure report has the same values as the one from `ona demo` (`search` 1, `fetch` 2, `contact` 1,
+  3 model calls, 1 payment).
+- iPhone 17 simulator (iOS 27.0, Xcode 27.0 beta) against the mock computer: a full mission run by hand (plan approved
+  → cabinet-b chosen → payment checked then confirmed → report shown).
+- `localhost` did not work reliably from the simulator (requests timed out, server bound to IPv4): the default address
+  is `127.0.0.1`.
 
-### Étape 3, vérifié le 2026-11-10
+### Step 3, checked on 2026-11-10
 
-- `swift test` : 30 tests (dont 14 nouveaux sur l'appairage et les signatures), tous passés. Python : 19 tests, tous
-  passés, dont le vecteur de la RFC 6979 (P-256, SHA-256) pour `p256.py`.
-- Entre langages : une signature produite par CryptoKit est vérifiée par `p256.py`, les octets signés sont identiques
-  en Swift et en Python, et le code à 6 chiffres aussi (vecteurs dans `PairingTests.swift` et `test_pairing.py`).
-- Simulateur iPhone 17 contre le faux ordinateur : appairage, même code à 6 chiffres des deux côtés (871 519),
-  confirmations signées acceptées, confirmation non signée refusée, appairage conservé après redémarrage de l'app et
-  signature avec la clé rechargée acceptée.
-- **Le simulateur n'a pas de Secure Enclave** : il utilise une clé logicielle (affichée comme telle dans l'app). Le
-  chemin Secure Enclave + Face ID n'a pas encore tourné.
+- `swift test`: 30 tests (14 of them new, on pairing and signatures), all passed. Python: 19 tests, all passed,
+  including the RFC 6979 vector (P-256, SHA-256) for `p256.py`.
+- Across languages: a signature made by CryptoKit is verified by `p256.py`, the signed bytes are identical in Swift and
+  in Python, and so is the 6-digit code (vectors in `PairingTests.swift` and `test_pairing.py`).
+- iPhone 17 simulator against the mock computer: pairing, same 6-digit code on both sides (871 519), signed
+  confirmations accepted, unsigned confirmation refused, pairing kept after an app restart and a signature with the
+  reloaded key accepted.
+- **The simulator has no Secure Enclave**: it uses a software key (shown as such in the app). The Secure Enclave +
+  Face ID path has not run yet.
 
-### Étape 4 (Tor), état le 2026-11-10
+### Step 4 (Tor), state on 2026-11-10
 
-- Code : le QR peut donner une adresse `.onion` au lieu d'une adresse locale ; l'app passe alors tout le protocole
-  (appairage, état, confirmations signées) par Arti 0.48.0. Le pont Rust gagne une requête HTTP générique (GET/POST,
-  réponse ≤ 1 Mio) et une limite de 120 s au démarrage de Tor. Arti passe en mode dormant quand l'app passe en
-  arrière-plan.
-- Tests : 3 tests Rust (lecture de la réponse HTTP, refus d'injection d'en-têtes), 34 tests Swift (dont le choix
-  `.onion` / adresse locale et un appairage `.onion`), 19 tests Python. Tous passés.
-- **Bout en bout par Tor : réussi une fois le 2026-11-10 (soir)**, dans le simulateur iPhone 17, contre le faux
-  ordinateur joignable seulement par son `.onion` (`run_onion.sh`) : appairage (code 537 645 des deux côtés), suivi
-  « Connecté par Tor », confirmation signée du plan acceptée (`POST /v0/confirm -> 200`). Les deux premiers essais
-  d'appairage ont expiré (60 s) juste après un effacement des données Tor ; le troisième a réussi. Depuis le Mac, le
-  même `.onion` répondait en 9,3 s puis 0,7 s. Une seule série, sur un réseau qui laissait passer Tor ce soir-là.
-- Plus tôt le même jour : **pas réussi.** Sur le Wi-Fi de l'école (10.2.x.x), C Tor a fini par démarrer après
-  de nombreuses coupures TLS, mais Arti n'a obtenu aucun circuit vers le `.onion` du faux ordinateur (« Failed to
-  obtain hidden service circuit », 4 essais depuis le Mac). Dans le simulateur, l'app démarre Arti (cache écrit) mais
-  n'aboutit pas sur ce réseau. À refaire sur un réseau qui laisse passer Tor (partage de connexion).
-- Vérifié : sur ce réseau, avec un cache Arti vide, le démarrage de Tor s'arrête au bout de 120 s et l'app affiche
-  « bootstrap timed out after 120 s (is Tor blocked on this network?) » (simulateur et Mac). Une première version de
-  cette limite faisait paniquer le pont (minuteur Tokio créé hors du runtime) ; la panique était rattrapée et
-  affichée, elle est corrigée.
-- Pas encore fait : autorisation client Tor (restricted discovery) pour que seul le téléphone appairé puisse joindre
-  le `.onion` ; côté ordinateur réel dans `ona-core`.
+- Code: the QR code can give a `.onion` address instead of a local address; the app then sends the whole protocol
+  (pairing, state, signed confirmations) through Arti 0.48.0. The Rust bridge gains a generic HTTP request (GET/POST,
+  response ≤ 1 MiB) and a 120 s limit on Tor startup. Arti goes dormant when the app goes to the background.
+- Tests: 3 Rust tests (reading the HTTP response, refusing header injection), 34 Swift tests (including the choice
+  between `.onion` and local address, and a `.onion` pairing), 19 Python tests. All passed.
+- **End to end through Tor: succeeded once on 2026-11-10 (evening)**, in the iPhone 17 simulator, against the mock
+  computer reachable only by its `.onion` (`run_onion.sh`): pairing (code 537 645 on both sides), tracking shown as
+  "Connected through Tor", signed confirmation of the plan accepted (`POST /v0/confirm -> 200`). The first two pairing
+  attempts timed out (60 s) right after the Tor data was erased; the third succeeded. From the Mac, the same `.onion`
+  answered in 9.3 s then 0.7 s. A single run, on a network that let Tor through that evening.
+- Earlier the same day: **did not succeed.** On the school Wi-Fi (10.2.x.x), C Tor eventually started after many TLS
+  cut-offs, but Arti got no circuit to the mock computer's `.onion` ("Failed to obtain hidden service circuit", 4
+  attempts from the Mac). In the simulator, the app starts Arti (cache written) but does not get through on that
+  network.
+- Checked: on that network, with an empty Arti cache, Tor startup stops after 120 s and the app shows "bootstrap timed
+  out after 120 s (is Tor blocked on this network?)" (simulator and Mac). A first version of this limit made the bridge
+  panic (Tokio timer created outside the runtime); the panic was caught and shown; it is fixed.
+- Not done yet at that point: Tor client authorization (restricted discovery) so that only the paired phone can reach
+  the `.onion`; the real computer side in `ona-core`.
 
-## Protocole v1, 2026-11-11
+## Protocol v1, 2026-11-11
 
-Passage de l'app et du faux ordinateur au protocole v1 (`docs/ios/protocol-draft.md`), après l'inspection de sécurité
-des apps bureau (constats F-01 à F-17). Ce qui change sur le téléphone :
+The app and the mock computer moved to protocol v1 (`docs/ios/protocol-draft.md`), after the security inspection of the
+desktop apps (findings F-01 to F-17). What changes on the phone:
 
-- **Réponses signées (F-04).** Toutes les requêtes en `POST /v1/…` avec un aléa ; chaque réponse est vérifiée avec la
-  clé de l'ordinateur du QR **avant** d'être lue (`ComputerClient`). Sinon : « Ordinateur non authentifié ».
-- **Appairage avec engagement (F-02).** Engagement sur la clé, puis révélation ; code à 6 chiffres sur les deux aléas.
-  QR `v: 1` avec `expires_at`. L'appairage n'est enregistré qu'après « Les codes sont identiques » (F-17) ; ensuite le
-  téléphone attend la confirmation sur l'ordinateur (403 `not paired` affiché comme une attente, pas une erreur).
-- **Lectures avec jeton (F-03), écritures avec compteur (F-01).** Jeton et compteur dans le Trousseau ; le compteur est
-  pris et enregistré avant la signature, jamais réutilisé ; écritures une par une. Signatures toujours low-s (F-16).
-- **Signer ce qui est affiché (F-05).** Le téléphone recalcule le condensé du plan, des offres ou du paiement à partir
-  de ce qu'il montre et le signe ; il ne reprend jamais `content`.
-- **Paiement v2 (F-01, F-14).** Condensé `ona/pay/v2` (réseau, contrat, mission, aléa, destinataire, montant),
-  `digest_version` 2 obligatoire ; le destinataire n'est affiché que s'il a la forme d'un compte NEAR.
-- **F-07.** Adresse `http://` du QR acceptée seulement en Debug ; `NSAllowsLocalNetworking` seulement dans
-  l'`Info.plist` de Debug (`Config/Info-Release.plist` en Release, vérifié sur le binaire Release).
-- **F-17.** Clé logicielle refusée sur un iPhone (simulateur et tests seulement) ; état de Tor (Arti) sous
-  Application Support, exclu des sauvegardes (le cache réseau reste dans Library/Caches) ; un appairage v0 enregistré
-  est oublié (refaire l'appairage).
+- **Signed replies (F-04).** All requests are `POST /v1/…` with a nonce; each reply is verified with the key of the
+  computer from the QR code **before** it is read (`ComputerClient`). Otherwise: "Computer not authenticated".
+- **Pairing with commitment (F-02).** Commitment to the key, then reveal; 6-digit code over the two nonces. QR code
+  `v: 1` with `expires_at`. The pairing is saved only after "The codes match" (F-17); then the phone waits for the
+  confirmation on the computer (403 `not paired` shown as waiting, not as an error).
+- **Reads with a token (F-03), writes with a counter (F-01).** Token and counter in the Keychain; the counter is taken
+  and saved before signing, never reused; writes one at a time. Signatures always low-s (F-16).
+- **Sign what is shown (F-05).** The phone recomputes the digest of the plan, the offers or the payment from what it
+  shows and signs it; it never takes `content` as given.
+- **Payment v2 (F-01, F-14).** Digest `ona/pay/v2` (network, contract, mission, nonce, recipient, amount),
+  `digest_version` 2 required; the recipient is shown only if it has the form of a NEAR account.
+- **F-07.** An `http://` address in the QR code is accepted only in Debug; `NSAllowsLocalNetworking` only in the Debug
+  `Info.plist` (`Config/Info-Release.plist` in Release, checked on the Release binary).
+- **F-17.** Software key refused on an iPhone (simulator and tests only); Tor (Arti) state under Application Support,
+  excluded from backups (the network cache stays in Library/Caches); a saved v0 pairing is forgotten (pair again).
 
-Limites (F-15) : un ordinateur compromis fait ce qu'il veut, la signature du téléphone est vérifiée par l'app bureau,
-pas par `ona-core` ni par la chaîne. Un téléphone volé déverrouillé lit les conversations ; chaque écriture demande
-encore Face ID ou le code de l'appareil (pas encore vérifié sur un vrai iPhone).
+Limits (F-15): a compromised computer does what it wants; the phone's signature is verified by the desktop app, not by
+`ona-core` nor by the chain. A stolen, unlocked phone can read the conversations; each write still asks for Face ID or
+the device passcode (not yet checked on a real iPhone).
 
-Vérifié le 2026-11-11 (macOS, Xcode 27.0 bêta, simulateur iPhone 17 iOS 27.0) :
+Checked on 2026-11-11 (macOS, Xcode 27.0 beta, iPhone 17 simulator iOS 27.0):
 
-- `swift test` : 47 tests passés, dont tous les vecteurs v1 communs avec les apps bureau, la signature Rust de
-  référence vérifiée par CryptoKit, le refus des signatures high-s, le refus d'une réponse falsifiée ou signée pour une
-  autre requête, et un faux ordinateur v1 en Swift (engagement, jeton, compteurs, signatures).
-- Faux ordinateur : 24 tests Python passés (mêmes vecteurs, mission complète par HTTP avec vérification de chaque
-  réponse, rejeu refusé, confirmation sur un autre plan refusée).
-- Bout en bout, réseau local : app iPhone (simulateur) ↔ app Tauri (branche `fix/inspection`) ↔ `ona-core`. Appairage
-  v1, conversation, plan, cabinet-b, paiement de 0,6 NEAR vérifié en v2 puis confirmé, relevé reçu. Un appairage v0
-  restant dans le Trousseau du simulateur a été oublié comme prévu.
-- **Par Tor, le 2026-11-11** (même Mac, réseau de l'école) : app iPhone (simulateur, Arti 0.48.0) ↔ `.onion` de l'app
-  Tauri en mode Tor (serveur sur 127.0.0.1 seulement) ↔ `ona-core`. Mission complète : appairage v1, conversation, plan,
-  cabinet-b, paiement de 0,6 NEAR vérifié en v2 puis confirmé, relevé reçu. Une seule série.
-  - **Premières connexions lentes.** Deux appairages sur trois ont expiré (« L'ordinateur n'a pas répondu à temps »,
-    limite de 60 s par requête) avant que le troisième passe. Reproduit sur le Mac avec le pont Arti seul : la première
-    requête vers le `.onion` a attendu plus de 60 s, la suivante a répondu en 2 s ; un autre essai, 11 s puis 1 à 2 s. La
-    requête n'arrive pas à l'ordinateur pendant cette attente : le code d'appairage n'est pas consommé, on peut réessayer.
-    Piste : une limite plus courte pour l'ouverture du circuit et un nouvel essai automatique (pas fait).
-  - **Côté app bureau.** Au premier lancement de la soirée, l'app a affiché son QR alors que le service n'était pas
-    encore publié sur Tor : un client Tor du Mac obtenait « No more HSDir available » pendant au moins 5 minutes. L'app
-    considère l'adresse publiée dès que le fichier `hostname` existe, et ce fichier reste d'une session à l'autre.
-    Relancé, le service répondait en moins de 20 s.
-- **Avec l'app Mac, le 2026-11-11** (réseau local) : même mission complète, signatures CryptoKit des deux côtés.
-- **Nouvel essai par Tor (même jour).** Le pont Arti donne 20 s à chaque tentative d'ouverture du flux et en relance une
-  autre, dans la limite de 60 s ; si le flux ne s'est toujours pas ouvert (rien n'a été envoyé), l'app renvoie la
-  requête une fois. Mesure sur le Mac avec le pont seul, première requête d'un Arti neuf vers le `.onion` de l'app
-  Tauri : 19 réussites sur 21 (dont deux à environ 32 s, sauvées par une nouvelle tentative), deux échecs après 60 s
-  (dont un « flux non ouvert »). Sans ces tentatives, le même jour : 3 premières requêtes sur 5 avaient expiré (2 dans
-  l'app, 1 avec le pont seul). Peu d'essais, un seul réseau. Le renvoi côté app n'a pas été observé en vrai.
-- **Rescanner.** Quand l'ordinateur ne reconnaît plus ce téléphone (`not paired` après le délai, `unknown pairing`,
-  `missing or wrong token`), l'accueil propose « Rescanner le code de l'ordinateur ». Testé par les tests unitaires,
-  pas à l'écran.
-- **Limites (F-15)** dans Réglages : ordinateur compromis, téléphone volé déverrouillé.
-- Pas vérifié : sur un vrai iPhone (Secure Enclave, Face ID).
+- `swift test`: 47 tests passed, including all v1 vectors shared with the desktop apps, the reference Rust signature
+  verified by CryptoKit, refusal of high-s signatures, refusal of a forged reply or of one signed for another request,
+  and a v1 mock computer in Swift (commitment, token, counters, signatures).
+- Mock computer: 24 Python tests passed (same vectors, full mission over HTTP with each reply verified, replay refused,
+  confirmation on another plan refused).
+- End to end, local network: iPhone app (simulator) ↔ Tauri app (branch `fix/inspection`) ↔ `ona-core`. v1 pairing,
+  conversation, plan, cabinet-b, payment of 0.6 NEAR checked in v2 then confirmed, report received. A v0 pairing left in
+  the simulator's Keychain was forgotten as intended.
+- **Through Tor, on 2026-11-11** (same Mac, school network): iPhone app (simulator, Arti 0.48.0) ↔ `.onion` of the
+  Tauri app in Tor mode (server on 127.0.0.1 only) ↔ `ona-core`. Full mission: v1 pairing, conversation, plan,
+  cabinet-b, payment of 0.6 NEAR checked in v2 then confirmed, report received. A single run.
+  - **Slow first connections.** Two pairings out of three timed out ("The computer did not answer in time", 60 s limit
+    per request) before the third went through. Reproduced on the Mac with the Arti bridge alone: the first request to
+    the `.onion` waited more than 60 s, the next answered in 2 s; another attempt, 11 s then 1 to 2 s. The request does
+    not reach the computer during this wait: the pairing code is not used up, and it can be retried. Possible fix: a
+    shorter limit for opening the circuit and an automatic retry (not done).
+  - **Desktop app side.** On the first launch of the evening, the app showed its QR code while the service was not yet
+    published on Tor: a Tor client on the Mac got "No more HSDir available" for at least 5 minutes. The app considers
+    the address published as soon as the `hostname` file exists, and that file stays from one session to the next.
+    After a restart, the service answered in under 20 s.
+- **With the Mac app, on 2026-11-11** (local network): the same full mission, CryptoKit signatures on both sides.
+- **New attempt through Tor (same day).** The Arti bridge gives each attempt to open the stream 20 s and starts another,
+  within the 60 s limit; if the stream still has not opened (nothing was sent), the app sends the request again once.
+  Measured on the Mac with the bridge alone, first request from a fresh Arti to the Tauri app's `.onion`: 19 successes
+  out of 21 (two of them at about 32 s, saved by a new attempt), two failures after 60 s (one of them "stream not
+  opened"). Without these attempts, the same day: 3 first requests out of 5 had timed out (2 in the app, 1 with the
+  bridge alone). Few attempts, a single network. The resend on the app side was not observed for real.
+- **Scan again.** When the computer no longer recognizes this phone (`not paired` after the delay, `unknown pairing`,
+  `missing or wrong token`), Home offers "Scan the computer's code again". Tested by the unit tests, not on screen.
+- **Limits (F-15)** in Settings: compromised computer, stolen unlocked phone.
+- Not checked: on a real iPhone (Secure Enclave, Face ID).
 
-## Onglet Pool (lecture seule), 2026-11-12
+## Pool tab (read only), 2026-11-12
 
-Onglet « Pool » à côté d'Accueil, présenté comme un portefeuille : la valeur totale en haut, puis une ligne pour le cash
-et une par vault, avec sa valeur (flocon pour un vault gelé, petite horloge quand une opération est en cours). Données lues par
-`POST /v1/pool/portfolio` (réponse signée, jeton). Aucune action sur le téléphone : les opérations du pool se confirment
-sur l'ordinateur, comme le prévoit `docs/desktop/pool-commands.md`.
+A "Pool" tab next to Home, laid out like a wallet: the total value at the top, then one row for the cash and one per
+vault, with its value (snowflake for a frozen vault, small clock while an operation is in progress). Data read through
+`POST /v1/pool/portfolio` (signed reply, token). No action on the phone: pool operations are confirmed on the computer,
+as `docs/desktop/pool-commands.md` specifies.
 
-- Apps bureau : la route renvoie le `pool_portfolio` d'un `ona-core` dédié au pool. Tant que le pont n'a pas de
-  portefeuille de pool (pas encore fait côté bureau), elle répond `no pool wallet configured`, que l'app affiche
-  « Le pool n'est pas encore configuré sur l'ordinateur ».
-- Faux ordinateur : un portefeuille inventé (étiqueté `mock`) pour essayer l'écran.
-- Vérifié : tests Swift (lecture, décodage, montants, refus), Rust et Swift côté bureau (jeton exigé, refus signé sans
-  portefeuille), Python ; à l'écran dans le simulateur contre le faux ordinateur. Pas vérifié avec un vrai pool (aucun
-  ne tourne encore sur une chaîne).
+- Desktop apps: the route returns the `pool_portfolio` of an `ona-core` dedicated to the pool. As long as the bridge
+  has no pool wallet (not done yet on the desktop side), it answers `no pool wallet configured`, which the app shows as
+  "The pool is not set up on the computer yet".
+- Mock computer: a made-up wallet (labeled `mock`) to try the screen.
+- Checked: Swift tests (reading, decoding, amounts, refusals), Rust and Swift on the desktop side (token required,
+  signed refusal without a wallet), Python; on screen in the simulator against the mock computer. Not checked with a
+  real pool (none runs on a chain yet).
 
-## Pas encore fait
+## Not done yet
 
-- iPhone réel : app installée et lancée le 2026-11-10 (étape 2), mais aucune requête n'est arrivée au faux ordinateur.
-  Le Wi-Fi utilisé (réseau d'école, 10.2.x.x) isole probablement les appareils entre eux. À refaire avec le Mac sur le
-  partage de connexion de l'iPhone ; ce sera aussi le premier essai du Secure Enclave et de Face ID.
-- Côté ordinateur réel : afficher le QR, montrer le code à 6 chiffres, garder la clé du téléphone (questions pour Hugo).
-- Étape 4 (Tor) : `onion` dans le QR, autorisation client Tor.
+- Real iPhone: app installed and launched on 2026-11-10 (step 2), but no request reached the mock computer. The Wi-Fi
+  used (school network, 10.2.x.x) probably isolates devices from each other. Next try: the Mac on the iPhone's personal
+  hotspot; it will also be the first test of the Secure Enclave and Face ID.
 
 ## Tor client authorization (2026-11-12)
 
@@ -210,14 +203,14 @@ A QR code with an onion address carries `onion_auth`, the 32-byte x25519 key of 
 
 Checked on a Mac, with the bridge built for the Mac and a desktop app's restricted onion service: with the key, Arti
 reached the service (25 s to connect, a signed reply); without it, Arti refused with "Onion service required
-authentication". Not confirmed in the app on the simulator: two pairing attempts there ended with "Impossible de joindre
-l'ordinateur par Tor" and the detail could not be read; the simulator's input then stopped responding. To do again,
-then on a real iPhone.
+authentication". Not confirmed in the app on the simulator: two pairing attempts there ended with "Could not reach the
+computer through Tor" and the detail could not be read; the simulator's input then stopped responding. Not yet tried
+again, nor on a real iPhone.
 
 ## Free research (2026-11-13)
 
 The phone shows a research conversation (docs/research.md): the queries to confirm before anything leaves (accepted as
 shown, signed over `SignedFields.queriesDigest`; editing them is done on the computer), the answer with its quoted notes
-and its sources (as text: the phone never opens the pages), and the suggested actions, read only, with "À faire sur
-l'ordinateur" (their recipient is given and confirmed there). Tested with Swift tests (decoding, the digest vector shared
+and its sources (as text: the phone never opens the pages), and the suggested actions, read only, with "To do on the
+computer" (their recipient is given and confirmed there). Tested with Swift tests (decoding, the digest vector shared
 with the desktop apps); not yet against a desktop app running a research.

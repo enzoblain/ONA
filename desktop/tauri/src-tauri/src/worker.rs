@@ -635,18 +635,18 @@ mod tests {
         worker.call(|app| app.pairing.confirm_code()).unwrap().unwrap();
 
         let counter = phone.next();
-        let signature = phone.sign(&protocol::chat_message(&id, counter, None, Some("Trouve un avocat")));
+        let signature = phone.sign(&protocol::chat_message(&id, counter, None, Some("Find a lawyer")));
         let created = http(port, "/v1/chats", &json!({"token": token, "pairing_id": id, "counter": counter,
-                                                     "text": "Trouve un avocat", "signature": signature}), &key);
+                                                     "text": "Find a lawyer", "signature": signature}), &key);
         assert_eq!(created["ok"], true);
         let list = http(port, "/v1/chats/list", &json!({"token": token}), &key);
-        assert_eq!(list["chats"][0]["title"], "Trouve un avocat");
+        assert_eq!(list["chats"][0]["title"], "Find a lawyer");
         assert_eq!(worker.call(|app| app.view()["last_request"].clone()).unwrap(), "POST /v1/chats/list → 200");
         // Conversations stay in memory: once the chat has run a little, its text is in no file of the data folder.
         thread::sleep(Duration::from_millis(500));
         for file in files_under(&dir) {
             let bytes = std::fs::read(&file).unwrap();
-            assert!(!bytes.windows(b"avocat".len()).any(|w| w == b"avocat"), "the conversation reached {file:?}");
+            assert!(!bytes.windows(b"lawyer".len()).any(|w| w == b"lawyer"), "the conversation reached {file:?}");
         }
         worker.call(|app| app.stop()).unwrap();
         let _ = std::fs::remove_dir_all(dir);
