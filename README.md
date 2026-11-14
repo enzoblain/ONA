@@ -122,6 +122,9 @@ The repository's history starts on 10/11/2026, inside the build window (1 to 14 
 hackathon work. The first commit imports the prototype as the team had it on that day. Team: Hugo Thomas (core,
 contracts, relay, pool) and Enzo Blain (apps, phone protocol, Tor on iPhone, releases).
 
+Other project by the same team at NEAR HACKATHON: [Moonpacks](https://github.com/ygk94/memaster), memecoin
+trading-card packs as NFTs on NEAR (NFTs and Memecoins tracks). The two projects are independent.
+
 ## Libraries and AI-generated code
 
 Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`,
