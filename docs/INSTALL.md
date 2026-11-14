@@ -576,6 +576,7 @@ agent's cash issue or entry before counting the user as not done, default 40).
 | `ONA_POOL_AGENT_URL` | optional, the pool agent's address, default `http://127.0.0.1:8788` |
 | `ONA_CROWD_FUNDER_ACCOUNT`, `ONA_CROWD_FUNDER_KEY_FILE` | the account that funds every crowd user, and its key (`ed25519:<base58>`) in a file readable by its owner only |
 | `ONA_CROWD_MAX_SPEND_NEAR` | optional, most NEAR the run may spend from the funder, default 6 (`ona-crowd run` reads the same variable with its own default of 10) |
+| `ONA_CROWD_PER_HOUR_NEAR` | optional, most NEAR planned into one vault in any 60 minutes, default 1.8, at most 20. Above the vault's `hourly_cap` the entries still go in (the contract caps placements and leaves, not entries) and the agent places the rest in later hours |
 
 ## Not available yet
 

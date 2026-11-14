@@ -60,6 +60,17 @@ const HOUR_SECS: u64 = 3600;
 /// the agent's placements and the leaves of each calendar hour, not entries; planning under it lets the agent place
 /// everything the crowd brings within the hour.
 const PLAN_PER_VAULT_HOUR: u128 = 1800 * MILLI;
+
+/// The hourly plan in use: `ONA_CROWD_PER_HOUR_NEAR` (whole or decimal NEAR, at most 20) or `PLAN_PER_VAULT_HOUR`. Above
+/// the vault's `hourly_cap`, entries still go in (the contract caps placements and leaves, not entries); the agent then
+/// places the rest in the following hours and keeps it in the pool meanwhile.
+fn per_vault_hour() -> u128 {
+    std::env::var("ONA_CROWD_PER_HOUR_NEAR")
+        .ok()
+        .and_then(|v| parse_near(&v).ok())
+        .filter(|v| *v > 0 && *v <= 20 * 1000 * MILLI)
+        .unwrap_or(PLAN_PER_VAULT_HOUR)
+}
 /// Kept for the gas of the user's one transaction (the deposit, 2.4 Tgas measured on a local node, sent with 30 Tgas
 /// prepaid). A reserve, not a measure of testnet's gas price.
 const GAS_RESERVE: u128 = 50 * MILLI;
@@ -135,8 +146,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Options> {
     }
     for a in &o.amounts {
         cash_notes(*a, &CASH_NOTES).ok_or_else(|| anyhow!("{} NEAR is not a sum of cash notes of 0.1 and 0.5 NEAR", near(*a)))?;
-        if *a > PLAN_PER_VAULT_HOUR {
-            bail!("{} NEAR is above the {} NEAR planned per vault and per hour", near(*a), near(PLAN_PER_VAULT_HOUR));
+        if *a > per_vault_hour() {
+            bail!("{} NEAR is above the {} NEAR planned per vault and per hour", near(*a), near(per_vault_hour()));
         }
     }
     if !o.dry_run && o.out.is_none() {
@@ -212,7 +223,7 @@ fn make_plan(o: &Options, rng: &mut impl Rng) -> Result<Vec<PlannedUser>> {
         let vault = o.vaults[rng.gen_range(0..o.vaults.len())];
         let amount = o.amounts[rng.gen_range(0..o.amounts.len())];
         let h = history.entry(vault).or_default();
-        t = cap_wait(h, t, amount, PLAN_PER_VAULT_HOUR)?;
+        t = cap_wait(h, t, amount, per_vault_hour())?;
         h.push((t, amount));
         plan.push(PlannedUser { at: t, vault, amount });
     }
@@ -291,7 +302,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn print_plan(plan: &[PlannedUser]) {
-    println!("plan ({} users, at most {} NEAR per vault in any 60 minutes):", plan.len(), near(PLAN_PER_VAULT_HOUR));
+    println!("plan ({} users, at most {} NEAR per vault in any 60 minutes):", plan.len(), near(per_vault_hour()));
     println!("  user  start      vault  amount (NEAR)  cash notes        funding (NEAR)");
     for (i, u) in plan.iter().enumerate() {
         let notes: Vec<String> = cash_notes(u.amount, &CASH_NOTES).unwrap_or_default().iter().map(|n| near(*n)).collect();
@@ -654,7 +665,7 @@ fn real_run(o: &Options, plan: &[PlannedUser], total: u128) -> Result<()> {
     for user in &users {
         // The plan's time, later if earlier users ran late and the vault's hour is full.
         let now = start.elapsed().as_secs();
-        let at = cap_wait(entered.get(&user.plan.vault).map_or(&[][..], Vec::as_slice), now.max(user.plan.at), user.plan.amount, PLAN_PER_VAULT_HOUR)?;
+        let at = cap_wait(entered.get(&user.plan.vault).map_or(&[][..], Vec::as_slice), now.max(user.plan.at), user.plan.amount, per_vault_hour())?;
         if at > now {
             user.log(format!("waiting {} s for its turn", at - now));
             std::thread::sleep(Duration::from_secs(at - now));
