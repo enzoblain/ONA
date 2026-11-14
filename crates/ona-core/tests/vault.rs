@@ -90,13 +90,14 @@ fn keys_are_kept_apart_from_the_chats() {
     v.put("c1", SECRET, T0).unwrap();
     let key_line = p.key_text().lines().find(|l| l.starts_with("c1 ")).unwrap().to_string();
     let key_hex = key_line.split(' ').nth(1).unwrap().to_string();
+    // Closed first: an open vault holds a lock on its `lock` file, which Windows then refuses to let anyone read.
+    drop(v);
     let names: Vec<String> = fs::read_dir(p.dir()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     for name in &names {
         let text = String::from_utf8_lossy(&fs::read(p.dir().join(name)).unwrap()).to_string();
         assert!(!text.contains(&key_hex), "the key is in {name}");
     }
     assert!(!names.iter().any(|n| n == "keys"), "{names:?}");
-    drop(v);
     let inside = Box::new(FileKeyStore::new(&p.dir().join("keys")));
     let err = Vault::open(&p.dir(), inside, T0).err().unwrap();
     assert!(err.contains("inside the vault directory"), "{err}");
