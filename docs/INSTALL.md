@@ -581,7 +581,7 @@ agent's cash issue or entry before counting the user as not done, default 40).
 ## The website
 
 The site in `site/` (home, demo, downloads) is a React app built with Vite. It needs Node 24 and npm, and is not part of
-`verify.sh`. It is deployed on Vercel at https://ona-indol.vercel.app (14/11/2026, `vercel deploy --prod` from `site/`).
+`verify.sh`. It is deployed on Vercel at https://ona-indol.vercel.app: the Vercel project's root directory is `site`, and each push to `main` deploys it again.
 
 ```
 cd site

@@ -45,7 +45,7 @@ a name (job, city, dates, a rare situation), which can be enough to identify som
 This is the design. Today the model, the web and the payments in the app are still fakes; see
 [what works today](STATUS.md) and the [known limitations](#known-limitations).
 
-Example: find a labour lawyer and compare fees on a generic version of your case, without the firms you did not pick
+Example: find an employment lawyer and compare fees on a generic version of your case, without the firms you did not pick
 learning who you are.
 
 ## The problem

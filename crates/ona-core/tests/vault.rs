@@ -8,7 +8,7 @@ use ona_core::Core;
 use serde_json::Value;
 
 const T0: u64 = 1_000_000;
-const SECRET: &str = "le dossier confidentiel de M. Martin";
+const SECRET: &str = "the confidential case file of Mr Martin";
 
 /// A test folder holding the vault directory and, apart from it, the key file.
 struct Place {
@@ -71,7 +71,7 @@ fn nothing_readable_is_left_on_disk() {
     let mut v = p.open(T0);
     v.put("c1", SECRET, T0).unwrap();
     let raw = fs::read(p.chat("c1")).unwrap();
-    assert!(!raw.windows(7).any(|w| w == b"dossier"), "the text is encrypted");
+    assert!(!raw.windows(9).any(|w| w == b"case file"), "the text is encrypted");
     // The modes exist on Unix only (`private_fs`).
     #[cfg(unix)]
     {
@@ -355,7 +355,7 @@ fn a_chat_is_only_kept_past_24_hours_if_the_user_chose_it() {
     assert_eq!(v.get("kept", later).unwrap().as_deref(), Some(SECRET), "survives past 24 hours and a restart");
     assert_eq!(v.get("default", later).unwrap(), None, "the other chat expired as usual");
     let raw = fs::read(p.dir().join("kept.kept")).unwrap();
-    assert!(!raw.windows(7).any(|w| w == b"dossier"), "a kept chat stays encrypted");
+    assert!(!raw.windows(9).any(|w| w == b"case file"), "a kept chat stays encrypted");
     assert!(!p.chat("kept").exists(), "no second copy under the old name");
 
     v.put("kept", "updated", later).unwrap();
@@ -422,10 +422,10 @@ fn both_front_ends_reach_the_vault_through_dispatch() {
     let p = Place::new("dispatch");
     let mut core = Core::with_vault(p.open(now()));
     let ask = |core: &mut Core, r: &str| -> Value { serde_json::from_str(&core.dispatch(r)).unwrap() };
-    let saved = ask(&mut core, r#"{"cmd":"chat_save","id":"c1","text":"bonjour"}"#);
+    let saved = ask(&mut core, r#"{"cmd":"chat_save","id":"c1","text":"hello"}"#);
     assert_eq!(saved["ok"], true, "{saved}");
     assert_eq!(saved["expires_in_secs"], 86400);
-    assert_eq!(ask(&mut core, r#"{"cmd":"chat_read","id":"c1"}"#)["text"], "bonjour");
+    assert_eq!(ask(&mut core, r#"{"cmd":"chat_read","id":"c1"}"#)["text"], "hello");
     assert_eq!(ask(&mut core, r#"{"cmd":"chat_read","id":"absent"}"#)["text"], Value::Null);
     assert_eq!(ask(&mut core, r#"{"cmd":"chat_keep","id":"c1"}"#)["kept"], true);
     assert_eq!(ask(&mut core, r#"{"cmd":"chat_forget","id":"c1"}"#)["forgotten"], true);

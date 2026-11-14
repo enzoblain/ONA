@@ -99,7 +99,7 @@ public final class TorService {
             let torrc = Self.root.appending(path: "torrc")
             guard let socksPort = SocksProbe.freeLocalPort(), let coreSocksPort = SocksProbe.freeLocalPort(),
                   socksPort != coreSocksPort else {
-                state = .failed("aucun port local libre pour tor")
+                state = .failed("no free local port for tor")
                 return
             }
             self.coreSocksPort = coreSocksPort
@@ -119,7 +119,7 @@ public final class TorService {
             process.standardError = FileHandle.nullDevice
             process.terminationHandler = { [weak self] _ in
                 Task { @MainActor in
-                    if case .published = self?.state {} else if self?.state != .off { self?.state = .failed("tor s'est arrêté") }
+                    if case .published = self?.state {} else if self?.state != .off { self?.state = .failed("tor stopped") }
                 }
             }
             try process.run()
@@ -147,7 +147,7 @@ public final class TorService {
                     }
                     try? await Task.sleep(for: .seconds(30))
                 }
-                if !Task.isCancelled { self?.state = .failed("le service .onion ne répond pas par Tor") }
+                if !Task.isCancelled { self?.state = .failed("the .onion service does not answer through Tor") }
             }
         } catch {
             state = .failed(error.localizedDescription)

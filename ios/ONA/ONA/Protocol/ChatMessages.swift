@@ -1,6 +1,6 @@
 import Foundation
 
-// Conversations with the agent (docs/ios/protocol-draft.md, "Lectures" and "Écritures"). Chats live on the computer; the phone
+// Conversations with the agent (docs/ios/protocol-draft.md, "Reads" and "Writes"). Chats live on the computer; the phone
 // only shows them and keeps nothing on disk.
 
 /// One line of the chat list.

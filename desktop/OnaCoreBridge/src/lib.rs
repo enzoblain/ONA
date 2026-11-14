@@ -95,7 +95,7 @@ fn core_from_setup(text: &str) -> Result<OnaCore, String> {
     if model.is_null() {
         return Ok(OnaCore::new());
     }
-    let network = network(&setup["core_socks"], "le vrai modèle")?;
+    let network = network(&setup["core_socks"], "the real model")?;
     let field = |key: &str| -> Option<String> {
         match &model[key] {
             serde_json::Value::String(text) => Some(text.clone()),
@@ -120,7 +120,7 @@ fn core_from_setup(text: &str) -> Result<OnaCore, String> {
 fn network(core_socks: &serde_json::Value, what: &str) -> Result<ona_core::tor::Network, String> {
     let socks = core_socks
         .as_u64()
-        .ok_or_else(|| format!("{what} passe par Tor : choisissez le mode Tor, et attendez que le code QR apparaisse"))?;
+        .ok_or_else(|| format!("{what} goes through Tor: choose Tor mode, and wait for the QR code to appear"))?;
     ona_core::tor::Network::from_values(Some(&format!("127.0.0.1:{socks}")), Some("1"))
 }
 
@@ -147,7 +147,7 @@ fn pool_core(settings: &serde_json::Value, core_socks: &serde_json::Value, direc
     let network = if direct {
         ona_core::tor::Network::from_values(None, Some("0"))?
     } else {
-        network(core_socks, "le pool")?
+        network(core_socks, "the pool")?
     };
     let lookup = |variable: &str| -> Result<Option<String>, String> {
         let Some((key, _)) = POOL_KEYS.iter().find(|(_, name)| *name == variable) else { return Ok(None) };
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn runs_the_demo_mission_through_the_c_abi() {
         let core = ona_core_new();
-        assert_eq!(call(core, r#"{"cmd":"open","mission":"Trouver un avocat"}"#)["ok"], true);
+        assert_eq!(call(core, r#"{"cmd":"open","mission":"Find a lawyer"}"#)["ok"], true);
         let plan = call(core, r#"{"cmd":"propose_plan"}"#);
         assert_eq!(plan["plan"][0], "search");
         assert_eq!(call(core, r#"{"cmd":"accept_plan"}"#)["ok"], true);
@@ -232,7 +232,7 @@ mod tests {
             call(core, r#"{"cmd":"read","handle":"h2"}"#);
             call(core, r#"{"cmd":"compare"}"#);
             call(core, r#"{"cmd":"confirm_recipient","firm":"cabinet-b"}"#);
-            call(core, r#"{"cmd":"contact","message":"Bonjour"}"#);
+            call(core, r#"{"cmd":"contact","message":"Hello"}"#);
             // No amount: ona-core takes the chosen offer's price × the policy's rate.
             call(core, r#"{"cmd":"prepare_payment"}"#)
         };
@@ -255,7 +255,7 @@ mod tests {
         let handle = unsafe { &mut *core };
         let reply = handle.guarded(|_| panic!("inside ona-core"));
         assert!(reply.contains("panic inside ona-core"));
-        assert!(call(core, r#"{"cmd":"open","mission":"Trouver un avocat"}"#)["error"].as_str().unwrap().contains("stopped"));
+        assert!(call(core, r#"{"cmd":"open","mission":"Find a lawyer"}"#)["error"].as_str().unwrap().contains("stopped"));
         unsafe { ona_core_free(core) };
     }
 
@@ -282,7 +282,7 @@ mod tests {
             (serde_json::json!({"error": "model.json : unreadable"}), "unreadable"),
         ] {
             let core = new_with(setup);
-            let reply = call(core, r#"{"cmd":"open","mission":"Trouver un avocat"}"#);
+            let reply = call(core, r#"{"cmd":"open","mission":"Find a lawyer"}"#);
             assert_eq!(reply["mode"], "real");
             assert!(reply["error"].as_str().unwrap().contains(reason), "{reply}");
             unsafe { ona_core_free(core) };

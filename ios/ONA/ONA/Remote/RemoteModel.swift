@@ -91,7 +91,7 @@ final class RemoteModel {
     nonisolated static func localOnlyLink(_ endpoint: Endpoint) -> any ComputerLink {
         switch endpoint {
         case .local(let url): HTTPComputerLink(baseURL: url)
-        case .onion: UnavailableLink(reason: "Tor n'est pas disponible dans cette version de l'app.")
+        case .onion: UnavailableLink(reason: "Tor is not available in this version of the app.")
         }
     }
 
@@ -149,7 +149,7 @@ final class RemoteModel {
             )
             actionError = nil
         } catch let error as LinkError {
-            actionError = error.code.map(ComputerMessages.french) ?? error.localizedDescription
+            actionError = error.code.map(ComputerMessages.english) ?? error.localizedDescription
         } catch {
             actionError = error.localizedDescription
         }
@@ -266,7 +266,7 @@ final class RemoteModel {
             if reply.mode.isSimulation { sawSimulation = true }
         } catch let error as LinkError {
             pool = nil
-            poolError = error.code.map(ComputerMessages.french) ?? error.localizedDescription
+            poolError = error.code.map(ComputerMessages.english) ?? error.localizedDescription
             if let code = error.code, Self.lostPairingCodes.contains(code) { pairingLost = true }
         } catch {
             pool = nil
@@ -291,7 +291,7 @@ final class RemoteModel {
     /// Starts a conversation with a first message. Returns the new chat's id.
     func startChat(_ text: String) async -> String? {
         guard let text = Self.clean(text) else { return nil }
-        let ack: NewChatAck? = await write(Paths.chats, ["text": text], refusal: "L'ordinateur a refusé le message.") {
+        let ack: NewChatAck? = await write(Paths.chats, ["text": text], refusal: "The computer refused the message.") {
             SignedFields.chatMessage(pairingID: $0, counter: $1, chatID: nil, text: text)
         }
         guard let ack else { return nil }
@@ -302,7 +302,7 @@ final class RemoteModel {
     /// Sends a message in an existing conversation.
     func send(_ text: String, in chatID: String) async -> Bool {
         guard let text = Self.clean(text) else { return false }
-        let ack: Ack? = await write(Paths.messages(chatID), ["text": text], refusal: "L'ordinateur a refusé le message.") {
+        let ack: Ack? = await write(Paths.messages(chatID), ["text": text], refusal: "The computer refused the message.") {
             SignedFields.chatMessage(pairingID: $0, counter: $1, chatID: chatID, text: text)
         }
         await refresh()
@@ -311,7 +311,7 @@ final class RemoteModel {
 
     /// Deletes a conversation on the computer.
     func delete(chat chatID: String) async {
-        let ack: Ack? = await write(Paths.delete(chatID), [:], refusal: "L'ordinateur a refusé la suppression.") {
+        let ack: Ack? = await write(Paths.delete(chatID), [:], refusal: "The computer refused the deletion.") {
             SignedFields.deleteMessage(pairingID: $0, counter: $1, chatID: chatID)
         }
         if ack != nil {
@@ -368,14 +368,14 @@ final class RemoteModel {
     private func confirm(_ decision: Pending, _ choice: ConfirmationAnswer.Decision, firm: String? = nil,
                          digest: String? = nil) async {
         guard let content = Self.content(of: decision, rejecting: choice == .reject) else {
-            actionError = "Cette demande ne peut pas être vérifiée sur ce téléphone : mettez ONA à jour."
+            actionError = "This request cannot be checked on this phone: update ONA."
             return
         }
         let answer = ConfirmationAnswer(id: decision.id, decision: choice, firm: firm, digest: digest, content: content)
         var fields: [String: any Sendable] = ["id": answer.id, "decision": answer.decision.rawValue]
         fields["firm"] = answer.firm
         fields["digest"] = answer.digest
-        let ack: Ack? = await write(Paths.confirm, fields, refusal: "L'ordinateur a refusé la demande.") {
+        let ack: Ack? = await write(Paths.confirm, fields, refusal: "The computer refused the request.") {
             SignedFields.confirmMessage(pairingID: $0, counter: $1, id: answer.id, decision: answer.decision.rawValue,
                                         firm: answer.firm, digest: answer.digest, content: answer.content)
         }
@@ -390,7 +390,7 @@ final class RemoteModel {
     private func write<T: Decodable & Sendable>(_ path: String, _ fields: [String: any Sendable], refusal: String,
                                      signed: @escaping @Sendable (String, UInt64) -> Data) async -> T? {
         guard client != nil, pairing != nil, key != nil else {
-            actionError = "Ce téléphone n'est appairé à aucun ordinateur."
+            actionError = "This phone is not paired with any computer."
             return nil
         }
         while writing { try? await Task.sleep(for: .milliseconds(50)) }
@@ -402,7 +402,7 @@ final class RemoteModel {
         }
         guard let client, var pairing, let key else { return nil }
         guard pairing.counter < 9_007_199_254_740_991 else {
-            actionError = "Cet appairage est épuisé : refaites l'appairage."
+            actionError = "This pairing is used up: pair again."
             return nil
         }
         pairing.counter += 1
@@ -418,7 +418,7 @@ final class RemoteModel {
         do {
             signature = try await Task.detached { try key.sign(signed(pairingID, counter)).base64EncodedString() }.value
         } catch {
-            actionError = "Action annulée : elle n'a pas été signée."
+            actionError = "Action cancelled: it was not signed."
             return nil
         }
         var body = fields
@@ -432,7 +432,7 @@ final class RemoteModel {
             if let ack = reply as? NewChatAck, ack.mode?.isSimulation == true { sawSimulation = true }
             return reply
         } catch let error as LinkError {
-            actionError = error.code.map(ComputerMessages.french) ?? (error == .badReply ? refusal : error.localizedDescription)
+            actionError = error.code.map(ComputerMessages.english) ?? (error == .badReply ? refusal : error.localizedDescription)
             return nil
         } catch {
             actionError = error.localizedDescription
@@ -450,7 +450,7 @@ final class RemoteModel {
 
     private func use(_ stored: StoredPairing, key: (any DeviceKey)? = nil) throws {
         guard let endpoint = Endpoint(onion: stored.onion, address: stored.address, onionAuth: stored.onionAuth) else {
-            throw LinkError.unreachable("L'appairage enregistré est incomplet : refaites-le.")
+            throw LinkError.unreachable("The saved pairing is incomplete: pair again.")
         }
         self.key = try key ?? DeviceKeys.load(kind: stored.keyKind, representation: stored.keyRepresentation)
         client = ComputerClient(link: makeLink(endpoint), computerKey: stored.computerKey)
@@ -462,12 +462,12 @@ final class RemoteModel {
 
     private static func describe(_ failure: PairingPayload.Failure) -> String {
         switch failure {
-        case .notAPairingCode: "Ce n'est pas un code d'appairage ONA."
-        case .unreadable: "Code d'appairage illisible."
-        case .unsupportedVersion(let v): "Version d'appairage \(v) non prise en charge : mettez ONA à jour des deux côtés."
-        case .badComputerKey: "La clé de l'ordinateur dans ce code est invalide."
-        case .noAddress: "Ce code ne contient pas d'adresse utilisable pour joindre l'ordinateur."
-        case .expired: "Ce code d'appairage a expiré : affichez-en un nouveau sur l'ordinateur."
+        case .notAPairingCode: "This is not an ONA pairing code."
+        case .unreadable: "Unreadable pairing code."
+        case .unsupportedVersion(let v): "Pairing version \(v) is not supported: update ONA on both devices."
+        case .badComputerKey: "The computer's key in this code is invalid."
+        case .noAddress: "This code has no usable address to reach the computer."
+        case .expired: "This pairing code has expired: show a new one on the computer."
         }
     }
 }

@@ -49,7 +49,7 @@ final class TorModel {
         } catch let error as TorError {
             state = .failed(message: error.localizedDescription, detail: error.detail)
         } catch {
-            state = .failed(message: "Tor n'a pas pu démarrer.", detail: String(describing: error))
+            state = .failed(message: "Tor could not start.", detail: String(describing: error))
         }
         refresh()
     }
@@ -102,7 +102,7 @@ struct TorView: View {
 
                 if case .failed(_, let detail) = tor.state {
                     Section {
-                        DisclosureGroup("Détails") {
+                        DisclosureGroup("Details") {
                             Text(detail)
                                 .font(.caption.monospaced())
                                 .foregroundStyle(.secondary)
@@ -112,29 +112,29 @@ struct TorView: View {
                 }
 
                 Section {
-                    LabeledContent("Données Tor sur ce téléphone",
+                    LabeledContent("Tor data on this phone",
                                    value: tor.dataSize.formatted(.byteCount(style: .file)))
-                    Button("Effacer les données Tor", role: .destructive) { confirmingErase = true }
+                    Button("Erase Tor data", role: .destructive) { confirmingErase = true }
                         .disabled(tor.dataSize == 0 || !(tor.state == .stopped || tor.isFailed))
                 } header: {
-                    Text("Réglages Tor")
+                    Text("Tor settings")
                 } footer: {
-                    Text("Ces données (l'annuaire du réseau Tor) accélèrent le démarrage. Après effacement, le prochain démarrage sera plus long. Arrêtez Tor pour pouvoir les effacer.")
+                    Text("This data (the Tor network directory) speeds up startup. After erasing it, the next startup takes longer. Stop Tor to erase it.")
                 }
 
                 if let version = tor.artiVersion {
                     Section {
-                        LabeledContent("Moteur", value: "Arti \(version)")
+                        LabeledContent("Engine", value: "Arti \(version)")
                     } footer: {
-                        Text("Arti est l'implémentation de Tor du Tor Project, intégrée à l'app.")
+                        Text("Arti is the Tor Project's implementation of Tor, built into the app.")
                     }
                 }
             }
             .navigationTitle("Tor")
             .onAppear { tor.startWatching() }
             .onDisappear { tor.stopWatching() }
-            .confirmationDialog("Effacer les données Tor ?", isPresented: $confirmingErase, titleVisibility: .visible) {
-                Button("Effacer", role: .destructive) { tor.eraseData() }
+            .confirmationDialog("Erase Tor data?", isPresented: $confirmingErase, titleVisibility: .visible) {
+                Button("Erase", role: .destructive) { tor.eraseData() }
             }
         }
     }
@@ -143,15 +143,15 @@ struct TorView: View {
     private var statusRow: some View {
         switch tor.state {
         case .stopped:
-            Label("Arrêté", systemImage: "pause.circle")
+            Label("Stopped", systemImage: "pause.circle")
                 .foregroundStyle(.secondary)
         case .starting(let progress):
             VStack(alignment: .leading, spacing: 8) {
-                Label("Démarrage…", systemImage: "arrow.triangle.2.circlepath")
+                Label("Starting…", systemImage: "arrow.triangle.2.circlepath")
                 ProgressView(value: progress)
             }
         case .ready:
-            Label("Connecté au réseau Tor", systemImage: "checkmark.shield.fill")
+            Label("Connected to the Tor network", systemImage: "checkmark.shield.fill")
                 .foregroundStyle(.green)
         case .failed(let message, _):
             Label(message, systemImage: "exclamationmark.triangle.fill")
@@ -163,20 +163,20 @@ struct TorView: View {
     private var actionButton: some View {
         switch tor.state {
         case .stopped, .failed:
-            Button("Démarrer Tor") { Task { await tor.start() } }
+            Button("Start Tor") { Task { await tor.start() } }
                 .disabled(tor.busy)
         case .starting, .ready:
-            Button("Arrêter Tor", role: .destructive) { Task { await tor.stop() } }
+            Button("Stop Tor", role: .destructive) { Task { await tor.stop() } }
                 .disabled(tor.busy)
         }
     }
 
     private var usageText: String {
         guard model.isPaired else {
-            return "Tor démarre tout seul quand l'ordinateur appairé est joint par une adresse .onion."
+            return "Tor starts on its own when the paired computer is reached through a .onion address."
         }
         return model.usesTor
-            ? "Votre ordinateur est joint par Tor. Tor démarre tout seul à l'ouverture de l'app."
-            : "Votre ordinateur est joint sur le réseau local, sans Tor."
+            ? "Your computer is reached over Tor. Tor starts on its own when the app opens."
+            : "Your computer is reached on the local network, without Tor."
     }
 }

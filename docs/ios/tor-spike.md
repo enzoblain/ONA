@@ -1,123 +1,117 @@
-# Spike Tor sur iPhone (étape 1)
+# Tor on iPhone: spike (step 1)
 
-Document interne. Créé le 2026-11-10.
+Created on 2026-11-10.
 
-> **Mise à jour :** l'app de test `ios/TorSpike` et son script `test-onion/run.sh` ont été retirés (branche
-> `ios-unified-app`). Arti est maintenant dans l'app ONA (onglet Tor). Ils restent dans l'historique git (commit
-> `2ef5dfe`). Pour un `.onion` de test : `ios/MockComputer/run_onion.sh`. Les mesures ci-dessous ont été faites avec
-> l'ancienne app de test.
+> **Update:** the test app `ios/TorSpike` and its script `test-onion/run.sh` were removed (branch `ios-unified-app`).
+> Arti is now in the ONA app (Tor tab). They remain in the git history (commit `2ef5dfe`). For a test `.onion`:
+> `ios/MockComputer/run_onion.sh`. The measurements below were made with the earlier test app.
 
-## Ce qui existe
+## What existed
 
-| Chemin | Rôle |
+| Path | Role |
 |---|---|
-| `ios/ArtiBridge/` | Crate Rust `arti-bridge` : interface C autour d'`arti-client` 0.48.0, compilée en bibliothèque statique (`ArtiBridge.xcframework`, iPhone + simulateur Apple Silicon). |
-| `ios/ArtiBridge/examples/smoke.rs` | Test de l'interface C sur le Mac : démarrage d'Arti puis GET HTTP à travers Tor. |
-| `ios/TorSpike/` | App SwiftUI de test : démarre Arti, interroge un `.onion`, journal des mesures en mémoire, export par la feuille de partage. |
-| `ios/TorSpike/test-onion/run.sh` | Serveur `.onion` de test sur le Mac (C Tor + `python3 -m http.server`). La clé du service reste hors du dépôt. |
+| `ios/ArtiBridge/` | Rust crate `arti-bridge`: C interface around `arti-client` 0.48.0, compiled as a static library (`ArtiBridge.xcframework`, iPhone + Apple silicon simulator). |
+| `ios/ArtiBridge/examples/smoke.rs` | Test of the C interface on the Mac: starts Arti, then an HTTP GET through Tor. |
+| `ios/TorSpike/` | Test SwiftUI app: starts Arti, queries a `.onion`, in-memory log of measurements, export through the share sheet. |
+| `ios/TorSpike/test-onion/run.sh` | Test `.onion` server on the Mac (C Tor + `python3 -m http.server`). The service key stays outside the repository. |
 
-Interface du pont (`ios/ArtiBridge/include/ArtiBridge.h`) : `bootstrap`, `status`, `http_get`, `set_dormant`,
-`shutdown`, `version`. Les réponses sont du JSON ; les appels bloquants passent par une file série côté Swift.
+Bridge interface (`ios/ArtiBridge/include/ArtiBridge.h`): `bootstrap`, `status`, `http_get`, `set_dormant`,
+`shutdown`, `version`. Replies are JSON; blocking calls go through a serial queue on the Swift side.
 
-## Lancer
-
-```bash
-ios/ArtiBridge/build-xcframework.sh          # ~5 min la première fois
-cp ios/TorSpike/Config/Local.xcconfig.example ios/TorSpike/Config/Local.xcconfig   # puis remplir
-ios/TorSpike/test-onion/run.sh               # affiche l'adresse .onion
-open ios/TorSpike/TorSpike.xcodeproj         # cible TorSpike, iPhone de test
-```
-
-Test sur le Mac, sans iPhone :
+## Run (test app, now removed)
 
 ```bash
-cd ios/ArtiBridge && cargo run --release --example smoke -- <adresse>.onion
+ios/ArtiBridge/build-xcframework.sh          # ~5 min the first time
+cp ios/TorSpike/Config/Local.xcconfig.example ios/TorSpike/Config/Local.xcconfig   # then fill it in
+ios/TorSpike/test-onion/run.sh               # prints the .onion address
+open ios/TorSpike/TorSpike.xcodeproj         # TorSpike target, test iPhone
 ```
 
-Dans l'app : « Démarrage à froid » efface le cache d'Arti avant de démarrer ; sans cette case, un cache présent donne
-un démarrage à chaud. Le journal note le réseau (Wi-Fi / cellulaire), les passages arrière-plan / premier plan (Arti
-passe en mode dormant en arrière-plan) et une requête automatique au retour. « Sonde toutes les 30 s » sert au test
-de changement de réseau.
+Test on the Mac, without an iPhone:
 
-## Choix faits (à relire)
+```bash
+cd ios/ArtiBridge && cargo run --release --example smoke -- <address>.onion
+```
 
-- **Contrôle des permissions d'Arti désactivé** (`fs-mistrust`, `dangerously_trust_everyone`). Le bac à sable iOS
-  isole déjà l'app, et l'app ne maîtrise pas les permissions des dossiers parents du conteneur. Non testé avec le
-  contrôle activé.
-- **Cache et état d'Arti dans `Library/Caches/arti`** : exclus des sauvegardes, iOS peut les purger. C'est ce qui
-  permet le démarrage à chaud. Contredit « rien sur le disque à part l'appairage » : question ouverte n° 1 de
-  `notes.md`, toujours à trancher.
-- **Correctif local de `sysinfo` 0.38.4** (`ios/ArtiBridge/patches/`) : la version exigée par `tor-memquota` 0.48.0 ne
-  compile pas pour iOS (`proc_pidinfo` absent de `libc` pour iOS). Le correctif fait renvoyer `None` à `open_files`
-  sur iOS. Détails dans `patches/sysinfo-0.38.4/ONA-PATCH.md`.
-- TLS des liens Tor : `native-tls` (Security.framework d'Apple), pas de copie d'OpenSSL embarquée.
-- SQLite embarqué (`static-sqlite`) plutôt que celui du système.
+In the app: "Cold start" erased Arti's cache before starting; without that box, an existing cache gave a warm start.
+The log recorded the network (Wi-Fi / cellular), the switches between background and foreground (Arti goes dormant in
+the background) and an automatic request on return. "Probe every 30 s" was for the network-change test.
 
-## Constats du 2026-11-10
+## Choices made
 
-Mac sous macOS 27.2, Xcode 27.0 bêta (27A5194q), Rust 1.97.1, arti-client 0.48.0, C Tor 0.4.9.16 (Homebrew,
+- **Arti's permission check disabled** (`fs-mistrust`, `dangerously_trust_everyone`). The iOS sandbox already isolates
+  the app, and the app does not control the permissions of the container's parent folders. Not tested with the check
+  enabled.
+- **Arti's cache and state in `Library/Caches/arti`**: excluded from backups, iOS may purge them. This is what allows
+  a warm start. It goes against "nothing on disk except the pairing": an open question, not settled yet.
+- **Local patch of `sysinfo` 0.38.4** (`ios/ArtiBridge/patches/`): the version required by `tor-memquota` 0.48.0 does
+  not compile for iOS (`proc_pidinfo` missing from `libc` for iOS). The patch makes `open_files` return `None` on iOS.
+  Details in `patches/sysinfo-0.38.4/ONA-PATCH.md`.
+- TLS for Tor links: `native-tls` (Apple's Security.framework), no embedded copy of OpenSSL.
+- Embedded SQLite (`static-sqlite`) rather than the system one.
+
+## Findings of 2026-11-10
+
+Mac on macOS 27.2, Xcode 27.0 beta (27A5194q), Rust 1.97.1, arti-client 0.48.0, C Tor 0.4.9.16 (Homebrew,
 OpenSSL 4.1.0).
 
-| Constat | Détail |
+| Finding | Detail |
 |---|---|
-| Compilation | Le pont compile pour `aarch64-apple-ios` et `aarch64-apple-ios-sim` (avec le correctif `sysinfo`). L'app compile pour le simulateur et pour l'iPhone (Release, non signée). |
-| Simulateur | L'app se lance sur un simulateur iPhone 17 ; l'appel Swift → Rust (`version`) fonctionne. Démarrage de Tor non essayé dans le simulateur. |
-| Tailles (Mac, pas une mesure de « taille ajoutée ») | `libarti_bridge.a` iOS release : 18 519 800 octets. Exécutable `TorSpike` Release arm64 non signé, avec Arti : 9 842 512 octets. Pas encore de build de référence sans Arti pour calculer la différence. |
-| **Réseau du Mac : Tor bloqué** | C Tor reste à 10 % (« connections died … handshaking (TLS) », CONNECTRESET, NOROUTE) ; Arti via `smoke` échoue pareil (« TLS error in TLS negotiation », délais dépassés). HTTPS ordinaire fonctionne. Deux implémentations, deux piles TLS différentes, même échec : le réseau utilisé (Ethernet, pas de Wi-Fi associé) semble filtrer Tor. Pas encore réessayé sur un autre réseau. |
-| Signature | Xcode 27 bêta n'a aucun compte Apple configuré : impossible de signer pour l'iPhone en ligne de commande. |
+| Build | The bridge compiles for `aarch64-apple-ios` and `aarch64-apple-ios-sim` (with the `sysinfo` patch). The app compiles for the simulator and for the iPhone (Release, unsigned). |
+| Simulator | The app launches on an iPhone 17 simulator; the Swift → Rust call (`version`) works. Tor startup not tried in the simulator. |
+| Sizes (Mac, not a measure of "added size") | iOS release `libarti_bridge.a`: 18,519,800 bytes. Unsigned Release arm64 `TorSpike` executable, with Arti: 9,842,512 bytes. No reference build without Arti yet to compute the difference. |
+| **Mac's network: Tor blocked** | C Tor stays at 10 % ("connections died … handshaking (TLS)", CONNECTRESET, NOROUTE); Arti through `smoke` fails the same way ("TLS error in TLS negotiation", timeouts). Ordinary HTTPS works. Two implementations, two different TLS stacks, same failure: the network used (Ethernet, no Wi-Fi joined) seems to filter Tor. Not yet retried on another network. |
+| Signing | Xcode 27 beta has no Apple account configured: signing for the iPhone from the command line is impossible. |
 
-### Plus tard le 2026-11-10, sur un autre réseau (Mac, pas iPhone)
+### Later on 2026-11-10, on another network (Mac, not iPhone)
 
-Tor passe. `smoke` (Arti 0.48.0 sur le Mac, cache vide) : démarrage en 14 300 ms, puis GET vers example.com réussi
-deux fois. Vers le `.onion` de test (C Tor 0.4.9.16 sur le même Mac) : 1re requête connexion 7 169 ms / total
-7 757 ms, 2e requête connexion 446 ms / total 1 004 ms (HTTP 200, 214 octets). Une seule série : à refaire avant
-d'en tirer un chiffre.
+Tor gets through. `smoke` (Arti 0.48.0 on the Mac, empty cache): startup in 14,300 ms, then a GET to example.com
+succeeded twice. To the test `.onion` (C Tor 0.4.9.16 on the same Mac): 1st request connection 7,169 ms / total
+7,757 ms, 2nd request connection 446 ms / total 1,004 ms (HTTP 200, 214 bytes). A single run: to be repeated before
+drawing a figure from it.
 
-### Taille (2026-11-10, Xcode 27.0 bêta, Release arm64, arti-client 0.48.0)
+### Size (2026-11-10, Xcode 27.0 beta, Release arm64, arti-client 0.48.0)
 
-Exécutable `TorSpike` non signé : 9 843 136 octets. Carte de liaison (`-Wl,-map`) : les symboles venant de
-`libarti_bridge.a` font 4 822 292 octets, le reste du code (Swift de l'app, stubs) 247 038 octets ; les ~4,8 Mo
-restants (en-têtes, tables de déroulement, `__LINKEDIT`) ne sont pas attribués par la carte. Taille ajoutée par
-Arti : entre 4,8 et 9,6 Mo d'exécutable non compressé, selon l'attribution du reste. Taille de téléchargement
-(compressée) non mesurée.
+Unsigned `TorSpike` executable: 9,843,136 bytes. Link map (`-Wl,-map`): the symbols coming from `libarti_bridge.a`
+take 4,822,292 bytes, the rest of the code (the app's Swift, stubs) 247,038 bytes; the remaining ~4.8 MB (headers,
+unwind tables, `__LINKEDIT`) are not attributed by the map. Size added by Arti: between 4.8 and 9.6 MB of uncompressed
+executable, depending on how the rest is attributed. Download size (compressed) not measured.
 
 ### iPhone 16 (iOS 27.2, build 24B5089g)
 
-App installée et lancée le 2026-11-10 (Release, signée avec un compte gratuit).
+App installed and launched on 2026-11-10 (Release, signed with a free account).
 
-Incident côté Mac, 15:36 : le réseau du Mac coupe ~112 s. Ensuite le service `.onion` (C Tor 0.4.9.16) ne répond plus,
-ni à l'iPhone (requête expirée après 60 s) ni à Arti sur le Mac (expirée après 120 s), alors qu'Arti joint encore
-example.com. Redémarrer C Tor règle le problème (requête OK à 15:47). Une seule observation, cause non établie.
-À transmettre pour `ona-core` : le service onion de l'ordinateur doit être vérifié après une coupure réseau.
+Incident on the Mac side, 15:36: the Mac's network dropped for ~112 s. Afterwards the `.onion` service (C Tor 0.4.9.16)
+no longer answered, neither the iPhone (request timed out after 60 s) nor Arti on the Mac (timed out after 120 s),
+while Arti still reached example.com. Restarting C Tor fixed the problem (request OK at 15:47). A single observation,
+cause not established. Consequence for `ona-core`: the computer's onion service should be checked after a network
+outage.
 
-Journal exporté de l'app, 2026-11-10 vers 15:49 heure de Paris (le journal note l'heure en UTC), iPhone en
-cellulaire, une seule série :
+Log exported from the app, 2026-11-10 around 15:49 Paris time (the log records time in UTC), iPhone on cellular, a
+single run:
 
-| Mesure | Valeur |
+| Measurement | Value |
 |---|---|
-| Démarrage à chaud (cache présent, app relancée) | 714 ms (Rust), 716 ms vu de Swift |
-| Cache Arti sur le disque après démarrage | 10,8 Mo |
-| 1re requête vers le `.onion` après démarrage | connexion 3 013 ms, total 3 317 ms |
-| Requête au retour d'un passage en arrière-plan de ~1 s | connexion 350 ms, total 633 ms |
-| Bilan | 2 requêtes OK, 0 échec |
+| Warm start (cache present, app relaunched) | 714 ms (Rust), 716 ms seen from Swift |
+| Arti cache on disk after startup | 10.8 MB |
+| 1st request to the `.onion` after startup | connection 3,013 ms, total 3,317 ms |
+| Request on return from ~1 s in the background | connection 350 ms, total 633 ms |
+| Summary | 2 requests OK, 0 failures |
 
-Le cache de 10,8 Mo est le prix du démarrage à chaud : à verser à la question ouverte n° 1 de `notes.md`.
+The 10.8 MB cache is the cost of the warm start, to weigh in the open question above (nothing on disk except the
+pairing).
 
-Reste à mesurer sur l'iPhone :
+Not yet measured on the iPhone:
 
-- démarrage à froid (aucun relevé) ;
-- changement de réseau Wi-Fi ↔ cellulaire pendant la sonde 30 s (aucun relevé) ;
-- arrière-plan long (2 et 10 minutes) : le seul passage relevé dure ~1 s ;
-- répétitions : une seule série pour l'instant.
+- cold start (no reading);
+- network change Wi-Fi ↔ cellular during the 30 s probe (no reading);
+- long background (2 and 10 minutes): the only switch recorded lasted ~1 s;
+- repetitions: a single run so far;
+- download size (compressed app).
 
-## Conséquence possible pour ONA (à vérifier)
+## Possible consequence for ONA (to be checked)
 
-Si un réseau bloque Tor, il faut des ponts (obfs4, Snowflake…). Sur ordinateur, Arti lance un transport enfichable
-comme processus séparé ; une app iOS ne peut pas lancer de processus fils. Il faudrait donc un transport intégré à
-l'app (des bibliothèques existent, non évaluées). À noter dans les limites si la télécommande doit marcher sur ce
-genre de réseau.
-
-## Reste à faire pour l'étape 1
-
-1. Compléter les mesures iPhone listées plus haut (froid, changement de réseau, arrière-plan long, répétitions).
-2. Taille de téléchargement (app compressée), si l'équipe en a besoin.
+If a network blocks Tor, bridges are needed (obfs4, Snowflake…). On a computer, Arti runs a pluggable transport as a
+separate process; an iOS app cannot start child processes. So a transport built into the app would be needed
+(libraries exist, not evaluated). To be listed in the limitations if the remote control must work on that kind of
+network.

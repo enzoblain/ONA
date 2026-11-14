@@ -20,8 +20,8 @@ struct PoolView: View {
     @ViewBuilder
     private var content: some View {
         if !model.isPaired {
-            ContentUnavailableView("Aucun ordinateur appairé", systemImage: "link.badge.plus",
-                                   description: Text("Appairez un ordinateur depuis l'onglet Accueil pour voir vos parts dans le pool."))
+            ContentUnavailableView("No paired computer", systemImage: "link.badge.plus",
+                                   description: Text("Pair a computer from the Home tab to see your shares in the pool."))
         } else if let pool = model.pool {
             List {
                 totalSection(pool)
@@ -32,28 +32,28 @@ struct PoolView: View {
                             value: vault.value, pending: vault.spendingValue != "0" || vault.awaitingSignature > 0)
                     }
                 } footer: {
-                    Text("Pour déposer, placer ou retirer : confirmez sur l'ordinateur.")
+                    Text("To deposit, allocate or withdraw: confirm on the computer.")
                 }
             }
             .refreshable { await model.refreshPool() }
         } else if let error = model.poolError {
             ContentUnavailableView {
-                Label("Pool indisponible", systemImage: "exclamationmark.triangle")
+                Label("Pool unavailable", systemImage: "exclamationmark.triangle")
             } description: {
                 Text(error)
             } actions: {
-                Button("Réessayer") { Task { await model.refreshPool() } }
+                Button("Retry") { Task { await model.refreshPool() } }
                     .buttonStyle(.bordered)
             }
         } else {
-            ProgressView("Lecture du pool…")
+            ProgressView("Reading the pool…")
         }
     }
 
     private func totalSection(_ pool: PoolPortfolio) -> some View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Valeur totale").font(.subheadline).foregroundStyle(.secondary)
+                Text("Total value").font(.subheadline).foregroundStyle(.secondary)
                 Text(Self.near(pool.total)).font(.largeTitle.bold()).monospacedDigit()
             }
             .padding(.vertical, 4)
@@ -66,13 +66,13 @@ struct PoolView: View {
             Label(title, systemImage: systemImage)
             Spacer()
             if pending {
-                Image(systemName: "clock").foregroundStyle(.secondary).accessibilityLabel("Opération en cours")
+                Image(systemName: "clock").foregroundStyle(.secondary).accessibilityLabel("Operation in progress")
             }
             Text(Self.near(value)).monospacedDigit()
         }
     }
 
     static func near(_ yocto: String) -> String {
-        NEARAmount.text(yocto).map { "\($0) NEAR" } ?? "montant illisible"
+        NEARAmount.text(yocto).map { "\($0) NEAR" } ?? "unreadable amount"
     }
 }

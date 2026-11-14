@@ -72,7 +72,7 @@ public final class PhoneServer: @unchecked Sendable {
                 self.onState?(nil, self.port)
             case .failed(let error):
                 self.port = nil
-                self.onState?("Écoute impossible : \(error.localizedDescription). Nouvel essai…", nil)
+                self.onState?("Cannot listen: \(error.localizedDescription). Trying again…", nil)
                 self.queue.asyncAfter(deadline: .now() + 3) { [weak self] in
                     guard let self, self.listener != nil else { return }
                     try? self.start(self.exposure)

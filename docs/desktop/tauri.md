@@ -1,99 +1,97 @@
-# App bureau Windows et Linux (Tauri) — document interne
+# Windows and Linux desktop app (Tauri)
 
-Créée le 2026-11-10 sur la branche `desktop-tauri` (partie de `desktop-app`). Même rôle que l'app macOS
-([app.md](app.md)) pour les ordinateurs qui ne sont pas des Mac. **À valider par l'équipe**, comme l'app macOS.
-Protocole téléphone v1 depuis le 2026-11-11 (`docs/ios/protocol-draft.md`).
+Created on 2026-11-10 on the `desktop-tauri` branch (part of `desktop-app`). Same role as the macOS app
+([app.md](app.md)) for computers that are not Macs. Phone protocol v1 since 2026-11-11 (`docs/ios/protocol-draft.md`).
 
-## Ce qui existe
+## What exists
 
-| Chemin | Rôle |
+| Path | Role |
 |---|---|
-| `desktop/tauri/src-tauri/` | Crate Rust `ona-desktop` (Tauri 2), hors du workspace racine. `Cargo.lock` part de celui de la racine : `ona-core` et ses dépendances gardent les mêmes versions. |
-| `src/protocol.rs` | Octets signés (v1), engagement, code à 6 chiffres, condensés du contenu affiché et du paiement v2, texte du QR, signature et vérification ECDSA P-256 low-s (`p256`). Mêmes vecteurs de test que l'app Mac. |
-| `src/pairing.rs` | Appairage : clé P-256 de l'ordinateur, QR à usage unique valable 10 min, 5 codes faux au plus, engagement puis révélation, code à comparer, jeton, compteur et identifiants déjà utilisés. Fichier `pairing.json` écrit atomiquement (fichier temporaire, renommage, dossier synchronisé), droits 0600 sous Linux à chaque écriture ; rien n'est écrit avant la comparaison des codes (5 min pour comparer) ; un échec d'écriture est affiché ; un fichier illisible n'est jamais écrasé (erreur affichée, appairage désactivé). |
-| `src/engine.rs` | Conversations : un `ona-core` par conversation, une étape toutes les 1,5 s. Une nouvelle conversation est une recherche libre (section « Free research ») ; la mission avocat (arrêt aux trois confirmations) n'est plus atteinte que par les tests. Identifiants aléatoires (16 octets). Même JSON que le `ChatEngine` Swift. |
-| `src/http.rs`, `src/router.rs`, `src/server.rs` | Serveur pour le téléphone : routes v1 de `docs/ios/protocol-draft.md`, réponses signées, `Host` vérifié, requêtes de navigateur refusées ; 16 connexions au plus, 10 s par requête. Port choisi par le système en mode Tor. |
-| `src/tor.rs` | Lance le programme `tor` installé (d'abord `/usr/bin/tor`, `/usr/sbin/tor`, `/usr/local/bin/tor`, `/opt/homebrew/bin/tor`, `C:\Program Files\Tor\tor.exe`, puis le PATH) avec un service `.onion`, seulement une fois le serveur à l'écoute. `__OwningControllerProcess` : tor s'arrête avec l'app, même après un plantage. |
-| `src/worker.rs` | Un seul fil possède tout (`ona-core` n'est pas `Send`) ; la fenêtre et le serveur lui envoient des tâches. |
-| `src/main.rs` | Commandes Tauri appelées par la fenêtre. |
-| `desktop/tauri/ui/` | Fenêtre en HTML/CSS/JavaScript sans bibliothèque : conversations, confirmations, relevé, fenêtre « Téléphone ». Thème clair et sombre. |
-| `assets/make_icons.swift` | Dessine le logo et toutes les icônes (iOS, macOS, Tauri) : `swift assets/make_icons.swift`. |
+| `desktop/tauri/src-tauri/` | Rust crate `ona-desktop` (Tauri 2), outside the root workspace. `Cargo.lock` starts from the root one: `ona-core` and its dependencies keep the same versions. |
+| `src/protocol.rs` | Signed bytes (v1), commitment, 6-digit code, digests of the shown content and of the v2 payment, QR code text, ECDSA P-256 low-s signing and verification (`p256`). Same test vectors as the Mac app. |
+| `src/pairing.rs` | Pairing: the computer's P-256 key, single-use QR code valid for 10 min, at most 5 wrong codes, commitment then reveal, code to compare, token, counter and identifiers already used. `pairing.json` file written atomically (temporary file, rename, folder synced), permissions 0600 on Linux at each write; nothing is written before the codes are compared (5 min to compare); a write failure is shown; an unreadable file is never overwritten (error shown, pairing disabled). |
+| `src/engine.rs` | Conversations: one `ona-core` per conversation, one step every 1.5 s. A new conversation is a free research ("Free research" section); the lawyer mission (stopping at the three confirmations) is now reached only by the tests. Random identifiers (16 bytes). Same JSON as the Swift `ChatEngine`. |
+| `src/http.rs`, `src/router.rs`, `src/server.rs` | Server for the phone: v1 routes of `docs/ios/protocol-draft.md`, signed replies, `Host` checked, browser requests refused; at most 16 connections, 10 s per request. Port chosen by the system in Tor mode. |
+| `src/tor.rs` | Starts the installed `tor` program (first `/usr/bin/tor`, `/usr/sbin/tor`, `/usr/local/bin/tor`, `/opt/homebrew/bin/tor`, `C:\Program Files\Tor\tor.exe`, then the PATH) with a `.onion` service, only once the server is listening. `__OwningControllerProcess`: tor stops with the app, even after a crash. |
+| `src/worker.rs` | A single thread owns everything (`ona-core` is not `Send`); the window and the server send it tasks. |
+| `src/main.rs` | Tauri commands called by the window. |
+| `desktop/tauri/ui/` | Window in HTML/CSS/JavaScript without a library: conversations, confirmations, report, "Phone" window. Light and dark themes. |
+| `assets/make_icons.swift` | Draws the logo and all icons (iOS, macOS, Tauri): `swift assets/make_icons.swift`. |
 
-## Lancer
+## Run
 
-Rust (essayé avec 1.97.1), puis :
+Rust (tried with 1.97.1), then:
 
-- **Linux** (Debian/Ubuntu) : `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev`
-  et le paquet `tor`.
-- **Windows** : WebView2 (déjà présent sur Windows 10/11 à jour), outils de compilation MSVC, et le « Tor Expert Bundle »
-  avec `tor.exe` dans le PATH.
+- **Linux** (Debian/Ubuntu): `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev`
+  and the `tor` package.
+- **Windows**: WebView2 (already present on an up-to-date Windows 10/11), MSVC build tools, and the "Tor Expert Bundle"
+  with `tor.exe` in the PATH.
 
 ```bash
 cd desktop/tauri/src-tauri
-cargo test --locked     # 74 tests (13/11/2026), avec le vrai ona-core
-cargo run --locked      # l'app (build debug)
+cargo test --locked     # 74 tests (13/11/2026), with the real ona-core
+cargo run --locked      # the app (debug build)
 ```
 
-Le mode « Réseau local » (HTTP en clair sur toutes les interfaces, port 8790) n'existe que dans les builds debug
-(`cargo run`) ; un build release l'ignore, même s'il a été choisi auparavant.
+The "Local network" mode (plain HTTP on all interfaces, port 8790) exists only in debug builds (`cargo run`); a release
+build ignores it, even if it was chosen before.
 
-Pour les installeurs (`.deb`, `.rpm`, AppImage, `.msi`, NSIS), il faut la CLI Tauri, à épingler aussi :
-`cargo install tauri-cli --version <version> --locked`, puis `cargo tauri build`. Jamais essayé.
+For the installers (`.deb`, `.rpm`, AppImage, `.msi`, NSIS), the Tauri CLI is needed, pinned as well:
+`cargo install tauri-cli --version <version> --locked`, then `cargo tauri build`. Never tried.
 
-En debug seulement : le texte du QR est écrit sur la sortie (`ONA_PAIRING_PAYLOAD …`), pour le simulateur iOS qui n'a
-pas de caméra, et `ONA_AUTO_CONFIRM_PAIRING=1` confirme le code sans clic. Qui lit ce texte peut s'appairer avant
-le téléphone : à réserver aux tests. La fenêtre ne reçoit que l'image du QR, pas son texte.
+In debug only: the QR code text is written to the output (`ONA_PAIRING_PAYLOAD …`), for the iOS simulator, which has no
+camera, and `ONA_AUTO_CONFIRM_PAIRING=1` confirms the code without a click. Whoever reads this text can pair before the
+phone: for tests only. The window receives only the QR code image, not its text.
 
-## Vérifié le 2026-11-11 (protocole v1), sur macOS
+## Checked on 2026-11-11 (protocol v1), on macOS
 
-- Les crates `tauri` et `qrcode` ne sont pas dans le cache hors ligne : `cargo test` dans `src-tauri` n'a pas pu
-  tourner. Les modules (tout sauf `main.rs`) ont été compilés et testés hors ligne dans un banc d'essai externe avec les
-  mêmes versions épinglées (`qrcode` remplacé par un bouchon) : 45 tests passés. `main.rs` et la fenêtre n'ont pas été
-  compilés. Bout en bout en protocole v1 le 2026-11-11, sur macOS, réseau local : app iPhone (simulateur) ↔ app Tauri ↔
-  `ona-core`, de l'appairage (engagement puis révélation) au relevé, paiement de 0,6 NEAR vérifié en v2 sur le téléphone.
+- The `tauri` and `qrcode` crates are not in the offline cache: `cargo test` in `src-tauri` could not run. The modules
+  (everything except `main.rs`) were compiled and tested offline in an external harness with the same pinned versions
+  (`qrcode` replaced by a stub): 45 tests passed. `main.rs` and the window were not compiled. End to end with protocol
+  v1 on 2026-11-11, on macOS, local network: iPhone app (simulator) ↔ Tauri app ↔ `ona-core`, from pairing (commitment
+  then reveal) to the report, payment of 0.6 NEAR checked in v2 on the phone.
 
-## Vérifié le 2026-11-10, sur macOS (protocole v0, avant les correctifs)
+## Checked on 2026-11-10, on macOS (protocol v0, before the fixes)
 
-- `cargo test` : 17 tests passés (vecteurs du protocole, appairage, fichier 0600, mission complète sur `ona-core` avec
-  refus d'une mauvaise empreinte, refus, routeur avec signatures, serveur TCP, appairage et conversation par HTTP).
-  `cargo clippy --all-targets` : aucun avertissement.
-- **Bout en bout, réseau local** : app iPhone (simulateur) ↔ app Tauri ↔ `ona-core`. Appairage par le texte du QR,
-  conversation signée, plan validé, cabinet-b choisi, paiement vérifié par le téléphone puis confirmé, relevé
-  d'`ona-core` (cabinet-b, 1 NEAR) reçu.
-- Fenêtre Tauri : liste mise à jour en direct et « Téléphone appairé » (capture). Le contenu d'une conversation, le choix
-  du cabinet et l'appel `confirm` ont été vérifiés avec la même interface dans un navigateur, avec un faux pont Tauri
-  et les vraies données de la conversation.
-- **Mode Tor** : serveur sur 127.0.0.1 seulement, `tor` lancé, adresse `.onion` publiée. Après `kill -9` de l'app,
-  `tor` s'arrête aussi.
+- `cargo test`: 17 tests passed (protocol vectors, pairing, 0600 file, full mission on `ona-core` with a wrong digest
+  refused, refusal, router with signatures, TCP server, pairing and conversation over HTTP).
+  `cargo clippy --all-targets`: no warnings.
+- **End to end, local network**: iPhone app (simulator) ↔ Tauri app ↔ `ona-core`. Pairing through the QR code text,
+  signed conversation, plan approved, cabinet-b chosen, payment checked by the phone then confirmed, `ona-core`'s
+  report (cabinet-b, 1 NEAR) received.
+- Tauri window: list updated live and "Paired phone" (capture). The content of a conversation, the choice of firm and
+  the `confirm` call were checked with the same interface in a browser, with a fake Tauri bridge and the real
+  conversation data.
+- **Tor mode**: server on 127.0.0.1 only, `tor` started, `.onion` address published. After `kill -9` of the app, `tor`
+  stops too.
 
-## Pas vérifié
+## Not checked
 
-- **Aucune compilation ni exécution sous Windows ou Linux.** Le code propre à Windows (`CREATE_NO_WINDOW`, chemins
-  de `tor.exe`) n'a jamais été compilé.
-- Le téléphone joignant l'app par Tor (seule la publication de l'adresse a été vue).
-- Les clics dans la vraie fenêtre Tauri (pas de clic automatisé possible ici) ; le QR affiché dans la fenêtre.
-- Les installeurs.
-- Chaque conversation a son `ona-core` sur un fil à elle. Le fil qui sert la fenêtre et le téléphone lui envoie une
-  commande à la fois et n'attend pas plus de 200 ms : un appel au vrai modèle continue pendant que la fenêtre et le
-  téléphone sont servis, et la réponse est reprise au tour suivant. Les confirmations (plan, destinataire, paiement)
-  et la fin de mission attendent la réponse : elles ne passent pas par le modèle. La lecture du pool pour le téléphone
-  attend encore la sienne.
-- La **clé privée de l'ordinateur** (qui signe les réponses au téléphone) et le **jeton** du téléphone (qui ouvre les
-  lectures) sont dans le coffre du système (bibliothèque `keyring` : Trousseau sur Mac, Gestionnaire d'identification
-  sous Windows, Secret Service sous Linux), pas dans `pairing.json`, qui ne garde que la clé publique du téléphone, le
-  compteur et les identifiants déjà utilisés. Un `pairing.json` d'une version précédente donne ses secrets au coffre
-  au démarrage, puis est réécrit sans eux. Sans coffre utilisable (Linux sans Secret Service lancé), les secrets
-  restent dans le fichier, lisible par l'utilisateur seul, et la fenêtre le dit. Testé avec un faux coffre ; le vrai
-  coffre de chaque système n'a pas été essayé. Un autre programme du même utilisateur peut en général lire le coffre
-  aussi : il protège surtout contre la copie d'un fichier (sauvegarde, autre machine).
-- Le coffre est lu au démarrage sur un fil à part : macOS peut d'abord demander l'accord de la personne (après une mise
-  à jour non signée de la même façon, par exemple). Pendant ce temps la fenêtre répond et dit « Lecture du trousseau du
-  système… » ; le téléphone n'est pas servi et aucun QR n'est montré tant que l'appairage n'est pas chargé. Une écriture
-  dans le coffre (nouvel appairage) se fait encore sur le fil principal. Les tests n'utilisent jamais le coffre du
-  système.
-- Le fichier d'appairage et la clé du service onion (`tor/hs`) sous Windows n'ont pas de droits restreints au-delà du
-  dossier de l'utilisateur (pas d'ACL posée). Sous Linux, la clé onion est un fichier simple dans un dossier 0700 : qui
-  la copie peut publier la même adresse ; les réponses signées par la clé de l'ordinateur limitent alors l'usurpation.
+- **No build or run on Windows or Linux.** The Windows-specific code (`CREATE_NO_WINDOW`, `tor.exe` paths) has never
+  been compiled.
+- The phone reaching the app through Tor (only the publication of the address was seen).
+- Clicks in the real Tauri window (no automated click possible here); the QR code shown in the window.
+- The installers.
+- Each conversation has its `ona-core` on a thread of its own. The thread that serves the window and the phone sends it
+  one command at a time and waits no more than 200 ms: a call to the real model goes on while the window and the phone
+  are served, and the reply is picked up at the next tick. Confirmations (plan, recipient, payment) and the end of a
+  mission wait for the reply: they do not go through the model. Reading the pool for the phone still waits for its
+  reply.
+- The **computer's private key** (which signs the replies to the phone) and the phone's **token** (which opens reads)
+  are in the system's credential store (`keyring` library: Keychain on Mac, Credential Manager on Windows, Secret
+  Service on Linux), not in `pairing.json`, which keeps only the phone's public key, the counter and the identifiers
+  already used. A `pairing.json` from an earlier version hands its secrets to the store at startup, then is rewritten
+  without them. Without a usable store (Linux without a running Secret Service), the secrets stay in the file, readable
+  by the user only, and the window says so. Tested with a fake store; the real store of each system has not been
+  tried. Another program of the same user can usually read the store too: it mostly protects against a file being
+  copied (backup, another machine).
+- The store is read at startup on a separate thread: macOS may first ask for the person's consent (after an update not
+  signed the same way, for example). Meanwhile the window responds and says "Reading the system keychain…"; the phone
+  is not served and no QR code is shown until the pairing is loaded. A write to the store (new pairing) is still done
+  on the main thread. The tests never use the system's store.
+- On Windows, the pairing file and the onion service key (`tor/hs`) have no restricted permissions beyond the user's
+  folder (no ACL set). On Linux, the onion key is a plain file in a 0700 folder: whoever copies it can publish the same
+  address; the replies signed by the computer's key then limit impersonation.
 
 ## Real model
 
@@ -116,7 +114,7 @@ asks for none (`ona-relay` refuses a chat without one).
 
 **A relay published for named clients only** (docs/TOR.md, "onion client authorization"): when `relay_url` is an
 `http://…onion` address, the app makes an x25519 key once (`tor/relay-client/key`, 0600), gives tor its secret half for
-that address only (`ClientOnionAuthDir`), and shows the public half in the phone dialog, under "Relais": the relay's
+that address only (`ClientOnionAuthDir`), and shows the public half in the phone dialog, under "Relay": the relay's
 operator adds that line to the service's `authorized_clients/`. Checked with two `tor` (0.4.9) on this Mac: a client set
 up this way got HTTP 200 from a service restricted to its key. Not checked against the team's relay yet.
 
@@ -158,20 +156,20 @@ ona-core's `research_*` commands on the conversation's own core thread:
 1. `research_open`, then `research_propose`: the chat waits (`status: waiting`) on a confirmation of kind `queries`,
    whose content digest is `protocol::queries_digest` (SHA-256 of `fields("ona/queries/v1", id, query_1, …)`, no
    count). Test vector, shared with the Mac and iPhone tests: id `c-0123456789abcdef0123456789abcdef`, queries
-   `plombier Lyon` and `tarif déplacement plombier` →
-   `8174711c622fea16bd82439613d544f31d2c2d8c3fb4bc1e22414a092a7cb01c`.
+   `plumber Lyon` and `plumber call-out fee in €` →
+   `9d6f191e63db66db31141a4b0f27a2253f476ed9cc0329bbe829a174ed369abf`.
 2. Accepted on the phone (signed confirmation over that digest, queries as shown) or in this window, where each query
    is an editable field (`confirm` with `queries`); `research_accept` gets the final list. Refusing closes the research:
    nothing was searched.
 3. `research_step` until `done`, polled without waiting (a model call or a Tor fetch does not hold the window or the
-   phone): one activity per event (`search`: « Recherche « … » : N sources », `read`: « Lecture de <site> : N notes » or
+   phone): one activity per event (`search`: `Search "…": N sources`, `read`: `Read <site>: N notes` or
    why the page was not read, `think` for the answer).
 4. `research_result`: one `answer` item (answer, notes with their quote and source, sources with title and address,
    shown as text and never opened), one `action` item per suggested action (`state` `suggested`, then `done`), then
    `research_exposure`: the exposure item. The chat is then `idle`.
 5. Actions, in this window only (the phone has no route for them): the person types the recipient (an e-mail address or
-   a NEAR account) and clicks **Préparer** (`research_action_prepare`); the exact action is shown, with a warning when
-   the recipient is also written in a page read; **Envoyer depuis ma messagerie** or **Payer** sends
+   a NEAR account) and clicks **Prepare** (`research_action_prepare`); the exact action is shown, with a warning when
+   the recipient is also written in a page read; **Send from my mail app** or **Pay** sends
    `research_action_confirm` with the action's digest, then `research_action_do`. A message is opened as a `mailto:`
    address with the system's own command (the person sends it from their mail program; if nothing opened, the address
    is shown to copy); the exposure item is read again. A new message in the same conversation starts a new research,
@@ -183,7 +181,7 @@ here (exactly those are searched; one with a protected term is refused and the q
 exposure counting the message), the phone accepting the queries over the router with its signature (and a signature
 over other queries refused). The window was checked in a browser with a fake bridge and a view produced by the engine:
 the queries card with edited fields (the `confirm` call carries them), the answer card, the action cards with the
-warning, and the « not opened » fallback. Not tested: the clicks in the real Tauri window, opening a `mailto:` address
+warning, and the "not opened" fallback. Not tested: the clicks in the real Tauri window, opening a `mailto:` address
 (on any system), a research through Tor or with the real model (docs/research.md, "Not tested"). Payments of a
 research go through ona-core's mock payments (`MockPayments`): nothing is paid on a network.
 
@@ -192,8 +190,8 @@ research go through ona-core's mock payments (`MockPayments`): nothing is paid o
 The **Pool** button opens the pool: the total, the cash, one line per vault, and the operations of
 docs/desktop/pool-commands.md. Each operation is prepared by ona-core (`pool_prepare`), its summary shown (amount, what
 is received, what is left in the pool's cash and lost, fees, network, contract, expiry), and executed only when the
-person clicks **Confirmer** in this window: never from the phone, which only reads the portfolio. Entries, exits and
-payments are queued by the pool agent: the window says the result comes later, and **Récupérer** runs `pool_recover`.
+person clicks **Confirm** in this window: never from the phone, which only reads the portfolio. Entries, exits and
+payments are queued by the pool agent: the window says the result comes later, and **Recover** runs `pool_recover`.
 A deposit is sent and signed by the person's own NEAR wallet, on the wallet page the app opens in the browser
 (docs/desktop/wallet.md). Since 13/11/2026 the screen is laid out as below ("Pool screen").
 

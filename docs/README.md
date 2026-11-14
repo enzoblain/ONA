@@ -1,6 +1,6 @@
 # ONA documents
 
-Start with the [README](../README.md). Some component notes are in French (marked FR).
+Start with the [README](../README.md).
 
 ## State and design
 
@@ -24,12 +24,8 @@ Start with the [README](../README.md). Some component notes are in French (marke
 
 ## Apps
 
-- [desktop/app.md](desktop/app.md) (FR): the macOS app.
-- [desktop/tauri.md](desktop/tauri.md) (FR, some sections in English): the Windows and Linux app.
-- [ios/app.md](ios/app.md) (FR): the iPhone app.
-- [ios/protocol-draft.md](ios/protocol-draft.md) (FR): the phone ↔ computer protocol, version 1.
-- [ios/tor-spike.md](ios/tor-spike.md) (FR): Tor on iPhone, first measurements.
-
-## Team notes
-
-[team/](team/): internal notes of the team (FR), kept for the record.
+- [desktop/app.md](desktop/app.md): the macOS app.
+- [desktop/tauri.md](desktop/tauri.md): the Windows and Linux app.
+- [ios/app.md](ios/app.md): the iPhone app.
+- [ios/protocol-draft.md](ios/protocol-draft.md): the phone ↔ computer protocol, version 1.
+- [ios/tor-spike.md](ios/tor-spike.md): Tor on iPhone, first measurements.

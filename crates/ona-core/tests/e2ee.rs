@@ -188,7 +188,7 @@ fn client(attack: Attack) -> E2eeClient<FakeEnclave, Unverified> {
 #[test]
 fn a_chat_round_trips_through_the_enclave() {
     let mut c = client(Attack::None);
-    let reply = c.chat("mon dossier confidentiel").unwrap();
+    let reply = c.chat("my confidential case file").unwrap();
     assert_eq!(reply, ChatReply { content: "secret reply".into(), tokens_used: 50 });
     assert_eq!(c.tokens_spent(), 50);
 }
@@ -197,9 +197,9 @@ fn a_chat_round_trips_through_the_enclave() {
 fn version_3_is_the_default() {
     let mut enclave = FakeEnclave::new(Attack::None);
     let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
-    assert_eq!(c.chat("bonjour").unwrap().content, "secret reply");
+    assert_eq!(c.chat("hello").unwrap().content, "secret reply");
     assert_eq!(enclave.last_version, "3");
-    assert_eq!(enclave.received_prompts, vec!["bonjour"]);
+    assert_eq!(enclave.received_prompts, vec!["hello"]);
 }
 
 /// Through Tor, the requests between two `new_call` share one circuit: each chat starts one, before its attestation.
@@ -207,8 +207,8 @@ fn version_3_is_the_default() {
 fn each_chat_is_one_call_with_its_three_requests() {
     let mut enclave = FakeEnclave::new(Attack::None);
     let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
-    c.chat("un").unwrap();
-    c.chat("deux").unwrap();
+    c.chat("one").unwrap();
+    c.chat("two").unwrap();
     assert_eq!(enclave.requests_per_call, vec![3, 3], "attestation, chat, signature; then a new call");
 }
 
@@ -216,7 +216,7 @@ fn each_chat_is_one_call_with_its_three_requests() {
 fn version_2_needs_an_explicit_setting() {
     let mut enclave = FakeEnclave::new(Attack::None);
     let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000).with_encryption_version(EncryptionVersion::V2);
-    assert_eq!(c.chat("bonjour").unwrap().content, "secret reply");
+    assert_eq!(c.chat("hello").unwrap().content, "secret reply");
     assert_eq!(enclave.last_version, "2");
 }
 
@@ -224,7 +224,7 @@ fn version_2_needs_an_explicit_setting() {
 fn assert_refused_without_downgrade(attack: Attack) {
     let mut enclave = FakeEnclave::new(attack);
     let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
-    assert!(c.chat("dossier Dupont").unwrap_err().contains("chat failed"));
+    assert!(c.chat("Dupont case file").unwrap_err().contains("chat failed"));
     assert!(enclave.received_prompts.is_empty(), "the model must not see the prompt");
     assert_eq!(enclave.chats, 1, "a failure is not retried");
     assert_eq!(enclave.last_version, "3", "and never with a lower version");
@@ -294,8 +294,8 @@ fn each_v3_field_gets_its_own_ephemeral_key_and_nonce() {
 #[test]
 fn encryption_interoperates_with_a_client_key() {
     let key = ClientKey::generate();
-    let blob = encrypt_to(&key.public_bytes(), b"bonjour").unwrap();
-    assert_eq!(key.decrypt(&blob).unwrap(), b"bonjour");
+    let blob = encrypt_to(&key.public_bytes(), b"hello").unwrap();
+    assert_eq!(key.decrypt(&blob).unwrap(), b"hello");
     assert!(ClientKey::generate().decrypt(&blob).is_err(), "another key cannot read it");
     let mut tampered = blob;
     let last = tampered.len() - 1;
@@ -320,15 +320,15 @@ fn a_token_limit_is_always_sent() {
     let body: Value = serde_json::from_slice(&enclave.last_body).unwrap();
     assert_eq!(body["max_tokens"], 77);
     assert_eq!(body["stream"], false);
-    assert!(!String::from_utf8_lossy(&enclave.last_body).contains("Bonjour"));
+    assert!(!String::from_utf8_lossy(&enclave.last_body).contains("Hello"));
 }
 
 #[test]
 fn the_prompt_reaches_the_model_only_as_ciphertext() {
     let mut enclave = FakeEnclave::new(Attack::None);
     let mut c = E2eeClient::new(&mut enclave, Unverified, MODEL, 100, 1000);
-    c.chat("dossier Dupont").unwrap();
-    assert_eq!(enclave.received_prompts, vec!["dossier Dupont"]);
+    c.chat("Dupont case file").unwrap();
+    assert_eq!(enclave.received_prompts, vec!["Dupont case file"]);
     assert!(!String::from_utf8_lossy(&enclave.last_body).contains("Dupont"));
 }
 

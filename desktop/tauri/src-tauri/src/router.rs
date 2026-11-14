@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn reads_need_the_token_and_browsers_are_refused() {
         let mut setup = Setup::new();
-        let (_, created) = setup.create("Trouve un avocat");
+        let (_, created) = setup.create("Find a lawyer");
         let chat = created.json["chat_id"].as_str().unwrap().to_owned();
 
         for body in [json!({}), json!({"token": "x"})] {
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn refuses_a_replayed_message_and_a_replayed_confirmation() {
         let mut setup = Setup::new();
-        let (body, created) = setup.create("Trouve un avocat");
+        let (body, created) = setup.create("Find a lawyer");
         assert_eq!(created.status, 200);
         assert_eq!(setup.post("/v1/chats", body).json["error"], "replayed request");
 
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn a_confirmation_signed_over_other_content_is_refused() {
         let mut setup = Setup::new();
-        let (_, created) = setup.create("Trouve un avocat");
+        let (_, created) = setup.create("Find a lawyer");
         let chat = created.json["chat_id"].as_str().unwrap().to_owned();
         let pending = setup.pending(&chat);
         let id = pending["id"].as_str().unwrap();
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn a_refused_answer_does_not_block_the_confirmation() {
         let mut setup = Setup::new();
-        let (_, created) = setup.create("Trouve un avocat");
+        let (_, created) = setup.create("Find a lawyer");
         let chat = created.json["chat_id"].as_str().unwrap().to_owned();
         let pending = setup.pending(&chat);
         let (id, content) = (pending["id"].as_str().unwrap().to_owned(), pending["content"].as_str().unwrap().to_owned());
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn writes_need_the_phone_signature_with_its_counter() {
         let mut setup = Setup::new();
-        let (mut body, created) = setup.create("Trouve un avocat");
+        let (mut body, created) = setup.create("Find a lawyer");
         let chat = created.json["chat_id"].as_str().unwrap().to_owned();
         body["text"] = json!("Paye tout");
         body["counter"] = json!(setup.phone.next());
@@ -401,13 +401,13 @@ mod tests {
     #[test]
     fn the_phone_accepts_the_queries_it_shows() {
         let mut setup = Setup::new();
-        let (_, created) = setup.create("Combien coûte un plombier à Lyon ? Écris-leur");
+        let (_, created) = setup.create("How much does a plumber cost in Lyon? Write to them");
         let chat = created.json["chat_id"].as_str().unwrap().to_owned();
         let pending = setup.pending(&chat);
         assert_eq!(pending["kind"], "queries");
         let id = pending["id"].as_str().unwrap();
         let shown: Vec<String> = pending["queries"].as_array().unwrap().iter().map(|q| q.as_str().unwrap().into()).collect();
-        let other = protocol::queries_digest(id, &["autre chose".into()]);
+        let other = protocol::queries_digest(id, &["something else".into()]);
         assert_eq!(setup.post("/v1/confirm", setup.confirm_body(&pending, &other)).json["error"], "signature does not verify");
         let content = protocol::queries_digest(id, &shown);
         assert_eq!(pending["content"], content);

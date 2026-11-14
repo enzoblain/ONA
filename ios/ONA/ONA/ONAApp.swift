@@ -40,7 +40,7 @@ struct ONAApp: App {
     }
 }
 
-/// Bottom tab bar in Liquid Glass: Accueil, Pool, Tor, Réglages.
+/// Bottom tab bar in Liquid Glass: Home, Pool, Tor, Settings.
 struct AppTabs: View {
     @Bindable var model: RemoteModel
     @State private var selection: TabID = .home
@@ -51,7 +51,7 @@ struct AppTabs: View {
 
     var body: some View {
         TabView(selection: $selection) {
-            Tab("Accueil", systemImage: "house", value: TabID.home) {
+            Tab("Home", systemImage: "house", value: TabID.home) {
                 HomeView(model: model)
             }
             .badge(model.waitingCount)
@@ -61,7 +61,7 @@ struct AppTabs: View {
             Tab("Tor", systemImage: "network.badge.shield.half.filled", value: TabID.tor) {
                 TorView(model: model)
             }
-            Tab("Réglages", systemImage: "gearshape", value: TabID.settings) {
+            Tab("Settings", systemImage: "gearshape", value: TabID.settings) {
                 SettingsView(model: model)
             }
         }

@@ -16,23 +16,23 @@ MAX_TEXT = 2000
 
 # What the agent is doing while a step runs (shown with a spinner on the phone).
 RUNNING_LABELS = {
-    "search": "Recherche en cours…",
-    "read": "Lecture d'une page…",
-    "compare": "Comparaison des offres…",
-    "contact": "Prise de contact…",
-    "prepare_payment": "Préparation du paiement…",
-    "pay": "Envoi du paiement…",
+    "search": "Searching…",
+    "read": "Reading a page…",
+    "compare": "Comparing offers…",
+    "contact": "Contacting the firm…",
+    "prepare_payment": "Preparing the payment…",
+    "pay": "Sending the payment…",
 }
 
-PLAN_MESSAGE = ("J'ai préparé un plan en 9 étapes. Il est figé avant toute lecture du web : je ne contacterai personne "
-                "et ne paierai rien sans votre accord. Validez-le pour que je commence.")
-RECIPIENT_MESSAGE = "J'ai trouvé deux offres. Laquelle dois-je contacter ?"
-PAYMENT_MESSAGE = "Le cabinet est contacté. Il reste à confirmer le paiement de la consultation."
-DONE_MESSAGE = ("C'est fait : cabinet contacté et consultation payée. Voici ce qui est sorti de votre ordinateur "
-                "pendant cette mission.")
-CANCELLED_MESSAGE = "Mission arrêtée à votre demande. Rien d'autre ne sera envoyé."
-BUSY_MESSAGE = ("Je suis encore sur la mission en cours : je vous tiens au courant ici. "
-                "(Simulation : l'agent de démonstration ne répond pas encore aux messages pendant une mission.)")
+PLAN_MESSAGE = ("I have prepared a 9-step plan. It is fixed before anything is read on the web: I will not contact "
+                "anyone or pay anything without your approval. Approve it so I can start.")
+RECIPIENT_MESSAGE = "I found two offers. Which one should I contact?"
+PAYMENT_MESSAGE = "The firm has been contacted. The consultation payment still needs your confirmation."
+DONE_MESSAGE = ("Done: the firm was contacted and the consultation paid. Here is what left your computer "
+                "during this mission.")
+CANCELLED_MESSAGE = "Mission stopped at your request. Nothing else will be sent."
+BUSY_MESSAGE = ("I am still on the current mission: I will keep you posted here. "
+                "(Simulation: the demo agent does not answer messages during a mission yet.)")
 
 
 def title_from(text: str) -> str:
@@ -75,7 +75,7 @@ class Chat:
             return
         self.mission = self._make_mission()
         self._seen_events = len(self.mission.events)
-        self._add("activity", tool="think", text="Lecture de votre demande et préparation d'un plan")
+        self._add("activity", tool="think", text="Reading your request and preparing a plan")
         self._add("agent", text=PLAN_MESSAGE)
         self._add_confirmation()
 

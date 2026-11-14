@@ -1,90 +1,87 @@
-# Protocole téléphone ↔ ordinateur — version 1
+# Phone ↔ computer protocol, version 1
 
-Document interne. Version 1 du 2026-11-11 : remplace la version 0 (2026-11-10), après l'inspection de sécurité
-(rejeu, code à 6 chiffres sans engagement, lectures ouvertes, ordinateur non authentifié, signatures incomplètes).
-Implémentée par les apps bureau (`desktop/tauri/src-tauri/src/{protocol,pairing,router}.rs`,
-`desktop/ONADesktop/Core/`), par l'app iPhone (`ios/ONA/ONA/Pairing/SignedFields.swift`, `Protocol/ComputerLink.swift`)
-et par le faux ordinateur (`ios/MockComputer`), le 2026-11-11.
+Version 1 of 2026-11-11: replaces version 0 (2026-11-10), after the security inspection (replay, 6-digit code without
+commitment, open reads, computer not authenticated, incomplete signatures). Implemented by the desktop apps
+(`desktop/tauri/src-tauri/src/{protocol,pairing,router}.rs`, `desktop/ONADesktop/Core/`), by the iPhone app
+(`ios/ONA/ONA/Pairing/SignedFields.swift`, `Protocol/ComputerLink.swift`) and by the mock computer
+(`ios/MockComputer`), on 2026-11-11.
 
-Elle calque les trois confirmations humaines d'`ona-core` : `accept_plan`, `confirm_recipient`, `confirm_payment`.
+It mirrors the three human confirmations of `ona-core`: `accept_plan`, `confirm_recipient`, `confirm_payment`.
 
-## Principes
+## Principles
 
-- Le téléphone **interroge** l'ordinateur (pas de push). Il ne garde rien sur le disque hors du Trousseau.
-- Le téléphone ne voit que ce qu'il doit afficher : l'avancement, les offres à départager, l'écran de paiement.
-- Chaque réponse porte `"mode"` : `"mock"` tant que modèle et paiements sont faux, `"real"` sinon.
-- Transport : HTTP/1.0 + JSON, **toutes les requêtes en `POST`** avec un corps JSON (le pont Tor de l'app ne sait
-  envoyer ni en-têtes ni `DELETE`). Par Tor (`.onion` de l'ordinateur). Le mode « réseau local » (HTTP en clair)
-  n'existe que dans les versions de développement des apps bureau.
-- L'ordinateur refuse : un en-tête `Host` absent, vide, répété ou autre que son adresse `.onion` (ou
-  `127.0.0.1:port`, ou son adresse locale en mode réseau local) ; toute requête qui porte `Origin`, `Sec-Fetch-Site`,
-  `Sec-Fetch-Mode` ou `Sec-Fetch-Dest`, même avec une valeur vide (navigateur) ; toute méthode autre que `POST` ; les
-  routes `/v0/…`.
-- Limites côté ordinateur : 16 connexions simultanées, 10 s pour envoyer une requête et recevoir sa réponse, en-têtes
-  et corps de 16 Kio au plus.
+- The phone **polls** the computer (no push). It keeps nothing on disk outside the Keychain.
+- The phone sees only what it must show: progress, the offers to choose between, the payment screen.
+- Every reply carries `"mode"`: `"mock"` as long as the model and the payments are fake, `"real"` otherwise.
+- Transport: HTTP/1.0 + JSON, **all requests are `POST`** with a JSON body (the app's Tor bridge can send neither
+  headers nor `DELETE`). Through Tor (the computer's `.onion`). The "local network" mode (plain HTTP) exists only in
+  development builds of the desktop apps.
+- The computer refuses: a `Host` header that is missing, empty, repeated or other than its `.onion` address (or
+  `127.0.0.1:port`, or its local address in local network mode); any request carrying `Origin`, `Sec-Fetch-Site`,
+  `Sec-Fetch-Mode` or `Sec-Fetch-Dest`, even with an empty value (a browser); any method other than `POST`; the
+  `/v0/…` routes.
+- Limits on the computer side: 16 simultaneous connections, 10 s to send a request and receive its reply, headers and
+  body of 16 KiB at most.
 
-## Encodage `champs(…)`
+## `fields(…)` encoding
 
-Pour chaque champ : sa longueur en u32 petit-boutiste, puis ses octets (texte en UTF-8, clés en octets bruts, champ
-absent = longueur 0). Les nombres (compteur, statut HTTP, prix…) sont écrits en texte décimal ASCII. Les aléas
-(`nonce`) sont 16 octets aléatoires écrits en 32 caractères hexadécimaux minuscules. Les condensés sont SHA-256 en
-64 caractères hexadécimaux minuscules.
+For each field: its length as a little-endian u32, then its bytes (text in UTF-8, keys as raw bytes, missing field =
+length 0). Numbers (counter, HTTP status, price…) are written as ASCII decimal text. Nonces (`nonce`) are 16 random
+bytes written as 32 lowercase hexadecimal characters. Digests are SHA-256 as 64 lowercase hexadecimal characters.
 
-Signatures : ECDSA P-256 avec SHA-256, encodage DER, en base64 standard. **Forme « low-s » obligatoire** (s ≤ n/2) :
-une signature dont s > n/2 est refusée, des deux côtés. CryptoKit en produit une fois sur deux : remplacer s par n − s
-avant l'envoi. Clés publiques : X9.63 non compressée, 65 octets commençant par `04`.
+Signatures: ECDSA P-256 with SHA-256, DER encoding, in standard base64. **The "low-s" form is required** (s ≤ n/2): a
+signature with s > n/2 is refused, on both sides. CryptoKit produces one half of the time: replace s with n − s before
+sending. Public keys: uncompressed X9.63, 65 bytes starting with `04`.
 
-## Réponses signées par l'ordinateur
+## Replies signed by the computer
 
-Chaque requête porte un champ `"nonce"` (32 hex, nouveau à chaque requête). Chaque réponse de l'ordinateur a ce
-corps :
+Each request carries a `"nonce"` field (32 hex, new for each request). Each reply from the computer has this body:
 
 ```json
-{ "reply": "<le JSON de la réponse, sous forme de texte>", "signature": "<base64, ECDSA DER>" }
+{ "reply": "<the reply's JSON, as text>", "signature": "<base64, ECDSA DER>" }
 ```
 
-`signature` porte sur `champs("ona/reply/v1", nonce, méthode, chemin, statut_http, reply)` (méthode et chemin de la
-requête, par exemple `POST` et `/v1/chats/list`) et se vérifie avec `computer_key` du QR. Le téléphone vérifie la
-signature **sur la valeur exacte de `reply` obtenue après décodage du JSON** (ne jamais ré-encoder : l'app Mac échappe
-`/` en `\/`), avec son propre `nonce`, sa méthode et son chemin, **avant** de lire `reply`. Il rejette toute réponse
-non signée ou mal signée : un programme qui aurait pris le port de l'ordinateur, ou un relais, ne peut ni fabriquer
-une réponse, ni rejouer une ancienne (le `nonce` change), ni faire passer la réponse d'une requête pour celle d'une
-autre.
+`signature` covers `fields("ona/reply/v1", nonce, method, path, http_status, reply)` (method and path of the request,
+for example `POST` and `/v1/chats/list`) and is verified with `computer_key` from the QR code. The phone verifies the
+signature **over the exact value of `reply` obtained after decoding the JSON** (never re-encode: the Mac app escapes
+`/` as `\/`), with its own `nonce`, method and path, **before** reading `reply`. It rejects any reply that is unsigned
+or wrongly signed: a program that took over the computer's port, or a relay, can neither forge a reply, nor replay an
+old one (the `nonce` changes), nor pass off the reply to one request as the reply to another.
 
-Seules réponses **sans signature** : 400, 413 et 431 quand la requête HTTP elle-même est illisible ou trop grande
-(avant toute lecture du JSON), et 503 (ordinateur en train de s'arrêter). Une réponse non signée est toujours un échec ;
-le téléphone ne lit pas son corps et ne la montre pas comme venant de l'ordinateur. Toutes les autres réponses,
-erreurs comprises (y compris un 400 « body is not a JSON object »), sont signées.
+The only replies **without a signature**: 400, 413 and 431 when the HTTP request itself is unreadable or too large
+(before any JSON is read), and 503 (computer shutting down). An unsigned reply is always a failure; the phone does not
+read its body and does not show it as coming from the computer. All other replies, errors included (including a 400
+"body is not a JSON object"), are signed.
 
-## Appairage
+## Pairing
 
-1. L'ordinateur affiche un QR : `ona-pair:` suivi de base64url (sans `=`) d'un JSON :
+1. The computer shows a QR code: `ona-pair:` followed by the base64url (without `=`) of a JSON:
 
    ```json
-   { "v": 1, "name": "Mon ordinateur", "address": null, "onion": "<adresse v3>.onion",
-     "computer_key": "<base64, X9.63, 65 octets>", "code": "<base64url, 16 octets aléatoires>",
+   { "v": 1, "name": "My computer", "address": null, "onion": "<v3 address>.onion",
+     "computer_key": "<base64, X9.63, 65 bytes>", "code": "<base64url, 16 random bytes>",
      "expires_at": 1762790600 }
    ```
 
-   Le code ne sert qu'une fois et expire au bout de 10 minutes (un nouveau QR s'affiche). Après 5 codes faux, il est
-   remplacé. Le téléphone refuse un QR dont `v` n'est pas 1.
+   The code can be used only once and expires after 10 minutes (a new QR code is shown). After 5 wrong codes, it is
+   replaced. The phone refuses a QR code whose `v` is not 1.
 
-   Avec une adresse `.onion`, le QR porte aussi `"onion_auth"` : la clé x25519 (32 octets, base32 RFC 4648 sans
-   `=`) de l'**autorisation client Tor** du téléphone. L'ordinateur publie son service onion pour cette seule clé
-   (« restricted discovery », fichier `authorized_clients/phone.auth` de `tor`) : un client Tor sans la clé ne trouve
-   même pas le service, et ne peut donc pas tenter d'appairage ni de requête. Une nouvelle clé à chaque nouvel
-   appairage (téléphone oublié), et l'ordinateur republie son service. Le téléphone la donne à Arti avant sa première
-   requête et la garde avec l'appairage. Un QR sans `onion_auth` reste lisible (ordinateur d'une version précédente).
-2. Le téléphone crée sa clé P-256 (Secure Enclave) et un aléa `phone_nonce`, puis **s'engage** :
+   With a `.onion` address, the QR code also carries `"onion_auth"`: the x25519 key (32 bytes, RFC 4648 base32 without
+   `=`) of the phone's **Tor client authorization**. The computer publishes its onion service for this key only
+   ("restricted discovery", `tor`'s `authorized_clients/phone.auth` file): a Tor client without the key does not even
+   find the service, and so cannot attempt a pairing or a request. A new key for each new pairing (phone forgotten),
+   and the computer republishes its service. The phone gives it to Arti before its first request and keeps it with the
+   pairing. A QR code without `onion_auth` can still be read (computer running an earlier version).
+2. The phone creates its P-256 key (Secure Enclave) and a nonce `phone_nonce`, then **commits**:
 
    ```json
    POST /v1/pair
-   { "code": "<code du QR>", "commitment": "<hex>", "nonce": "<hex>" }
+   { "code": "<code from the QR code>", "commitment": "<hex>", "nonce": "<hex>" }
    ```
 
-   `commitment = SHA-256(champs("ona/pair-commit/v1", phone_key, phone_nonce))`. Le code est consommé ici, quoi qu'il
-   arrive ensuite. Réponse : `{"ok": true, "pairing_id": "p-<32 hex>", "computer_nonce": "<32 hex>", "mode": …}`.
-3. Le téléphone **révèle** sa clé :
+   `commitment = SHA-256(fields("ona/pair-commit/v1", phone_key, phone_nonce))`. The code is used up here, whatever
+   happens next. Reply: `{"ok": true, "pairing_id": "p-<32 hex>", "computer_nonce": "<32 hex>", "mode": …}`.
+3. The phone **reveals** its key:
 
    ```json
    POST /v1/pair/reveal
@@ -92,64 +89,65 @@ erreurs comprises (y compris un 400 « body is not a JSON object »), sont sign�
      "nonce": "<hex>" }
    ```
 
-   `signature` (clé du téléphone) porte sur
-   `champs("ona/pair/v1", pairing_id, code, phone_key, computer_key, phone_nonce, computer_nonce)`. L'ordinateur
-   vérifie l'engagement et la signature : une seule tentative ; en cas d'échec, nouveau QR. L'engagement doit arriver
-   au plus 2 minutes avant la révélation. Réponse : `{"ok": true, "pairing_id": "p-…", "token": "<base64url, 32 octets>"}`.
-4. Les deux côtés affichent le **code de vérification** à 6 chiffres :
-   `SHA-256(champs("ona/sas/v1", computer_key, phone_key, code, phone_nonce, computer_nonce))`, 4 premiers octets en
-   entier gros-boutiste, modulo 1 000 000, sur 6 chiffres. La clé du téléphone est fixée (engagement) avant que
-   `computer_nonce` existe : un intermédiaire ne peut plus chercher une clé qui donne le même code (une chance sur un
-   million par QR). L'ordinateur n'enregistre le téléphone qu'après la confirmation de la personne, qui a 5 minutes
-   (au-delà, nouveau QR). Entre la révélation et ce clic, toute requête reçoit 403 `not paired` : le téléphone
-   affiche le code et attend. L'écran de l'ordinateur dit de refuser si le téléphone n'affiche aucun code.
-5. Le téléphone garde dans le Trousseau (cet appareil seulement) : `pairing_id`, `onion`, `computer_key`, `name`,
-   `token`, son compteur, la référence de sa clé Secure Enclave.
+   `signature` (phone's key) covers
+   `fields("ona/pair/v1", pairing_id, code, phone_key, computer_key, phone_nonce, computer_nonce)`. The computer
+   checks the commitment and the signature: a single attempt; on failure, a new QR code. The commitment must arrive at
+   most 2 minutes before the reveal. Reply: `{"ok": true, "pairing_id": "p-…", "token": "<base64url, 32 bytes>"}`.
+4. Both sides show the 6-digit **verification code**:
+   `SHA-256(fields("ona/sas/v1", computer_key, phone_key, code, phone_nonce, computer_nonce))`, first 4 bytes as a
+   big-endian integer, modulo 1,000,000, on 6 digits. The phone's key is fixed (commitment) before `computer_nonce`
+   exists: a party in the middle can no longer search for a key that gives the same code (one chance in a million per
+   QR code). The computer saves the phone only after the person confirms, within 5 minutes (after that, a new QR
+   code). Between the reveal and that click, every request gets 403 `not paired`: the phone shows the code and waits.
+   The computer's screen says to refuse if the phone shows no code.
+5. The phone keeps in the Keychain (this device only): `pairing_id`, `onion`, `computer_key`, `name`, `token`, its
+   counter, the reference to its Secure Enclave key.
 
-## Lectures (jeton)
+## Reads (token)
 
 - `POST /v1/chats/list` `{"token", "nonce"}` → `{"mode", "chats": [{"id", "title", "updated_at", "preview",
-  "status": "idle | working | waiting"}]}`, la plus récente d'abord.
+  "status": "idle | working | waiting"}]}`, most recent first.
 - `POST /v1/chats/{id}/view` `{"token", "nonce"}` → `{"mode", "chat": {"id", "title", "status",
-  "working": {"tool", "text"} | null, "items": [...]}}`. Éléments : `user` / `agent` (`text`), `activity` (`tool`,
-  `text`), `confirmation` (`pending`, `state` : `pending | accepted | rejected | expired`), `exposure`. Un `kind`
-  inconnu est ignoré.
+  "working": {"tool", "text"} | null, "items": [...]}}`. Items: `user` / `agent` (`text`), `activity` (`tool`,
+  `text`), `confirmation` (`pending`, `state`: `pending | accepted | rejected | expired`), `exposure`. An unknown
+  `kind` is ignored.
 
-Sans le bon jeton : 403 `missing or wrong token`. Le jeton ne voyage que dans le flux Tor chiffré.
+Without the right token: 403 `missing or wrong token`. The token travels only inside the encrypted Tor stream.
 
-## Pool (lecture seule)
+## Pool (read only)
 
-- `POST /v1/pool/portfolio` `{"token", "nonce"}` → `{"mode", "portfolio": {…}}`, où `portfolio` est la réponse de la
-  commande `pool_portfolio` d'`ona-core` sans `ok` ni `mode` (`cash`, `vaults`, `vault_count`, `total` ; montants en
-  yoctoNEAR, voir `docs/desktop/pool-commands.md`). Réponse signée comme les autres lectures.
-- Sans le bon jeton : 403 `missing or wrong token`. Si l'ordinateur n'a pas de pool configuré, 409 avec l'erreur
-  d'`ona-core` (par exemple `no pool wallet configured`).
-- Lecture seule : dépôts, placements, changements de vault et sorties se préparent et se confirment sur l'ordinateur
-  (`pool_prepare`, `pool_execute`), jamais sur le téléphone.
+- `POST /v1/pool/portfolio` `{"token", "nonce"}` → `{"mode", "portfolio": {…}}`, where `portfolio` is the reply of
+  `ona-core`'s `pool_portfolio` command without `ok` or `mode` (`cash`, `vaults`, `vault_count`, `total`; amounts in
+  yoctoNEAR, see `docs/desktop/pool-commands.md`). Reply signed like the other reads.
+- Without the right token: 403 `missing or wrong token`. If the computer has no pool configured, 409 with the error
+  from `ona-core` (for example `no pool wallet configured`).
+- Read only: deposits, placements, vault changes and exits are prepared and confirmed on the computer
+  (`pool_prepare`, `pool_execute`), never on the phone.
 
-## Écritures (jeton + signature du téléphone + compteur)
+## Writes (token + phone signature + counter)
 
-Chaque écriture porte `token`, `pairing_id`, `counter` (entier JSON sans partie décimale, de 1 à 2^53 − 1 =
-9007199254740991, strictement croissant pour cet appairage ; `1.0`, `"1"` ou `true` sont refusés) et `signature` (clé du téléphone, donc Face ID ou code de l'appareil). L'ordinateur enregistre le dernier compteur
-accepté **avant** d'exécuter la requête, y compris après redémarrage : une requête rejouée, ou un compteur qui ne
-monte pas, est refusée (`replayed request`). Le téléphone envoie ses écritures une par une.
+Each write carries `token`, `pairing_id`, `counter` (a JSON integer with no decimal part, from 1 to 2^53 − 1 =
+9007199254740991, strictly increasing for this pairing; `1.0`, `"1"` or `true` are refused) and `signature` (the
+phone's key, hence Face ID or the device passcode). The computer saves the last accepted counter **before** running
+the request, including across restarts: a replayed request, or a counter that does not increase, is refused
+(`replayed request`). The phone sends its writes one at a time.
 
 - `POST /v1/chats` `{"text", …}` → `{"ok", "chat_id": "chat-<32 hex>"}`.
-  Signature : `champs("ona/message/v1", pairing_id, counter, "", text)`.
-- `POST /v1/chats/{id}/messages` `{"text", …}`. Signature : `champs("ona/message/v1", pairing_id, counter, chat_id, text)`.
-- `POST /v1/chats/{id}/delete` `{…}`. Signature : `champs("ona/delete/v1", pairing_id, counter, chat_id)`.
-- Texte : 1 à 2 000 caractères. Identifiants de conversation aléatoires, jamais réutilisés.
+  Signature: `fields("ona/message/v1", pairing_id, counter, "", text)`.
+- `POST /v1/chats/{id}/messages` `{"text", …}`. Signature: `fields("ona/message/v1", pairing_id, counter, chat_id, text)`.
+- `POST /v1/chats/{id}/delete` `{…}`. Signature: `fields("ona/delete/v1", pairing_id, counter, chat_id)`.
+- Text: 1 to 2,000 characters. Conversation identifiers are random, never reused.
 
 ## Confirmations
 
-`pending` (au plus une par conversation) porte `id` (`c-<32 hex>`, aléatoire, émis par l'ordinateur, jamais réutilisé)
-et `content`, le condensé de ce qui est montré :
+`pending` (at most one per conversation) carries `id` (`c-<32 hex>`, random, issued by the computer, never reused) and
+`content`, the digest of what is shown:
 
 ```json
 { "id": "c-…", "kind": "plan", "plan": ["search", "read", "…"], "content": "<hex>" }
 { "id": "c-…", "kind": "recipient", "content": "<hex>",
   "offers": [ { "firm_id": "cabinet-b", "price_cents": 60000, "delay_days": 10,
-                "source_spans": ["Forfait 600 euros, sous 10 jours"] } ] }
+                "source_spans": ["Flat fee 600 euros, within 10 days"] } ] }
 { "id": "c-…", "kind": "payment", "content": "<hex>",
   "payment": { "to": "cabinet-b.testnet", "amount": "1000000000000000000000000",
                "screen": "Pay 1000000000000000000000000 yoctoNEAR to cabinet-b.testnet",
@@ -157,18 +155,18 @@ et `content`, le condensé de ce qui est montré :
                "mission_id": "…", "nonce": "<32 hex>" } }
 ```
 
-Condensés, **recalculés par le téléphone à partir de ce qu'il affiche** (jamais repris de `content`) :
+Digests, **recomputed by the phone from what it shows** (never taken from `content`):
 
-- plan : `SHA-256(champs("ona/plan/v1", id, nombre_d_étapes, étape_1, …, étape_n))` ;
-- offres : `SHA-256(champs("ona/offers/v1", id, nombre_d_offres, puis pour chaque offre : firm_id, price_cents,
-  delay_days, nombre_d_extraits, extrait_1, …))` ;
-- paiement (v2, commun avec `ona-core`) :
-  `digest = SHA-256(champs("ona/pay/v2", network, contract, mission_id, nonce, to, amount))`, et `content = digest`.
-  Ce sont les octets du garde-fou d'`ona-core` : l'app bureau reprend les six champs de la réponse de
-  `prepare_payment`, vérifie le condensé et les transmet tels quels avec `screen`. `to` et `amount` doivent être ceux
-  de `screen`. Le montant est calculé par `ona-core` (prix de l'offre choisie × taux de la politique), pas par l'app.
-  L'ancien condensé (`to` et `amount` seuls, version 0) n'existe plus : `digest_version` vaut toujours 2, le téléphone
-  refuse toute autre valeur. `to` doit avoir la forme d'un compte NEAR (2 à 64 caractères `a-z 0-9 . _ -`).
+- plan: `SHA-256(fields("ona/plan/v1", id, step_count, step_1, …, step_n))`;
+- offers: `SHA-256(fields("ona/offers/v1", id, offer_count, then for each offer: firm_id, price_cents, delay_days,
+  span_count, span_1, …))`;
+- payment (v2, shared with `ona-core`):
+  `digest = SHA-256(fields("ona/pay/v2", network, contract, mission_id, nonce, to, amount))`, and `content = digest`.
+  These are the bytes of `ona-core`'s guardrail: the desktop app takes the six fields from the `prepare_payment`
+  reply, checks the digest and passes them on unchanged with `screen`. `to` and `amount` must be those of `screen`.
+  The amount is computed by `ona-core` (price of the chosen offer × the policy's rate), not by the app. The old digest
+  (`to` and `amount` only, version 0) no longer exists: `digest_version` is always 2, and the phone refuses any other
+  value. `to` must have the form of a NEAR account (2 to 64 characters `a-z 0-9 . _ -`).
 
 ```json
 POST /v1/confirm
@@ -176,25 +174,23 @@ POST /v1/confirm
   "token": "…", "pairing_id": "p-…", "counter": 12, "signature": "<base64>", "nonce": "<hex>" }
 ```
 
-- `firm` : obligatoire pour `recipient` accepté ; `digest` : obligatoire pour `payment` accepté.
-- `signature` : `champs("ona/confirm/v1", pairing_id, counter, id, decision, firm, digest, content)`, où `content`
-  est le condensé recalculé par le téléphone. L'ordinateur met à sa place le condensé de ce qu'il a demandé : si le
-  téléphone a affiché autre chose (autre plan, autres prix), la signature ne vérifie pas.
-- L'ordinateur refuse une confirmation dont `id` n'est plus attendue (`stale confirmation`), un `id` déjà exécuté
-  (`replayed request`, même après redémarrage) et un compteur qui ne monte pas. Une réponse refusée par l'agent (par
-  exemple une empreinte fausse) ne bloque pas la confirmation : le téléphone peut répondre à nouveau, avec un
-  nouveau compteur.
+- `firm`: required for an accepted `recipient`; `digest`: required for an accepted `payment`.
+- `signature`: `fields("ona/confirm/v1", pairing_id, counter, id, decision, firm, digest, content)`, where `content` is
+  the digest recomputed by the phone. The computer puts in its place the digest of what it asked for: if the phone
+  showed something else (another plan, other prices), the signature does not verify.
+- The computer refuses a confirmation whose `id` is no longer expected (`stale confirmation`), an `id` already carried
+  out (`replayed request`, even after a restart) and a counter that does not increase. A reply refused by the agent
+  (for example a wrong digest) does not block the confirmation: the phone can answer again, with a new counter.
 
-**Correction de la version 0** : le brouillon v0 affirmait qu'une signature ne pouvait pas être rejouée. C'était faux :
-les identifiants `chat-N-c-M` repartaient de 1 à chaque mission et à chaque redémarrage, aucune requête n'avait de
-compteur, et l'empreinte du paiement ne dépendait que du destinataire et du montant. Une mission entière, paiement
-compris, pouvait être rejouée.
+**Correction of version 0**: the v0 draft claimed that a signature could not be replayed. That was wrong: the
+`chat-N-c-M` identifiers restarted from 1 at each mission and each restart, no request had a counter, and the payment
+digest depended only on the recipient and the amount. A whole mission, payment included, could be replayed.
 
-## Limites connues
+## Known limitations
 
-- Un ordinateur compromis fait ce qu'il veut : la signature du téléphone est vérifiée par l'app bureau, pas par
-  `ona-core` ni par la chaîne. Un téléphone volé déverrouillé lit tout ; chaque écriture demande encore Face ID ou le
-  code de l'appareil.
-- En mode réseau local (développement), le jeton et les requêtes passent en clair.
-- Qui copie la clé du service onion peut publier la même adresse ; il ne peut pas signer les réponses (clé de
-  l'ordinateur), mais il voit les requêtes du téléphone (chiffrées par Tor jusqu'à lui).
+- A compromised computer does what it wants: the phone's signature is verified by the desktop app, not by `ona-core`
+  nor by the chain. A stolen, unlocked phone can read everything; each write still asks for Face ID or the device
+  passcode.
+- In local network mode (development), the token and the requests travel in plain text.
+- Whoever copies the onion service's key can publish the same address; they cannot sign the replies (the computer's
+  key), but they see the phone's requests (encrypted by Tor up to them).

@@ -18,7 +18,7 @@ enum Vector {
 func payloadText(computerKey: Data, code: String = "Y29kZS0xMjM0NTY3OA", address: String? = "http://computer.test:8790",
                  onion: String? = nil, onionAuth: String? = nil, version: Int = 1,
                  expiresAt: Int? = Int(Date.now.timeIntervalSince1970) + 600) -> String {
-    var object: [String: Any] = ["v": version, "name": "Mac de test", "computer_key": computerKey.base64EncodedString(),
+    var object: [String: Any] = ["v": version, "name": "Test Mac", "computer_key": computerKey.base64EncodedString(),
                                  "code": code]
     object["address"] = address ?? NSNull()
     object["onion"] = onion ?? NSNull()
@@ -52,8 +52,8 @@ struct ProtocolV1Tests {
         #expect(sha(SignedFields.confirmMessage(pairingID: Vector.pairingID, counter: 7, id: "c-1", decision: "accept",
                                                 firm: nil, digest: "ab", content: "cd"))
                 == "1c61312dbd420b5f78b85dc82cf6f3c505386043f9704f4cd087f882a9389139")
-        #expect(sha(SignedFields.chatMessage(pairingID: Vector.pairingID, counter: 8, chatID: nil, text: "bonjour"))
-                == "7f4041bdaaef1fae3f26bd2abf1ad93d65e5f0b086c585ac5cb2e5979e5da082")
+        #expect(sha(SignedFields.chatMessage(pairingID: Vector.pairingID, counter: 8, chatID: nil, text: "hello"))
+                == "bbd789ac3408fd211ada877e56cdc981f0d37ce8c6ba1f115d7d92ec2b5f8634")
         #expect(sha(SignedFields.deleteMessage(pairingID: Vector.pairingID, counter: 9, chatID: "chat-1"))
                 == "ee3c7db20a817bb5c643f005a052fbf5af413ce9780a6fa31f3acc0e91ed959c")
     }
@@ -67,9 +67,9 @@ struct ProtocolV1Tests {
     @Test func digestsOfWhatIsShown() {
         #expect(SignedFields.planDigest(id: "c-1", steps: ["search", "read"])
                 == "10b2ecd6ff60485e505b911709ed14b162137f0237abaa8aed21eee7c26edb84")
-        let offer = Offer(firmId: "cabinet-b", priceCents: 60000, delayDays: 10, sourceSpans: ["Forfait 600 euros, sous 10 jours"])
+        let offer = Offer(firmId: "cabinet-b", priceCents: 60000, delayDays: 10, sourceSpans: ["Flat fee 600 euros, within 10 days"])
         #expect(SignedFields.offersDigest(id: "c-2", offers: [offer])
-                == "5127c86b14fc1406536bc274ea9c5b9e85e4a9b7e2adaf0c7b156ccf2dfb97b6")
+                == "1335a1d0959d1c26f748ad05c45f86544f82830315a1c56fd72feb93be264c07")
     }
 
     /// Signature made by the Rust desktop app (p256, RFC 6979) with the private key 0x07…07.
@@ -115,7 +115,7 @@ struct PairingPayloadTests {
 
     @Test func parsesAValidCode() throws {
         let payload = try PairingPayload.parse(payloadText(computerKey: computerKey)).get()
-        #expect(payload.name == "Mac de test")
+        #expect(payload.name == "Test Mac")
         #expect(payload.address == URL(string: "http://computer.test:8790"))
         #expect(payload.computerKey == computerKey)
         #expect(payload.code == "Y29kZS0xMjM0NTY3OA")

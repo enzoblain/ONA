@@ -189,11 +189,11 @@ public final class Chat: Identifiable {
         pending?.id == confirmation.id ? .pending : decisions[confirmation.id] ?? .expired
     }
 
-    /// The step in progress, for the "en cours" line.
+    /// The step in progress, for the "in progress" line.
     public var working: (tool: String, text: String)? {
         if let research { return research.working }
         guard let run, case .running = run.phase else { return nil }
-        if run.plan.isEmpty { return ("think", "Préparation d'un plan…") }
+        if run.plan.isEmpty { return ("think", "Preparing a plan…") }
         guard run.cursor < run.plan.count else { return nil }
         let tool = run.plan[run.cursor]
         guard let text = ChatEngine.runningLabels[tool] else { return nil }
@@ -418,15 +418,15 @@ fileprivate final class ResearchRun {
         sources.first { $0.handle == handle }?.site ?? "?"
     }
 
-    /// What ona-core works on, for the "en cours" line: the next step follows from what is done.
+    /// What ona-core works on, for the "in progress" line: the next step follows from what is done.
     var working: (tool: String, text: String)? {
         guard case .running = phase else { return nil }
         switch stage {
-        case .open, .propose: return ("think", "Préparation des recherches…")
+        case .open, .propose: return ("think", "Preparing the searches…")
         case .steps:
-            if searched < queries.count { return ("search", "Recherche « \(queries[searched]) »…") }
-            if looked < sources.count { return ("read", "Lecture de \(sources[looked].site)…") }
-            return ("think", "Rédaction de la réponse à partir des notes…")
+            if searched < queries.count { return ("search", "Searching “\(queries[searched])”…") }
+            if looked < sources.count { return ("read", "Reading \(sources[looked].site)…") }
+            return ("think", "Writing the answer from the notes…")
         }
     }
 }
@@ -440,24 +440,24 @@ public final class ChatEngine {
     public private(set) var mode = "mock"
 
     public static let maxText = 2000
-    static let contactMessage = "Bonjour, je souhaite un devis pour une consultation en droit du travail."
+    static let contactMessage = "Hello, I would like a quote for an employment law consultation."
 
     static let runningLabels = [
-        "search": "Recherche en cours…", "read": "Lecture d'une page…", "compare": "Comparaison des offres…",
-        "contact": "Prise de contact…", "prepare_payment": "Préparation du paiement…", "pay": "Envoi du paiement…",
+        "search": "Searching…", "read": "Reading a page…", "compare": "Comparing the offers…",
+        "contact": "Contacting…", "prepare_payment": "Preparing the payment…", "pay": "Sending the payment…",
     ]
 
-    static let planMessage = "J'ai préparé un plan en %d étapes. Il est figé avant toute lecture du web : je ne contacterai personne et ne paierai rien sans votre accord. Validez-le pour que je commence."
-    static let recipientMessage = "J'ai trouvé %d offres. Laquelle dois-je contacter ?"
-    static let paymentMessage = "Le cabinet est contacté. Il reste à confirmer le paiement de la consultation."
-    static let doneMessage = "C'est fait. Voici ce qui est sorti de votre ordinateur pendant cette mission."
-    static let cancelledMessage = "Mission arrêtée à votre demande. Rien d'autre ne sera envoyé."
-    static let busyMessage = "Je suis encore sur la mission en cours : je vous tiens au courant ici."
+    static let planMessage = "I have prepared a %d-step plan. It is fixed before anything is read on the web: I will contact no one and pay nothing without your approval. Approve it so I can start."
+    static let recipientMessage = "I found %d offers. Which one should I contact?"
+    static let paymentMessage = "The firm has been contacted. The consultation payment still needs your confirmation."
+    static let doneMessage = "Done. Here is what left your computer during this mission."
+    static let cancelledMessage = "Mission stopped at your request. Nothing else will be sent."
+    static let busyMessage = "I am still working on the current mission: I will keep you posted here."
 
-    static let queriesMessage = "Je propose %d recherche(s) sur le web, faites via Tor. Rien ne part avant votre accord : validez-les ici ou sur le téléphone, ou modifiez-les sur l'ordinateur."
-    static let actionsMessage = "Je vous suggère %d action(s). Elles se font sur l'ordinateur seulement : vous indiquez le destinataire, vous vérifiez l'action exacte, puis vous confirmez."
-    static let researchDoneMessage = "Voici ce qui est sorti de votre ordinateur pendant cette recherche."
-    static let researchCancelledMessage = "Recherche arrêtée à votre demande. Aucune requête n'a été envoyée sur le web."
+    static let queriesMessage = "I suggest %d web search(es), made through Tor. Nothing leaves before you approve: approve them here or on the phone, or edit them on the computer."
+    static let actionsMessage = "I suggest %d action(s). They are done on the computer only: you give the recipient, you check the exact action, then you confirm."
+    static let researchDoneMessage = "Here is what left your computer during this research."
+    static let researchCancelledMessage = "Research stopped at your request. No query was sent to the web."
 
     /// What new conversations run.
     public let newChats: ChatKind
@@ -497,7 +497,7 @@ public final class ChatEngine {
     /// Pool operations are confirmed on the Mac only, never from the phone.
     public func pool(_ request: [String: Any]) async -> [String: Any] {
         guard let cmd = request["cmd"] as? String, Self.poolCommands.contains(cmd) else {
-            return ["ok": false, "error": "commande du pool inconnue"]
+            return ["ok": false, "error": "unknown pool command"]
         }
         while let old = releasingPools.first {
             await old.whenReleased()
@@ -653,7 +653,7 @@ public final class ChatEngine {
             guard Self.ok(opened) else { return fail(chat, run, opened) }
             run.opened = true
             mode = opened["mode"] as? String ?? mode
-            chat.add(.activity(tool: "think", text: "Lecture de votre demande et préparation d'un plan"))
+            chat.add(.activity(tool: "think", text: "Reading your request and preparing a plan"))
             return
         }
         if run.plan.isEmpty {
@@ -672,25 +672,25 @@ public final class ChatEngine {
             guard let reply = run.core.poll(["cmd": "search", "template": "lawyer", "value": "paris"]) else { return }
             guard Self.ok(reply) else { return fail(chat, run, reply) }
             run.handles = reply["handles"] as? [String] ?? []
-            chat.add(.activity(tool: tool, text: "Recherche « avocat droit du travail paris » : \(run.handles.count) résultats"))
+            chat.add(.activity(tool: tool, text: "Search “employment lawyer paris”: \(run.handles.count) results"))
         case "read":
             guard run.readCount < run.handles.count else { return fail(chat, run, ["error": "no page left to read"]) }
             guard let reply = run.core.poll(["cmd": "read", "handle": run.handles[run.readCount]]) else { return }
             run.readCount += 1
             guard Self.ok(reply), let offer = Offer(reply["offer"]) else { return fail(chat, run, reply) }
-            chat.add(.activity(tool: tool, text: "Lecture d'une page : \(offer.firmID), \(offer.priceCents / 100) €, sous \(offer.delayDays) jours"))
+            chat.add(.activity(tool: tool, text: "Read a page: \(offer.firmID), €\(offer.priceCents / 100), within \(offer.delayDays) days"))
         case "compare":
             guard let reply = run.core.poll(["cmd": "compare"]) else { return }
             guard Self.ok(reply) else { return fail(chat, run, reply) }
             run.ranked = (reply["ranked"] as? [Any] ?? []).compactMap(Offer.init)
-            chat.add(.activity(tool: tool, text: "Comparaison : \(run.ranked.count) offres classées"))
+            chat.add(.activity(tool: tool, text: "Comparison: \(run.ranked.count) offers ranked"))
         case "confirm_recipient":
             chat.add(.agent(String(format: Self.recipientMessage, run.ranked.count)))
             return wait(chat, run, .recipient(run.ranked))
         case "contact":
             guard let reply = run.core.poll(["cmd": "contact", "message": Self.contactMessage]) else { return }
             guard Self.ok(reply) else { return fail(chat, run, reply) }
-            chat.add(.activity(tool: tool, text: "Message générique envoyé à \(run.chosen ?? "?")"))
+            chat.add(.activity(tool: tool, text: "Generic message sent to \(run.chosen ?? "?")"))
         case "prepare_payment":
             // No amount: ona-core computes it from the chosen offer's price and the policy's rate.
             guard let reply = run.core.poll(["cmd": "prepare_payment"]) else { return }
@@ -700,7 +700,7 @@ public final class ChatEngine {
             case .success(let prepared): request = prepared
             case .failure(let error): return fail(chat, run, ["error": error.text])
             }
-            chat.add(.activity(tool: tool, text: "Paiement préparé à partir de l'annuaire"))
+            chat.add(.activity(tool: tool, text: "Payment prepared from the directory"))
             run.cursor += 1
             if run.cursor < run.plan.count, run.plan[run.cursor] == "confirm_payment" {
                 chat.add(.agent(Self.paymentMessage))
@@ -712,7 +712,7 @@ public final class ChatEngine {
         case "pay":
             guard let reply = run.core.poll(["cmd": "pay"]) else { return }
             guard Self.ok(reply) else { return fail(chat, run, reply) }
-            chat.add(.activity(tool: tool, text: "Paiement envoyé : \(reply["tx"] as? String ?? "?")"))
+            chat.add(.activity(tool: tool, text: "Payment sent: \(reply["tx"] as? String ?? "?")"))
         default:
             return fail(chat, run, ["error": "unknown step \(tool)"])
         }
@@ -739,7 +739,7 @@ public final class ChatEngine {
 
     private func fail(_ chat: Chat, _ run: MissionRun, _ reply: [String: Any]) {
         run.phase = .stopped
-        chat.add(.agent("L'agent s'est arrêté : \(reply["error"] as? String ?? "erreur inconnue")."))
+        chat.add(.agent("The agent stopped: \(reply["error"] as? String ?? "unknown error")."))
     }
 
     // MARK: - Free research (docs/research.md)
@@ -763,7 +763,7 @@ public final class ChatEngine {
             guard Self.ok(opened) else { return fail(chat, research, opened) }
             mode = opened["mode"] as? String ?? mode
             research.stage = .propose
-            chat.add(.activity(tool: "think", text: "Lecture de votre question et préparation des recherches"))
+            chat.add(.activity(tool: "think", text: "Reading your question and preparing the searches"))
         case .propose:
             guard let proposal = research.core.poll(["cmd": "research_propose"]) else { return }
             guard Self.ok(proposal), let queries = proposal["queries"] as? [String], !queries.isEmpty else {
@@ -797,25 +797,25 @@ public final class ChatEngine {
             let query = event["query"] as? String ?? "?"
             if let failure = event["error"] as? String {
                 // One query failed; the others go on (ona-core stops only when none gave a page).
-                chat.add(.activity(tool: "search", text: "Recherche « \(query) » : échec (\(failure))"))
+                chat.add(.activity(tool: "search", text: "Search “\(query)”: failed (\(failure))"))
             } else {
-                chat.add(.activity(tool: "search", text: "Recherche « \(query) » : \(found.count) source\(found.count > 1 ? "s" : "")"))
+                chat.add(.activity(tool: "search", text: "Search “\(query)”: \(found.count) source\(found.count == 1 ? "" : "s")"))
             }
         case "read":
             research.looked += 1
             let notes = event["notes"] as? Int ?? 0
-            chat.add(.activity(tool: "read", text: "Lecture de \(research.site(handle)) : \(notes) note\(notes > 1 ? "s" : "")"))
+            chat.add(.activity(tool: "read", text: "Read \(research.site(handle)): \(notes) note\(notes == 1 ? "" : "s")"))
         case "unreadable":
             research.looked += 1
-            chat.add(.activity(tool: "read", text: "Page de \(research.site(handle)) illisible : \(error)"))
+            chat.add(.activity(tool: "read", text: "Could not read \(research.site(handle)): \(error)"))
         case "unread":
             research.looked += 1
-            chat.add(.activity(tool: "read", text: "Page de \(research.site(handle)) non lue : \(error)"))
+            chat.add(.activity(tool: "read", text: "Page from \(research.site(handle)) not read by the model: \(error)"))
         case "refused":
             research.looked += 1
-            chat.add(.activity(tool: "read", text: "Page de \(research.site(handle)) écartée : \(error)"))
+            chat.add(.activity(tool: "read", text: "Page from \(research.site(handle)) not sent to the model: \(error)"))
         case "answered":
-            chat.add(.activity(tool: "think", text: "Réponse rédigée à partir des notes vérifiées"))
+            chat.add(.activity(tool: "think", text: "Answer written from the checked notes"))
         default:
             break
         }
@@ -878,7 +878,7 @@ public final class ChatEngine {
 
     private func fail(_ chat: Chat, _ research: ResearchRun, _ reply: [String: Any]) {
         research.phase = .stopped
-        chat.add(.agent("L'agent s'est arrêté : \(reply["error"] as? String ?? "erreur inconnue")."))
+        chat.add(.agent("The agent stopped: \(reply["error"] as? String ?? "unknown error")."))
     }
 
     // MARK: - Actions (on the computer only, never from the phone)
@@ -888,9 +888,9 @@ public final class ChatEngine {
     public func prepareAction(chat chatID: String, item itemID: String, to: String)
         -> Result<PreparedAction, ProtocolErrorText> {
         guard let chat = chat(chatID), let research = chat.research, let action = research.actions[itemID] else {
-            return .failure("Cette action n'est plus disponible.")
+            return .failure("This action is no longer available.")
         }
-        guard !chat.doneActions.contains(itemID) else { return .failure("Cette action est déjà faite.") }
+        guard !chat.doneActions.contains(itemID) else { return .failure("This action is already done.") }
         research.prepared = nil
         let reply = research.core.call(["cmd": "research_action_prepare", "index": action.index,
                                         "to": to.trimmingCharacters(in: .whitespacesAndNewlines)])
@@ -898,7 +898,7 @@ public final class ChatEngine {
         guard let kind = reply["kind"] as? String, let recipient = reply["to"] as? String,
               let content = reply["content"] as? String, let digest = reply["digest"] as? String,
               ProtocolBytes.isHex(digest, length: 64), reply["index"] as? Int == action.index
-        else { return .failure("réponse illisible d'ona-core") }
+        else { return .failure("unreadable reply from ona-core") }
         let prepared = PreparedAction(itemID: itemID, index: action.index, kind: kind, to: recipient, content: content,
                                       digest: digest, seenInPages: reply["seen_in_pages"] as? Bool ?? true)
         research.prepared = prepared
@@ -911,7 +911,7 @@ public final class ChatEngine {
         -> Result<ActionOutcome, ProtocolErrorText> {
         guard let chat = chat(chatID), let research = chat.research, let prepared = research.prepared,
               prepared.itemID == itemID, prepared.digest == digest
-        else { return .failure("Préparez d'abord l'action.") }
+        else { return .failure("Prepare the action first.") }
         let confirmed = research.core.call(["cmd": "research_action_confirm", "digest": digest])
         guard Self.ok(confirmed) else { return .failure(Self.failure(confirmed)) }
         let reply = research.core.call(["cmd": "research_action_do"])
@@ -921,16 +921,16 @@ public final class ChatEngine {
         switch reply["done"] as? String {
         case "message":
             guard let text = reply["mailto"] as? String, text.hasPrefix("mailto:"), let url = URL(string: text) else {
-                return .failure("réponse illisible d'ona-core")
+                return .failure("unreadable reply from ona-core")
             }
             outcome = .message(mailto: url)
-            chat.add(.activity(tool: "contact", text: "Message prêt dans votre messagerie, pour \(prepared.to)"))
+            chat.add(.activity(tool: "contact", text: "Message ready in your mail app, to \(prepared.to)"))
         case "payment":
-            guard let tx = reply["tx"] as? String else { return .failure("réponse illisible d'ona-core") }
+            guard let tx = reply["tx"] as? String else { return .failure("unreadable reply from ona-core") }
             outcome = .payment(tx: tx)
-            chat.add(.activity(tool: "pay", text: "Paiement envoyé à \(prepared.to) : \(tx)"))
+            chat.add(.activity(tool: "pay", text: "Payment sent to \(prepared.to): \(tx)"))
         default:
-            return .failure("réponse illisible d'ona-core")
+            return .failure("unreadable reply from ona-core")
         }
         chat.markDone(itemID)
         exposure(chat, research, into: research.exposureItem)
@@ -938,7 +938,7 @@ public final class ChatEngine {
     }
 
     private static func failure(_ reply: [String: Any]) -> ProtocolErrorText {
-        ProtocolErrorText(stringLiteral: reply["error"] as? String ?? "erreur inconnue")
+        ProtocolErrorText(stringLiteral: reply["error"] as? String ?? "unknown error")
     }
 
 

@@ -299,8 +299,8 @@ pub mod tests {
                    "3332d89e36dd9adeb88e8f5f18861d92fdcc048357c78bc7c7ed6284c1a069cd");
         let confirm = confirm_message(PAIRING_ID, 7, Some("c-1"), Some("accept"), None, Some("ab"), "cd");
         assert_eq!(digest(confirm.clone()), "1c61312dbd420b5f78b85dc82cf6f3c505386043f9704f4cd087f882a9389139");
-        assert_eq!(digest(chat_message(PAIRING_ID, 8, None, Some("bonjour"))),
-                   "7f4041bdaaef1fae3f26bd2abf1ad93d65e5f0b086c585ac5cb2e5979e5da082");
+        assert_eq!(digest(chat_message(PAIRING_ID, 8, None, Some("hello"))),
+                   "bbd789ac3408fd211ada877e56cdc981f0d37ce8c6ba1f115d7d92ec2b5f8634");
         assert_eq!(digest(delete_message(PAIRING_ID, 9, "chat-1")),
                    "ee3c7db20a817bb5c643f005a052fbf5af413ce9780a6fa31f3acc0e91ed959c");
         assert_eq!(digest(reply_message(PHONE_NONCE, "POST", "/v1/chats/list", 200, r#"{"ok":true}"#)),
@@ -308,11 +308,11 @@ pub mod tests {
         assert_eq!(plan_digest("c-1", &["search".into(), "read".into()]),
                    "10b2ecd6ff60485e505b911709ed14b162137f0237abaa8aed21eee7c26edb84");
         let offers = vec![json!({"firm_id": "cabinet-b", "price_cents": 60000, "delay_days": 10,
-                                 "source_spans": ["Forfait 600 euros, sous 10 jours"]})];
+                                 "source_spans": ["Flat fee 600 euros, within 10 days"]})];
         assert_eq!(queries_digest("c-0123456789abcdef0123456789abcdef",
-                                  &["plombier Lyon".into(), "tarif déplacement plombier".into()]),
-                   "8174711c622fea16bd82439613d544f31d2c2d8c3fb4bc1e22414a092a7cb01c");
-        assert_eq!(offers_digest("c-2", &offers), "5127c86b14fc1406536bc274ea9c5b9e85e4a9b7e2adaf0c7b156ccf2dfb97b6");
+                                  &["plumber Lyon".into(), "plumber call-out fee in €".into()]),
+                   "9d6f191e63db66db31141a4b0f27a2253f476ed9cc0329bbe829a174ed369abf");
+        assert_eq!(offers_digest("c-2", &offers), "1335a1d0959d1c26f748ad05c45f86544f82830315a1c56fd72feb93be264c07");
         assert_eq!(payment_digest_v2("testnet", "pay.ona.testnet", "m-1", PHONE_NONCE, "cabinet-b.testnet",
                                      "1000000000000000000000000"),
                    "ee00b991ccc819a4b64630c245ae7e281ef98d74f0eb971b1ff4dd9290957950");

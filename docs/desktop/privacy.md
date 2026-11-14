@@ -16,7 +16,7 @@ invented percentage (README, "Next steps").
   than the cash spent.
 - **Without ONA** (`without_ona`): 1. A deposit straight into staking is tied to its account.
 
-The apps say it in words ("se confond avec au plus N billets"), never as a percentage. When the set is 1, the panel says
+The apps say it in words ("blends in with at most N notes"), never as a percentage. When the set is 1, the panel says
 the note can be followed.
 
 ## What it does not measure

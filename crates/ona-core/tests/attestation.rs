@@ -264,7 +264,7 @@ impl Transport for KeySwappingRelay {
 fn the_client_sends_nothing_to_a_key_swapping_relay() {
     let mut relay = KeySwappingRelay { chats: 0 };
     let mut client = E2eeClient::new(&mut relay, near_verifier(), "test/model", 100, 1000);
-    let error = client.chat("dossier confidentiel").unwrap_err();
+    let error = client.chat("confidential case file").unwrap_err();
     assert!(error.contains("model attestation refused"), "{error}");
     assert_eq!(client.tokens_spent(), 0);
     assert_eq!(relay.chats, 0, "the prompt never left");

@@ -395,7 +395,7 @@ mod tests {
     fn anything_else_goes_to_the_research() {
         for text in [
             "How much does it cost to deposit 1 NEAR in a staking pool?",
-            "Combien coûte un plombier à Lyon ? Écris-leur et paie un acompte",
+            "How much does a plumber cost in Lyon? Write to them and pay a deposit",
             "How much does a plumber cost in Lyon?",
             "What is the privacy policy of the city of Lyon?",
             "how much do I have to pay a plumber for a leak in Lyon?", // more than 10 words

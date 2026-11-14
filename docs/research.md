@@ -54,8 +54,8 @@ is the message text or the amount in yoctoNEAR (decimal).
 A research conversation uses the same `/v1/chats/…` views as a mission (docs/ios/protocol-draft.md, "Conversations"),
 with these additions:
 
-- **Activity** items (`kind: "activity"`): `tool` `think`, `search` (text « Recherche « <query> » : N sources ») or
-  `read` (text « Lecture de <site> : N notes », or why it was not read).
+- **Activity** items (`kind: "activity"`): `tool` `think`, `search` (text `Search "<query>": N sources`) or
+  `read` (text `Read <site>: N notes`, or why it was not read).
 - **Confirmation** of the queries (`kind: "confirmation"`): `pending` is
   `{"id": "c-…", "kind": "queries", "queries": ["…", "…"], "content": "<digest>"}`, like the plan's. Its content digest:
   SHA-256 of `fields("ona/queries/v1", id, query_1, query_2, …)` in hex (`protocol::queries_digest`, Swift
@@ -79,10 +79,11 @@ message was not sent. The message leaves from the person's own e-mail address: T
 sees that address.
 
 On 13/11/2026, end to end through Tor with the real model (`ona real`, the team's test relay, a phone's shared
-connection): the question « Combien coûte un plombier à Lyon, et sous quel délai ? » gave 2 queries proposed by the model,
-2 searches on Brave Search through Tor, 4 pages chosen; one page read (the three others: HTTP 503, and two timeouts);
-4 notes, each quote found in the page; an answer citing them; 4 model calls, 12,332 tokens, about 12 minutes in all.
-DuckDuckGo, onion service included, answered every request through Tor with a bot challenge that day, hence Brave Search.
+connection): the question, asked in French, "How much does a plumber cost in Lyon, and how soon can one come?" gave 2
+queries proposed by the model, 2 searches on Brave Search through Tor, 4 pages chosen; one page read (the three others:
+HTTP 503, and two timeouts); 4 notes, each quote found in the page; an answer citing them; 4 model calls, 12,332 tokens,
+about 12 minutes in all. DuckDuckGo, onion service included, answered every request through Tor with a bot challenge
+that day, hence Brave Search.
 
 ## Not tested
 

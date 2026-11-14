@@ -33,7 +33,7 @@ struct ChatView: View {
                         block.view(open: { openConfirmation = $0 })
                     }
                     if chat.status == .working {
-                        WorkingLine(text: chat.working?.text ?? "L'agent réfléchit…")
+                        WorkingLine(text: chat.working?.text ?? "The agent is thinking…")
                             .id("working")
                     }
                 } else {
@@ -52,14 +52,14 @@ struct ChatView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             Composer(text: $draft, focused: $composerFocused, busy: model.sending, send: send)
         }
-        .navigationTitle(chat?.title ?? (chatID == nil ? "Nouvelle conversation" : ""))
+        .navigationTitle(chat?.title ?? (chatID == nil ? "New conversation" : ""))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .toolbar {
             if chatID != nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        Button("Supprimer la conversation", systemImage: "trash", role: .destructive) {
+                        Button("Delete conversation", systemImage: "trash", role: .destructive) {
                             confirmingDelete = true
                         }
                     } label: {
@@ -80,9 +80,9 @@ struct ChatView: View {
         .onChange(of: chat?.pending?.id) { _, new in
             if let open = openConfirmation, open.id != new { openConfirmation = nil }
         }
-        .alert("Supprimer la conversation ?", isPresented: $confirmingDelete) {
-            Button("Annuler", role: .cancel) {}
-            Button("Supprimer", role: .destructive) {
+        .alert("Delete this conversation?", isPresented: $confirmingDelete) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
                 guard let chatID else { return }
                 Task {
                     await model.delete(chat: chatID)
@@ -90,9 +90,9 @@ struct ChatView: View {
                 }
             }
         } message: {
-            Text("Elle sera supprimée de votre ordinateur.")
+            Text("It will be deleted from your computer.")
         }
-        .alert("Action impossible", isPresented: .constant(model.actionError != nil && openConfirmation == nil)) {
+        .alert("Action not possible", isPresented: .constant(model.actionError != nil && openConfirmation == nil)) {
             Button("OK") { model.clearActionError() }
         } message: {
             Text(model.actionError ?? "")
@@ -193,9 +193,9 @@ private struct Greeting: View {
             Image(systemName: "sparkles")
                 .font(.system(size: 40))
                 .foregroundStyle(.tint)
-            Text("Que dois-je faire pour vous ?")
+            Text("What can I do for you?")
                 .font(.title2.weight(.semibold))
-            Text("L'agent travaille sur votre ordinateur. Il vous demandera votre accord avant de contacter quelqu'un ou de payer.")
+            Text("The agent works on your computer. It will ask for your approval before contacting anyone or paying.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -216,7 +216,7 @@ private struct ActivityGroup: View {
                 withAnimation(.snappy) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
-                    Text(items.count == 1 ? "1 étape" : "\(items.count) étapes")
+                    Text(items.count == 1 ? "1 step" : "\(items.count) steps")
                     Image(systemName: "chevron.right")
                         .rotationEffect(.degrees(expanded ? 90 : 0))
                 }
@@ -300,11 +300,11 @@ private struct ConfirmationCard: View {
                 .controlSize(.large)
                 .accessibilityIdentifier("open-confirmation")
             case .accepted:
-                Label("Confirmé", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.subheadline)
+                Label("Confirmed", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.subheadline)
             case .rejected:
-                Label("Refusé", systemImage: "xmark.circle.fill").foregroundStyle(.red).font(.subheadline)
+                Label("Declined", systemImage: "xmark.circle.fill").foregroundStyle(.red).font(.subheadline)
             case .expired:
-                Label("Plus d'actualité", systemImage: "clock").foregroundStyle(.secondary).font(.subheadline)
+                Label("No longer current", systemImage: "clock").foregroundStyle(.secondary).font(.subheadline)
             }
         }
         .padding(16)
@@ -314,10 +314,10 @@ private struct ConfirmationCard: View {
 
     private var title: String {
         switch pending.request {
-        case .plan: "Valider le plan"
-        case .recipient: "Choisir le destinataire"
-        case .payment: "Confirmer le paiement"
-        case .queries: "Valider les recherches"
+        case .plan: "Approve the plan"
+        case .recipient: "Choose the recipient"
+        case .payment: "Confirm the payment"
+        case .queries: "Approve the searches"
         case .unknown: "Confirmation"
         }
     }
@@ -334,26 +334,26 @@ private struct ConfirmationCard: View {
 
     private var detail: String {
         switch pending.request {
-        case .plan(let steps): "\(steps.count) étapes, figées avant toute lecture du web."
-        case .recipient(let offers): "\(offers.count) offres trouvées. Seule celle choisie sera contactée."
+        case .plan(let steps): "\(steps.count) steps, fixed before anything is read on the web."
+        case .recipient(let offers): "\(offers.count) offers found. Only the one you choose will be contacted."
         case .payment(let payment):
             // Only a payment the phone verified shows its account (F-14: no look-alike names).
             switch PaymentCheck.verify(payment) {
-            case .success(let verified): "\(NEARAmount.format(verified.amount)) NEAR à \(verified.to)"
-            case .failure: "Paiement incohérent : à refuser."
+            case .success(let verified): "\(NEARAmount.format(verified.amount)) NEAR to \(verified.to)"
+            case .failure: "Inconsistent payment: decline it."
             }
-        case .queries(let queries): "\(queries.count) recherche\(queries.count > 1 ? "s" : "") à envoyer par Tor. Rien n'est sorti."
-        case .unknown: "Cette version de l'app ne sait pas l'afficher."
+        case .queries(let queries): "\(queries.count) search\(queries.count > 1 ? "es" : "") to send over Tor. Nothing has been sent yet."
+        case .unknown: "This version of the app cannot display it."
         }
     }
 
     private var action: String {
         switch pending.request {
-        case .plan: "Voir le plan"
-        case .recipient: "Voir les offres"
-        case .payment: "Vérifier le paiement"
-        case .queries: "Voir les recherches"
-        case .unknown: "Ouvrir"
+        case .plan: "View the plan"
+        case .recipient: "View the offers"
+        case .payment: "Check the payment"
+        case .queries: "View the searches"
+        case .unknown: "Open"
         }
     }
 }
@@ -363,9 +363,9 @@ private struct ExposureCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Relevé d'exposition", systemImage: "eye")
+            Label("Exposure report", systemImage: "eye")
                 .font(.headline)
-            Text("Ce qui est sorti de votre ordinateur pendant la mission.")
+            Text("What left your computer during the mission.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Divider()
@@ -393,7 +393,7 @@ private struct Composer: View {
     var body: some View {
         GlassEffectContainer(spacing: 10) {
             HStack(alignment: .bottom, spacing: 10) {
-                TextField("Demandez à l'agent…", text: $text, axis: .vertical)
+                TextField("Ask the agent…", text: $text, axis: .vertical)
                     .lineLimit(1...6)
                     .focused(focused)
                     .autocorrectionDisabled()
@@ -415,7 +415,7 @@ private struct Composer: View {
                 .buttonStyle(.glassProminent)
                 .buttonBorderShape(.circle)
                 .disabled(!canSend)
-                .accessibilityLabel("Envoyer")
+                .accessibilityLabel("Send")
                 .accessibilityIdentifier("send")
             }
         }
@@ -437,7 +437,7 @@ struct AnswerCard: View {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(answer.notes.enumerated()), id: \.offset) { _, note in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("« \(note.quote) »").font(.footnote).italic()
+                            Text("“\(note.quote)”").font(.footnote).italic()
                             Text("\(note.source) · \(source(note.source)?.title ?? "")").font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -476,12 +476,12 @@ struct ActionCard: View {
                 Text(text).font(.footnote).textSelection(.enabled)
             }
             if let amount = action.amount {
-                Text("\(NEARAmount.text(amount) ?? "montant illisible") NEAR").monospacedDigit()
+                Text("\(NEARAmount.text(amount) ?? "unreadable amount") NEAR").monospacedDigit()
             }
             if done {
-                Label("Fait sur l'ordinateur", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.subheadline)
+                Label("Done on the computer", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.subheadline)
             } else {
-                Text("À faire sur l'ordinateur : vous y donnez le destinataire et confirmez l'action exacte.")
+                Text("To do on the computer: you give the recipient there and confirm the exact action.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

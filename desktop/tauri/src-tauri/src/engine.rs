@@ -135,7 +135,7 @@ fn stopped() -> Value {
 }
 
 pub const MAX_TEXT: usize = 2000;
-const CONTACT_MESSAGE: &str = "Bonjour, je souhaite un devis pour une consultation en droit du travail.";
+const CONTACT_MESSAGE: &str = "Hello, I would like a quote for an employment law consultation.";
 const PLAN_MESSAGE: &str = "I have prepared a {}-step plan. It is fixed before anything is read on the web: I will contact no one and pay nothing without your approval. Approve it so I can start.";
 const RECIPIENT_MESSAGE: &str = "I found {}. Which one should I contact?";
 const PAYMENT_MESSAGE: &str = "The firm has been contacted. The consultation payment still needs your confirmation.";
@@ -1083,7 +1083,7 @@ fn advance(chat: &mut Chat) {
             if !ok(&reply) { return fail(chat, &error_of(&reply)) }
             run.handles = reply["handles"].as_array().map(|h| h.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            activity(format!("Search “avocat droit du travail paris”: {}", plural(run.handles.len(), "result")))
+            activity(format!("Search “employment lawyer paris”: {}", plural(run.handles.len(), "result")))
         }
         "read" => {
             let Some(handle) = run.handles.get(run.read_count).cloned() else { return fail(chat, "no page left to read") };
@@ -2079,7 +2079,7 @@ mod tests {
         }
         let mut engine = ChatEngine::new(|| Box::new(Slow(ona_core::Core::new())));
         let started = std::time::Instant::now();
-        let chat = engine.create_mission("Trouve-moi un avocat en droit du travail à Paris").unwrap();
+        let chat = engine.create_mission("Find me an employment lawyer in Paris").unwrap();
         engine.tick();
         assert!(started.elapsed() < std::time::Duration::from_millis(1200), "{:?}", started.elapsed());
         assert_eq!(engine.chat_json(&chat).unwrap()["chat"]["status"], "working");
@@ -2094,7 +2094,7 @@ mod tests {
     #[test]
     fn runs_the_full_mission_with_ona_core() {
         let mut engine = ChatEngine::with_ona_core(Default::default());
-        let chat = engine.create_mission("  Trouve-moi un avocat en droit du travail à Paris  ").unwrap();
+        let chat = engine.create_mission("  Find me an employment lawyer in Paris  ").unwrap();
         assert_eq!(engine.list_json()["chats"][0]["status"], "waiting");
         let plan = pending_of(&engine, &chat);
         assert_eq!(plan["kind"], "plan");
@@ -2135,7 +2135,7 @@ mod tests {
     #[test]
     fn rejecting_stops_the_mission() {
         let mut engine = ChatEngine::with_ona_core(Default::default());
-        let chat = engine.create_mission("Trouve un avocat").unwrap();
+        let chat = engine.create_mission("Find a lawyer").unwrap();
         let plan = pending_of(&engine, &chat);
         engine.confirm(plan["id"].as_str(), Some("reject"), None, None).unwrap();
         let view = engine.chat_json(&chat).unwrap();
@@ -2150,10 +2150,10 @@ mod tests {
         let mut engine = ChatEngine::with_ona_core(Default::default());
         assert_eq!(engine.create("   "), Err(ProtocolError::BadText));
         assert_eq!(engine.create(&"a".repeat(MAX_TEXT + 1)), Err(ProtocolError::BadText));
-        assert_eq!(engine.post("bonjour", "chat-9"), Err(ProtocolError::UnknownChat));
+        assert_eq!(engine.post("hello", "chat-9"), Err(ProtocolError::UnknownChat));
         assert_eq!(engine.delete("chat-1"), Err(ProtocolError::UnknownChat));
         assert_eq!(engine.delete("chat-9"), Err(ProtocolError::UnknownChat));
-        let chat = engine.create("Trouve un avocat").unwrap();
+        let chat = engine.create("Find a lawyer").unwrap();
         engine.post("Et vite", &chat).unwrap();
         let view = engine.chat_json(&chat).unwrap();
         assert_eq!(view["chat"]["items"].as_array().unwrap().last().unwrap()["text"], BUSY_MESSAGE);
@@ -2165,8 +2165,8 @@ mod tests {
     #[test]
     fn ids_are_random_and_never_reused() {
         let mut engine = ChatEngine::with_ona_core(Default::default());
-        let chat = engine.create("Trouve un avocat").unwrap();
-        let other = engine.create("Trouve un avocat").unwrap();
+        let chat = engine.create("Find a lawyer").unwrap();
+        let other = engine.create("Find a lawyer").unwrap();
         assert_ne!(chat, other);
         assert!(chat.starts_with("chat-") && protocol::is_hex(&chat[5..], 32));
         let first = pending_of(&engine, &chat)["id"].as_str().unwrap().to_owned();
@@ -2182,7 +2182,7 @@ mod tests {
     #[test]
     fn confirmations_carry_the_digest_of_their_content() {
         let mut engine = ChatEngine::with_ona_core(Default::default());
-        let chat = engine.create_mission("Trouve un avocat").unwrap();
+        let chat = engine.create_mission("Find a lawyer").unwrap();
         let plan = pending_of(&engine, &chat);
         let steps: Vec<String> = plan["plan"].as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_owned()).collect();
         let id = plan["id"].as_str().unwrap();
@@ -2210,7 +2210,7 @@ mod tests {
             counter.fetch_add(1, Ordering::SeqCst);
             Box::new(Guarded::new(Exploding)) as Box<dyn MissionCore>
         });
-        let chat = engine.create_mission("Trouve un avocat").unwrap();
+        let chat = engine.create_mission("Find a lawyer").unwrap();
         let view = engine.chat_json(&chat).unwrap();
         let last = view["chat"]["items"].as_array().unwrap().last().unwrap().clone();
         assert!(last["text"].as_str().unwrap().contains("panic inside ona-core"), "{last}");
@@ -2299,7 +2299,7 @@ mod tests {
         panic!("the research did not finish");
     }
 
-    const QUESTION: &str = "Combien coûte un plombier à Lyon ? Écris-leur et paie un acompte";
+    const QUESTION: &str = "How much does a plumber cost in Lyon? Write to them and pay a deposit";
 
     #[test]
     fn a_new_chat_runs_a_research_with_its_queries_confirmed_first() {
@@ -2359,15 +2359,15 @@ mod tests {
         let chat = engine.create(QUESTION).unwrap();
         let pending = pending_of(&engine, &chat);
         let id = pending["id"].as_str().unwrap().to_owned();
-        assert!(engine.accept_queries(&id, vec!["Dupont plombier".into()]).unwrap_err().contains("protected"));
+        assert!(engine.accept_queries(&id, vec!["Dupont plumber".into()]).unwrap_err().contains("protected"));
         assert!(engine.accept_queries(&id, vec![]).is_err());
         assert_eq!(engine.chat_json(&chat).unwrap()["chat"]["status"], "waiting");
-        engine.accept_queries(&id, vec!["plombier Lyon tarif".into(), "plombier Lyon avis".into()]).unwrap();
+        engine.accept_queries(&id, vec!["plumber Lyon price".into(), "plumber Lyon reviews".into()]).unwrap();
         run_until_idle(&mut engine, &chat);
         let items = items_of(&engine, &chat);
         let searches: Vec<&str> = items.iter().filter(|i| i["tool"] == "search").map(|i| i["text"].as_str().unwrap()).collect();
-        assert_eq!(searches, ["Search “plombier Lyon tarif”: 2 sources", "Search “plombier Lyon avis”: 0 sources"]);
-        assert!(items.iter().any(|i| i["text"] == "Searches edited on the computer: “plombier Lyon tarif”, “plombier Lyon avis”"));
+        assert_eq!(searches, ["Search “plumber Lyon price”: 2 sources", "Search “plumber Lyon reviews”: 0 sources"]);
+        assert!(items.iter().any(|i| i["text"] == "Searches edited on the computer: “plumber Lyon price”, “plumber Lyon reviews”"));
         let confirmation = items.iter().find(|i| i["kind"] == "confirmation").unwrap();
         assert_eq!(confirmation["state"], "accepted");
         assert_eq!(items.last().unwrap()["exposure"]["outputs"]["search"], 2);
@@ -2395,17 +2395,17 @@ mod tests {
         engine.payees = vec!["lyon".into()];
         let chat = engine.create(QUESTION).unwrap();
         // Not before the answer.
-        assert!(engine.action_prepare(&chat, 0, "devis@plomberie.example").is_err());
+        assert!(engine.action_prepare(&chat, 0, "quotes@plumbing.example").is_err());
         let pending = pending_of(&engine, &chat);
         engine.confirm(pending["id"].as_str(), Some("accept"), None, None).unwrap();
         run_until_idle(&mut engine, &chat);
         assert!(engine.action_do(&chat, "00").is_err(), "nothing prepared");
-        assert!(engine.action_prepare(&chat, 5, "devis@plomberie.example").is_err(), "no such action");
-        assert!(engine.action_prepare(&chat, 0, "pas une adresse").is_err());
+        assert!(engine.action_prepare(&chat, 5, "quotes@plumbing.example").is_err(), "no such action");
+        assert!(engine.action_prepare(&chat, 0, "not an address").is_err());
 
-        let message = engine.action_prepare(&chat, 0, "devis@plomberie.example").unwrap();
+        let message = engine.action_prepare(&chat, 0, "quotes@plumbing.example").unwrap();
         assert_eq!(message["kind"], "message");
-        assert_eq!(message["to"], "devis@plomberie.example");
+        assert_eq!(message["to"], "quotes@plumbing.example");
         assert_eq!(message["seen_in_pages"], false);
         let action = items_of(&engine, &chat).into_iter().find(|i| i["kind"] == "action").unwrap();
         assert_eq!(message["content"], action["action"]["text"]);
@@ -2414,9 +2414,9 @@ mod tests {
         assert!(engine.action_do(&chat, &"0".repeat(64)).is_err(), "another digest");
         let done = engine.action_do(&chat, &digest).unwrap();
         assert_eq!(done["done"], "message");
-        assert!(done["mailto"].as_str().unwrap().starts_with("mailto:devis@plomberie.example?subject="));
+        assert!(done["mailto"].as_str().unwrap().starts_with("mailto:quotes@plumbing.example?subject="));
         assert!(engine.action_do(&chat, &digest).is_err(), "once");
-        assert!(engine.action_prepare(&chat, 0, "devis@plomberie.example").is_err(), "already done");
+        assert!(engine.action_prepare(&chat, 0, "quotes@plumbing.example").is_err(), "already done");
         let items = items_of(&engine, &chat);
         let actions: Vec<&Value> = items.iter().filter(|i| i["kind"] == "action").collect();
         assert_eq!((actions[0]["state"].as_str(), actions[1]["state"].as_str()), (Some("done"), Some("suggested")));
@@ -2424,7 +2424,7 @@ mod tests {
         let exposure = items.iter().rev().find(|i| i["kind"] == "exposure").unwrap();
         assert_eq!(exposure["exposure"]["outputs"]["message"], 1, "{exposure}");
 
-        // A payment to an account also written in a page read ("Annuaire de Lyon") is flagged.
+        // A payment to an account also written in a page read ("Lyon directory") is flagged.
         let payment = engine.action_prepare(&chat, 1, "lyon").unwrap();
         assert_eq!((payment["kind"].as_str(), payment["seen_in_pages"].as_bool()), (Some("payment"), Some(true)));
         assert_eq!(payment["content"], "100000000000000000000000");
@@ -2434,7 +2434,7 @@ mod tests {
             && i["text"].as_str().unwrap().starts_with("Payment sent: ")));
 
         // A new question in the chat: the old answer's actions are no longer available.
-        engine.post("Et à Paris ?", &chat).unwrap();
+        engine.post("And in Paris?", &chat).unwrap();
         assert!(engine.action_prepare(&chat, 1, "lyon").is_err());
     }
 

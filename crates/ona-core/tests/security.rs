@@ -64,8 +64,8 @@ fn spy_mission(text: &str, web: MockWeb) -> (Mission<Spy, MockWeb, MockPayments>
 #[test]
 fn protected_terms_are_replaced_before_the_planner_and_the_reader() {
     let mut web = MockWeb::demo();
-    web.pages.insert("h1".into(), "Consultation 900 euros, sous 7 jours, dossier ACME".into());
-    let (mut m, seen) = spy_mission("Trouver un avocat pour M. Dupont, licencie par ACME", web);
+    web.pages.insert("h1".into(), "Consultation 900 euros, within 7 days, ACME case".into());
+    let (mut m, seen) = spy_mission("Find a lawyer for Mr Dupont, dismissed by ACME", web);
     m.protect(&["ACME".to_string()]).unwrap();
     m.propose_plan().unwrap();
     m.accept_plan().unwrap();
@@ -77,9 +77,9 @@ fn protected_terms_are_replaced_before_the_planner_and_the_reader() {
         assert!(!sent.contains("Dupont") && !sent.contains("ACME"), "a protected term reached the model: {sent}");
         assert!(sent.len() > 20, "{sent}");
     }
-    assert!(seen.plans[0].starts_with("Trouver un avocat pour M. "), "the rest of the text is unchanged");
+    assert!(seen.plans[0].starts_with("Find a lawyer for Mr "), "the rest of the text is unchanged");
     // The reader cited the pseudonymised page; the reply is put back locally and matches the page.
-    assert_eq!(read["offer"]["source_spans"][0], "Consultation 900 euros, sous 7 jours, dossier ACME");
+    assert_eq!(read["offer"]["source_spans"][0], "Consultation 900 euros, within 7 days, ACME case");
     assert_eq!(m.exposure()["pseudonyms_replaced"], 3);
 }
 
@@ -90,7 +90,7 @@ fn the_gate_refuses_a_text_that_still_holds_a_protected_term() {
     let seen = Rc::new(RefCell::new(Seen::default()));
     let mut policy = demo_policy();
     policy.protected_terms.push("q".into());
-    let mut m = Mission::open(Spy(seen.clone()), MockWeb::demo(), MockPayments::default(), policy, SALT, "Dossier Q, urgent");
+    let mut m = Mission::open(Spy(seen.clone()), MockWeb::demo(), MockPayments::default(), policy, SALT, "Case Q, urgent");
     assert_eq!(m.propose_plan().unwrap_err(), "text contains a protected term");
     assert!(seen.borrow().plans.is_empty(), "nothing was sent");
     assert_eq!(m.exposure()["refused_by_gate"]["model: text contains a protected term"], 1);
@@ -104,7 +104,7 @@ fn terms_are_declared_before_the_plan_and_through_dispatch() {
     assert!(m.protect(&["Martin".to_string()]).is_err(), "too late: the planner already saw the text");
 
     let mut core = Core::new();
-    let opened = ask(&mut core, json!({"cmd":"open","mission":"Dossier Martin","protected":["Martin"]}));
+    let opened = ask(&mut core, json!({"cmd":"open","mission":"Case of Martin","protected":["Martin"]}));
     assert_eq!(opened["ok"], true, "{opened}");
     assert_eq!(ask(&mut core, json!({"cmd":"propose_plan"}))["ok"], true);
     ask(&mut core, json!({"cmd":"close"}));
@@ -296,7 +296,7 @@ fn every_party_of_a_mission_is_named_with_its_bytes() {
     ask(&mut core, json!({"cmd":"pay"}));
     let report = ask(&mut core, json!({"cmd":"exposure"}));
     let bytes = |name: &str| party(&report, name)["bytes_sent"].as_u64().unwrap_or(0);
-    assert_eq!(bytes("search engine"), "avocat droit du travail paris".len() as u64);
+    assert_eq!(bytes("search engine"), "employment lawyer paris".len() as u64);
     assert_eq!(bytes("site h1"), 2);
     assert_eq!(bytes("site h2"), 2);
     assert_eq!(bytes("firm cabinet-b"), 1);
@@ -327,7 +327,7 @@ impl Model for FixedReader {
 #[test]
 fn a_page_cannot_file_an_offer_for_another_firm() {
     // The page of cabinet-a says cabinet-b asks 1 cent, citing its own text.
-    let reply = json!({"firm_id":"cabinet-b","specialties":["labour"],"price_cents":90000,"delay_days":7,"source_spans":["Consultation 900 euros, sous 7 jours"]}).to_string();
+    let reply = json!({"firm_id":"cabinet-b","specialties":["labour"],"price_cents":90000,"delay_days":7,"source_spans":["Consultation 900 euros, within 7 days"]}).to_string();
     let mut m = reading(&reply, MockWeb::demo());
     assert_eq!(m.read("h1").unwrap_err(), "offer names another firm than the one whose page was read");
 }
@@ -508,10 +508,10 @@ fn a_bad_line_gets_an_error_reply_and_the_mission_goes_on() {
 
 #[test]
 fn an_obfuscated_name_on_a_page_never_reaches_the_reader() {
-    for page in ["Consultation 900 euros, sous 7 jours, pour Du&#112;ont", "Consultation 900 euros, sous 7 jours, pour Du\u{AD}pont"] {
+    for page in ["Consultation 900 euros, within 7 days, for Du&#112;ont", "Consultation 900 euros, within 7 days, for Du\u{AD}pont"] {
         let mut web = MockWeb::demo();
         web.pages.insert("h1".into(), page.into());
-        let (mut m, seen) = spy_mission("Trouver un avocat", web);
+        let (mut m, seen) = spy_mission("Find a lawyer", web);
         m.propose_plan().unwrap();
         m.accept_plan().unwrap();
         m.search("lawyer", "paris").unwrap();
@@ -519,32 +519,32 @@ fn an_obfuscated_name_on_a_page_never_reaches_the_reader() {
         let read = m.read("h1").unwrap();
         let sent = seen.borrow().pages[0].clone();
         assert!(!pseudonym::contains_protected(&sent, &["Dupont".to_string()]), "{sent}");
-        assert!(read["offer"]["source_spans"][0].as_str().unwrap().ends_with("pour Dupont"), "{read}");
+        assert!(read["offer"]["source_spans"][0].as_str().unwrap().ends_with("for Dupont"), "{read}");
     }
 }
 
 #[test]
 fn a_page_cannot_inflate_the_price_a_hundred_times() {
     // The page says 900 euros; the reader claims 900 cents (or 90000 claims for "9 euros 00"...).
-    let cheap = json!({"specialties":["labour"],"price_cents":900,"delay_days":7,"source_spans":["Consultation 900 euros, sous 7 jours"]}).to_string();
+    let cheap = json!({"specialties":["labour"],"price_cents":900,"delay_days":7,"source_spans":["Consultation 900 euros, within 7 days"]}).to_string();
     assert_eq!(reading(&cheap, MockWeb::demo()).read("h1").unwrap_err(), "price or delay is not written in the cited excerpts");
     let mut web = MockWeb::demo();
-    web.pages.insert("h1".into(), "Consultation 9 euros, sous 7 jours".into());
-    let inflated = json!({"specialties":["labour"],"price_cents":90000,"delay_days":7,"source_spans":["Consultation 9 euros, sous 7 jours"]}).to_string();
+    web.pages.insert("h1".into(), "Consultation 9 euros, within 7 days".into());
+    let inflated = json!({"specialties":["labour"],"price_cents":90000,"delay_days":7,"source_spans":["Consultation 9 euros, within 7 days"]}).to_string();
     assert!(reading(&inflated, web).read("h1").is_err(), "\"9\" is not 900 euros");
 }
 
 #[test]
 fn a_delay_must_be_written_as_its_own_number() {
     let mut web = MockWeb::demo();
-    web.pages.insert("h1".into(), "Consultation 900 euros, sous 12 jours".into());
-    let one_day = json!({"specialties":["labour"],"price_cents":90000,"delay_days":1,"source_spans":["Consultation 900 euros, sous 12 jours"]}).to_string();
+    web.pages.insert("h1".into(), "Consultation 900 euros, within 12 days".into());
+    let one_day = json!({"specialties":["labour"],"price_cents":90000,"delay_days":1,"source_spans":["Consultation 900 euros, within 12 days"]}).to_string();
     assert!(reading(&one_day, web).read("h1").is_err(), "\"1\" inside \"12\" does not count");
 }
 
 #[test]
 fn the_firm_comes_from_the_search_when_the_reader_gives_none() {
-    let reply = json!({"specialties":["labour"],"price_cents":90000,"delay_days":7,"source_spans":["Consultation 900 euros, sous 7 jours"]}).to_string();
+    let reply = json!({"specialties":["labour"],"price_cents":90000,"delay_days":7,"source_spans":["Consultation 900 euros, within 7 days"]}).to_string();
     let read = reading(&reply, MockWeb::demo()).read("h1").unwrap();
     assert_eq!(read["offer"]["firm_id"], "cabinet-a");
 }

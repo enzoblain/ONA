@@ -13,7 +13,7 @@ const MASTER: [u8; 32] = [9; 32];
 #[test]
 fn whoever_checks_the_chain_cannot_test_guessed_contents() {
     let mut j = Journal::new(SALT);
-    let fp = j.fingerprint(b"avocat divorce Lyon");
+    let fp = j.fingerprint(b"divorce lawyer Lyon");
     j.append(Kind::ToolCommit, json!({"tool": "search", "query": fp}));
     let start = j.start();
     let bytes = j.to_bytes();
@@ -21,7 +21,7 @@ fn whoever_checks_the_chain_cannot_test_guessed_contents() {
     assert_ne!(start, SALT);
 
     let text = String::from_utf8(bytes).unwrap();
-    let dictionary = ["avocat fiscal Paris", "avocat divorce Lyon", "avocat penal Lille"];
+    let dictionary = ["tax lawyer Paris", "divorce lawyer Lyon", "criminal lawyer Lille"];
     let old_formula = |guess: &str, secret: &[u8; 32]| -> String {
         let d: [u8; 32] = Sha256::new().chain_update(b"ona/j/fp").chain_update(secret).chain_update(guess).finalize().into();
         d.iter().map(|b| format!("{b:02x}")).collect()
@@ -31,7 +31,7 @@ fn whoever_checks_the_chain_cannot_test_guessed_contents() {
         assert!(!text.contains(&Journal::new(start).fingerprint(guess.as_bytes())), "{guess} found");
         assert!(!text.contains(&old_formula(guess, &SALT)), "the fingerprint is no longer a plain salted hash");
     }
-    assert_eq!(j.fingerprint(b"avocat divorce Lyon"), fp, "the agent can still prove a content");
+    assert_eq!(j.fingerprint(b"divorce lawyer Lyon"), fp, "the agent can still prove a content");
 }
 
 /// An entry key works in its own journal only.

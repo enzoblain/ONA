@@ -11,8 +11,8 @@ struct PairingView: View {
         List {
             Section {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("Appairer un ordinateur", systemImage: "qrcode.viewfinder").font(.headline)
-                    Text("Ouvrez ONA sur votre ordinateur et affichez son code d'appairage. Ce téléphone crée alors une clé qui ne quitte jamais sa puce sécurisée : chaque confirmation sera signée avec, après Face ID.")
+                    Label("Pair a computer", systemImage: "qrcode.viewfinder").font(.headline)
+                    Text("Open ONA on your computer and show its pairing code. This phone then creates a key that never leaves its secure chip: each confirmation is signed with it, after Face ID.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -23,12 +23,12 @@ struct PairingView: View {
                 Button {
                     scanning = true
                 } label: {
-                    Label("Scanner le QR code", systemImage: "camera")
+                    Label("Scan the QR code", systemImage: "camera")
                 }
                 .disabled(!QRScanner.isAvailable || model.sending)
             } footer: {
                 if !QRScanner.isAvailable {
-                    Text("La caméra n'est pas disponible : collez le texte du code ci-dessous.")
+                    Text("The camera is not available: paste the code's text below.")
                 }
             }
 
@@ -44,20 +44,20 @@ struct PairingView: View {
                     if let text = strings.first { pasted = text }
                 }
                 .labelStyle(.titleAndIcon)
-                Button("Appairer avec ce texte") {
+                Button("Pair with this text") {
                     Task { await model.pair(with: pasted) }
                 }
                 .disabled(pasted.isEmpty || model.sending)
                 .accessibilityIdentifier("pair-pasted")
             } header: {
-                Text("Ou coller le texte du code")
+                Text("Or paste the code's text")
             }
 
             if model.sending {
                 Section {
                     HStack {
                         ProgressView()
-                        Text("Appairage…")
+                        Text("Pairing…")
                     }
                 }
             }
@@ -69,11 +69,11 @@ struct PairingView: View {
                     Task { await model.pair(with: text) }
                 }
                 .ignoresSafeArea()
-                .navigationTitle("Code d'appairage")
+                .navigationTitle("Pairing code")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Annuler") { scanning = false }
+                        Button("Cancel") { scanning = false }
                     }
                 }
             }
@@ -91,14 +91,14 @@ struct VerificationView: View {
             Image(systemName: "checkmark.shield")
                 .font(.system(size: 56))
                 .foregroundStyle(.tint)
-            Text("Vérifiez le code").font(.title2.bold())
-            Text("« \(verification.computerName) » doit afficher le même code :")
+            Text("Check the code").font(.title2.bold())
+            Text("“\(verification.computerName)” must show the same code:")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             Text(spaced(verification.code))
                 .font(.system(size: 44, weight: .semibold, design: .monospaced))
                 .accessibilityIdentifier("verification-code")
-            Text("Si les codes diffèrent, quelqu'un s'est peut-être interposé : annulez.")
+            Text("If the codes differ, someone may be intercepting the pairing: cancel.")
                 .font(.footnote)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -107,7 +107,7 @@ struct VerificationView: View {
                 Button {
                     model.verificationMatches()
                 } label: {
-                    Text("Les codes sont identiques").frame(maxWidth: .infinity)
+                    Text("The codes match").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -115,7 +115,7 @@ struct VerificationView: View {
                 Button(role: .destructive) {
                     model.cancelPairing()
                 } label: {
-                    Text("Ils diffèrent : annuler l'appairage").frame(maxWidth: .infinity)
+                    Text("They differ: cancel pairing").frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
             }

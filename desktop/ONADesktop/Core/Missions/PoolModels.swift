@@ -7,15 +7,15 @@ public enum PoolOperation: String, CaseIterable, Sendable {
 
     public var title: String {
         switch self {
-        case .enter: "Placer du cash dans un vault"
-        case .switch: "Changer de vault"
-        case .exit: "Sortir d'un vault (en cash)"
-        case .exitCash: "Payer le cash vers un compte"
-        case .deposit: "Déposer depuis un portefeuille NEAR"
+        case .enter: "Put cash into a vault"
+        case .switch: "Switch vaults"
+        case .exit: "Leave a vault (to cash)"
+        case .exitCash: "Pay cash out to an account"
+        case .deposit: "Deposit from a NEAR wallet"
         }
     }
 
-    /// Whether the amount may be "tout" (every note): only shares or cash already held.
+    /// Whether the amount may be "all" (every note): only shares or cash already held.
     public var allowsAll: Bool { self == .enter || self == .switch || self == .exit }
 }
 
@@ -63,35 +63,35 @@ public struct PoolPortfolio: Equatable, Sendable {
 
 /// The `pool_prepare` request of one operation, from the window's form.
 public enum PoolRequest {
-    /// `amount` is what the person typed: NEAR ("1.5" or "1,5"), or "tout" where the operation allows it.
+    /// `amount` is what the person typed: NEAR ("1.5" or "1,5"), or "all" where the operation allows it.
     public static func prepare(_ op: PoolOperation, amount: String, vault: Int? = nil, to: Int? = nil,
                                account: String? = nil) -> Result<[String: Any], ProtocolErrorText> {
         var request: [String: Any] = ["cmd": "pool_prepare", "op": op.rawValue]
         let typed = amount.trimmingCharacters(in: .whitespaces).lowercased()
-        if op.allowsAll, typed == "tout" || typed == "all" {
+        if op.allowsAll, typed == "all" {
             request["amount"] = "all"
         } else if let yocto = NEARAmount.yocto(fromNEAR: amount), yocto != "0" {
             request["amount"] = yocto
         } else {
-            return .failure("Montant illisible : écrivez par exemple 1.5")
+            return .failure("Unreadable amount: write for example 1.5")
         }
         let account = account?.trimmingCharacters(in: .whitespaces) ?? ""
         switch op {
         case .enter:
-            guard let vault else { return .failure("Choisissez un vault") }
+            guard let vault else { return .failure("Choose a vault") }
             request["vault"] = vault
         case .switch:
-            guard let vault, let to else { return .failure("Choisissez un vault") }
+            guard let vault, let to else { return .failure("Choose a vault") }
             request["from"] = vault
             request["to"] = to
         case .exit:
-            guard let vault else { return .failure("Choisissez un vault") }
+            guard let vault else { return .failure("Choose a vault") }
             request["from"] = vault
         case .exitCash:
-            guard !account.isEmpty else { return .failure("Indiquez le compte NEAR") }
+            guard !account.isEmpty else { return .failure("Enter the NEAR account") }
             request["to"] = account
         case .deposit:
-            guard !account.isEmpty else { return .failure("Indiquez votre compte NEAR") }
+            guard !account.isEmpty else { return .failure("Enter your NEAR account") }
             request["account"] = account
         }
         return .success(request)
@@ -117,11 +117,11 @@ public struct PoolSummary: Sendable {
     public let walletCall: String?
 
     static let labels: [(key: String, label: String, amount: Bool)] = [
-        ("amount", "Montant", true), ("account", "Compte", false), ("vault", "Vault", false),
-        ("from", "Depuis le vault", false), ("to", "Vers", false), ("shares_value", "Parts reçues (valeur)", true),
-        ("new_shares_value", "Nouvelles parts (valeur)", true), ("cash_value", "Cash reçu", true),
-        ("received", "Reçu", true), ("left_in_cash", "Laissé dans le cash du pool (perdu)", true),
-        ("exit_limit", "Limite de sortie du compte", true),
+        ("amount", "Amount", true), ("account", "Account", false), ("vault", "Vault", false),
+        ("from", "From vault", false), ("to", "To", false), ("shares_value", "Shares received (value)", true),
+        ("new_shares_value", "New shares (value)", true), ("cash_value", "Cash received", true),
+        ("received", "Received", true), ("left_in_cash", "Left in the pool's cash (lost)", true),
+        ("exit_limit", "Account exit limit", true),
     ]
 
     public init(_ summary: [String: Any]) {
@@ -133,7 +133,7 @@ public struct PoolSummary: Sendable {
             return Row(label: label, value: amount ? Self.near(text) : text)
         }
         let fees = summary["fees"] as? [String: Any] ?? [:]
-        rows += fees.keys.sorted().map { key in Row(label: "Frais : \(key)", value: Self.near("\(fees[key] ?? "")")) }
+        rows += fees.keys.sorted().map { key in Row(label: "Fees: \(key)", value: Self.near("\(fees[key] ?? "")")) }
         self.rows = rows
         let listed = (summary["warnings"] as? [Any] ?? []).map { "\($0)" }
         warnings = [summary["warning"] as? String].compactMap { $0 } + listed
@@ -157,23 +157,23 @@ public enum PoolOutcome {
     public static func execute(_ reply: [String: Any]) -> String {
         let error = reply["error"] as? String
         if reply["ok"] as? Bool == true {
-            if reply["complete"] as? Bool == true { return "Opération faite." }
-            return "Opération en partie faite" + (error.map { " : \($0)" } ?? ".")
+            if reply["complete"] as? Bool == true { return "Operation done." }
+            return "Operation partly done" + (error.map { ": \($0)" } ?? ".")
         }
         // Entries, exits and cash payments are queued by the pool agent: their outcome comes through pool_recover.
         if let error, error.contains("outcome unknown") {
-            return "Envoyée à l'agent du pool : le résultat arrivera plus tard (Récupérer)."
+            return "Sent to the pool agent: the result will come later (Recover)."
         }
-        return "Opération refusée : \(error ?? "erreur du pool")"
+        return "Operation refused: \(error ?? "pool error")"
     }
 
     public static func recover(_ reply: [String: Any]) -> String {
         guard reply["ok"] as? Bool == true else {
-            return "Récupération impossible : \(reply["error"] as? String ?? "erreur du pool")"
+            return "Could not recover: \(reply["error"] as? String ?? "pool error")"
         }
         let count = { (key: String) in reply[key] as? Int ?? 0 }
-        let agent = (reply["agent_error"] as? String).map { " (agent : \($0))" } ?? ""
-        return "Récupération : \(count("spent")) faites, \(count("held_again")) revenues, \(count("still_spending")) en attente\(agent)."
+        let agent = (reply["agent_error"] as? String).map { " (agent: \($0))" } ?? ""
+        return "Recovery: \(count("spent")) done, \(count("held_again")) returned, \(count("still_spending")) pending\(agent)."
     }
 }
 
@@ -202,19 +202,19 @@ public struct PoolPrivacy: Equatable, Sendable {
 
     /// The sentence of the panel.
     public var line: String {
-        guard let smallestSet else { return "Aucun billet dans le pool pour l'instant." }
+        guard let smallestSet else { return "No notes in the pool yet." }
         if smallestSet <= 1 {
-            return "Votre billet le moins protégé est seul de sa valeur à sa place : un observateur de la chaîne peut le suivre."
+            return "Your least protected note is the only one of its value in its place: anyone watching the chain could follow it."
         }
-        return "Votre billet le moins protégé se confond avec au plus \(smallestSet) billets de même valeur au même endroit."
+        return "Your least protected note blends in with at most \(smallestSet) notes of the same value in the same place."
     }
 
-    public static let caveat = "Sans ONA, un dépôt direct en staking est lié à votre compte : 1. Chiffre maximal, compté sur la chaîne ; un observateur qui recoupe les dates et les montants peut en exclure certains."
+    public static let caveat = "Without ONA, a direct staking deposit is tied to your account: 1. This is an upper bound, counted on the chain; someone who cross-checks dates and amounts can rule some notes out."
 
     /// "+ X" next to a vault offered for an entry.
     public func label(vault: Int) -> String {
         guard let v = vaults[vault] else { return "" }
         let gain = v.gain.map { $0 >= 0 ? ", +\($0)" : ", \($0)" } ?? ""
-        return " — parmi \(v.ifEntered) billets\(gain)"
+        return " — among \(v.ifEntered) notes\(gain)"
     }
 }

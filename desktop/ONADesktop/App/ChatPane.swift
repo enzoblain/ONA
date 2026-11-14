@@ -39,7 +39,7 @@ struct ChatPane: View {
             if model.engine.mode != "real" { SimulationBanner() }
         }
         .navigationTitle(chat.title)
-        .alert("Action impossible", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+        .alert("Cannot do this", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK") { error = nil }
         } message: {
             Text(error ?? "")
@@ -57,8 +57,8 @@ struct NewChatPane: View {
         VStack(spacing: 14) {
             Spacer()
             Image(systemName: "sparkles").font(.system(size: 44)).foregroundStyle(.tint)
-            Text("Que dois-je faire pour vous ?").font(.title.weight(.semibold))
-            Text("Posez une question : l'agent cherche sur le web via Tor, après votre accord sur ses recherches, et répond avec ses sources. S'il suggère un message ou un paiement, c'est vous qui le faites, sur cet ordinateur.")
+            Text("What can I do for you?").font(.title.weight(.semibold))
+            Text("Ask a question: once you approve its searches, the agent searches the web through Tor and answers with its sources. If it suggests a message or a payment, you are the one who makes it, on this computer.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 460)
@@ -76,13 +76,13 @@ struct NewChatPane: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             if model.engine.mode != "real" { SimulationBanner() }
         }
-        .navigationTitle("Nouvelle conversation")
+        .navigationTitle("New conversation")
     }
 }
 
 struct SimulationBanner: View {
     var body: some View {
-        Label("Simulation — modèle, web et paiements fictifs (ona-core en mode mock)", systemImage: "theatermasks")
+        Label("Simulation — fake model, web and payments (ona-core in mock mode)", systemImage: "theatermasks")
             .font(.callout.weight(.semibold))
             .foregroundStyle(.black)
             .frame(maxWidth: .infinity)
@@ -103,7 +103,7 @@ private struct Composer: View {
     var body: some View {
         GlassEffectContainer(spacing: 10) {
             HStack(alignment: .bottom, spacing: 10) {
-                TextField("Demandez à l'agent…", text: $text, axis: .vertical)
+                TextField("Ask the agent…", text: $text, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...8)
                     .onSubmit { if canSend { send() } }
@@ -200,17 +200,17 @@ private struct ConfirmationCard: View {
                 Text(steps.enumerated().map { "\($0.offset + 1). \(Self.stepLabel($0.element))" }.joined(separator: "\n"))
                     .foregroundStyle(.secondary)
             case .recipient(let offers):
-                Picker("Offre", selection: $firm) {
+                Picker("Offer", selection: $firm) {
                     ForEach(offers) { offer in
-                        Text("\(offer.firmID) — \(offer.priceCents / 100) €, sous \(offer.delayDays) jours")
+                        Text("\(offer.firmID) — €\(offer.priceCents / 100), within \(offer.delayDays) days")
                             .tag(Optional(offer.firmID))
                     }
                 }
                 .pickerStyle(.radioGroup)
                 .disabled(state != .pending)
             case .payment(let to, let amount, let screen, _, _):
-                LabeledContent("Montant", value: Self.near(amount))
-                LabeledContent("Destinataire", value: to)
+                LabeledContent("Amount", value: Self.near(amount))
+                LabeledContent("Recipient", value: to)
                 Text(screen).font(.caption.monospaced()).foregroundStyle(.secondary)
             case .queries(let queries):
                 QueriesEditor(queries: queries, editable: state == .pending, edited: $edited)
@@ -228,14 +228,14 @@ private struct ConfirmationCard: View {
                     }
                     .buttonStyle(.glassProminent)
                     .disabled(isRecipient && firm == nil)
-                    Button("Refuser", role: .destructive) { answer("reject", nil, nil, nil) }
+                    Button("Refuse", role: .destructive) { answer("reject", nil, nil, nil) }
                         .buttonStyle(.glass)
                     Spacer()
-                    Text("ou sur le téléphone").font(.caption).foregroundStyle(.secondary)
+                    Text("or on the phone").font(.caption).foregroundStyle(.secondary)
                 }
-            case .accepted: Label("Confirmé", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-            case .rejected: Label("Refusé", systemImage: "xmark.circle.fill").foregroundStyle(.red)
-            case .expired: Label("Plus d'actualité", systemImage: "clock").foregroundStyle(.secondary)
+            case .accepted: Label("Confirmed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            case .rejected: Label("Refused", systemImage: "xmark.circle.fill").foregroundStyle(.red)
+            case .expired: Label("No longer relevant", systemImage: "clock").foregroundStyle(.secondary)
             }
         }
         .padding(16)
@@ -250,10 +250,10 @@ private struct ConfirmationCard: View {
 
     private var title: String {
         switch pending.request {
-        case .plan: "Valider le plan"
-        case .recipient: "Choisir le destinataire"
-        case .payment: "Confirmer le paiement"
-        case .queries: "Valider les recherches"
+        case .plan: "Approve the plan"
+        case .recipient: "Choose the recipient"
+        case .payment: "Confirm the payment"
+        case .queries: "Approve the searches"
         }
     }
 
@@ -268,23 +268,23 @@ private struct ConfirmationCard: View {
 
     private var acceptTitle: String {
         switch pending.request {
-        case .plan: "Valider le plan"
-        case .recipient: "Contacter ce cabinet"
-        case .payment: "Confirmer le paiement"
-        case .queries: "Lancer les recherches"
+        case .plan: "Approve the plan"
+        case .recipient: "Contact this firm"
+        case .payment: "Confirm the payment"
+        case .queries: "Run the searches"
         }
     }
 
     static func stepLabel(_ step: String) -> String {
         switch step {
-        case "search": "Recherche"
-        case "read": "Lecture d'une page"
-        case "compare": "Comparaison des offres"
-        case "confirm_recipient": "Choix du destinataire (vous)"
-        case "contact": "Prise de contact"
-        case "prepare_payment": "Préparation du paiement"
-        case "confirm_payment": "Confirmation du paiement (vous)"
-        case "pay": "Paiement"
+        case "search": "Search"
+        case "read": "Read a page"
+        case "compare": "Compare the offers"
+        case "confirm_recipient": "Choose the recipient (you)"
+        case "contact": "Contact the firm"
+        case "prepare_payment": "Prepare the payment"
+        case "confirm_payment": "Confirm the payment (you)"
+        case "pay": "Pay"
         default: step
         }
     }
@@ -306,21 +306,21 @@ private struct ExposureCard: View {
         let outputs = report["outputs"] as? [String: Int] ?? [:]
         let payments = report["payments"] as? [[String: String]] ?? []
         VStack(alignment: .leading, spacing: 8) {
-            Label("Relevé d'exposition", systemImage: "eye").font(.headline)
-            Text("Ce qui est sorti de cet ordinateur pendant la mission.").foregroundStyle(.secondary)
+            Label("Exposure report", systemImage: "eye").font(.headline)
+            Text("What left this computer during the mission.").foregroundStyle(.secondary)
             Divider()
-            LabeledContent("Appels au modèle", value: "\(report["model_calls"] as? Int ?? 0)")
+            LabeledContent("Model calls", value: "\(report["model_calls"] as? Int ?? 0)")
             ForEach(outputs.sorted(by: { $0.key < $1.key }), id: \.key) { name, count in
                 LabeledContent(Self.label(name), value: "\(count)")
             }
             if let firms = report["firms_contacted"] as? [String], !firms.isEmpty {
-                LabeledContent("Cabinets contactés", value: firms.joined(separator: ", "))
+                LabeledContent("Firms contacted", value: firms.joined(separator: ", "))
             }
             ForEach(Array(payments.enumerated()), id: \.offset) { _, payment in
-                LabeledContent("Paiement", value: "\(ConfirmationCard.near(payment["amount"] ?? "0")) → \(payment["to"] ?? "?")")
+                LabeledContent("Payment", value: "\(ConfirmationCard.near(payment["amount"] ?? "0")) → \(payment["to"] ?? "?")")
             }
             if (report["mode"] as? String) != "real" {
-                Label("Relevé d'une simulation", systemImage: "theatermasks").font(.caption).foregroundStyle(.orange)
+                Label("Report of a simulation", systemImage: "theatermasks").font(.caption).foregroundStyle(.orange)
             }
         }
         .padding(16)
@@ -330,10 +330,10 @@ private struct ExposureCard: View {
 
     static func label(_ name: String) -> String {
         switch name {
-        case "search": "Recherches envoyées"
-        case "fetch": "Pages lues"
-        case "contact": "Messages envoyés"
-        case "message": "Messages remis à votre messagerie"
+        case "search": "Searches sent"
+        case "fetch": "Pages read"
+        case "contact": "Messages sent"
+        case "message": "Messages handed to your mail app"
         default: name
         }
     }

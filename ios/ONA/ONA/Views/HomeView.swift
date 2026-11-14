@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// "Accueil" tab: pairing when there is no computer yet, then the conversations with the agent.
+/// "Home" tab: pairing when there is no computer yet, then the conversations with the agent.
 struct HomeView: View {
     @Bindable var model: RemoteModel
 
@@ -12,7 +12,7 @@ struct HomeView: View {
                 PairingView(model: model)
                     .navigationTitle("ONA")
             }
-            .alert("Action impossible", isPresented: .constant(model.actionError != nil)) {
+            .alert("Action not possible", isPresented: .constant(model.actionError != nil)) {
                 Button("OK") { model.clearActionError() }
             } message: {
                 Text(model.actionError ?? "")
@@ -29,11 +29,11 @@ struct ConnectionStatusRow: View {
     var body: some View {
         switch connection {
         case .notPaired:
-            Label("Aucun ordinateur appairé", systemImage: "link.badge.plus")
+            Label("No paired computer", systemImage: "link.badge.plus")
                 .foregroundStyle(.secondary)
         case .idle, .connecting:
             Label {
-                Text(viaTor ? "Connexion sécurisée par Tor…" : "Connexion à l'ordinateur…")
+                Text(viaTor ? "Securing the connection over Tor…" : "Connecting to the computer…")
             } icon: {
                 ProgressView()
             }
@@ -41,9 +41,9 @@ struct ConnectionStatusRow: View {
         case .connected(let date):
             Label {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(computer ?? "Ordinateur")
-                    Text(viaTor ? "Connecté par Tor · à jour \(date.formatted(date: .omitted, time: .shortened))"
-                                : "Connecté · à jour \(date.formatted(date: .omitted, time: .shortened))")
+                    Text(computer ?? "Computer")
+                    Text(viaTor ? "Connected over Tor · updated \(date.formatted(date: .omitted, time: .shortened))"
+                                : "Connected · updated \(date.formatted(date: .omitted, time: .shortened))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -53,8 +53,8 @@ struct ConnectionStatusRow: View {
         case .awaitingComputer:
             Label {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Confirmez sur \(computer ?? "l'ordinateur")")
-                    Text("Cliquez sur « Les codes sont identiques » sur l'ordinateur pour finir l'appairage.")
+                    Text("Confirm on \(computer ?? "the computer")")
+                    Text("Click “The codes match” on the computer to finish pairing.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

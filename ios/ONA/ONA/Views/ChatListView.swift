@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// "Accueil" once paired: every conversation with the agent, newest first, like the Claude or ChatGPT apps.
+/// "Home" tab once paired: every conversation with the agent, newest first, like the Claude or ChatGPT apps.
 struct ChatListView: View {
     @Bindable var model: RemoteModel
     @State private var path: [Route] = []
@@ -20,7 +20,7 @@ struct ChatListView: View {
                         Button {
                             path.append(.newChat)
                         } label: {
-                            Label("Nouvelle conversation", systemImage: "plus")
+                            Label("New conversation", systemImage: "plus")
                         }
                         .accessibilityIdentifier("new-chat")
                     }
@@ -37,16 +37,16 @@ struct ChatListView: View {
                 .refreshable { await model.refresh() }
         }
         .alert(
-            "Supprimer la conversation ?",
+            "Delete this conversation?",
             isPresented: Binding(get: { chatToDelete != nil }, set: { if !$0 { chatToDelete = nil } }),
             presenting: chatToDelete
         ) { chat in
-            Button("Annuler", role: .cancel) {}
-            Button("Supprimer", role: .destructive) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
                 Task { await model.delete(chat: chat.id) }
             }
         } message: { chat in
-            Text("« \(chat.title) » sera supprimée de votre ordinateur.")
+            Text("“\(chat.title)” will be deleted from your computer.")
         }
     }
 
@@ -99,11 +99,11 @@ struct ChatListView: View {
             }
         } else {
             ContentUnavailableView {
-                Label("Aucune conversation", systemImage: "bubble.left.and.text.bubble.right")
+                Label("No conversations", systemImage: "bubble.left.and.text.bubble.right")
             } description: {
-                Text("Demandez à l'agent de faire quelque chose sur votre ordinateur. Vous suivrez ici chaque étape et confirmerez les choix importants.")
+                Text("Ask the agent to do something on your computer. You will follow each step here and confirm the important choices.")
             } actions: {
-                Button("Nouvelle conversation") { path.append(.newChat) }
+                Button("New conversation") { path.append(.newChat) }
                     .buttonStyle(.glassProminent)
             }
         }
@@ -129,10 +129,10 @@ private struct ChatRow: View {
                     switch chat.status {
                     case .waiting:
                         Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-                        Text("Confirmation demandée").foregroundStyle(.orange)
+                        Text("Confirmation needed").foregroundStyle(.orange)
                     case .working:
                         ProgressView().controlSize(.mini)
-                        Text("L'agent travaille…").foregroundStyle(.secondary)
+                        Text("The agent is working…").foregroundStyle(.secondary)
                     case .idle:
                         Text(chat.preview).foregroundStyle(.secondary)
                     }
@@ -153,7 +153,7 @@ struct RescanButton: View {
         Button {
             model.rescan()
         } label: {
-            Label("Rescanner le code de l'ordinateur", systemImage: "qrcode.viewfinder")
+            Label("Rescan the computer's code", systemImage: "qrcode.viewfinder")
         }
         .accessibilityIdentifier("rescan")
     }

@@ -12,7 +12,7 @@ final class DesktopModel {
         case localNetwork
 
         var id: String { rawValue }
-        var label: String { self == .tor ? "Par Tor" : "Réseau local (développement)" }
+        var label: String { self == .tor ? "Through Tor" : "Local network (development)" }
 
         /// The modes this build offers.
         static var available: [ConnectionMode] { LocalModePolicy.allowed ? allCases : [.tor] }
@@ -51,8 +51,8 @@ final class DesktopModel {
 
     init() {
         // Kept out of Time Machine: the onion key and tor's state. Shown in the window if it fails.
-        do { try BackupExclusion.exclude() } catch { backupError = "Exclusion des sauvegardes impossible : \(error.localizedDescription)" }
-        pairing = PairingAuthority(name: Host.current().localizedName ?? "Mon Mac", store: KeychainPairingStore())
+        do { try BackupExclusion.exclude() } catch { backupError = "Could not exclude the app data from backups: \(error.localizedDescription)" }
+        pairing = PairingAuthority(name: Host.current().localizedName ?? "My Mac", store: KeychainPairingStore())
         let tor = self.tor
         // Read when each core is made: a change to model.json, or tor becoming ready, applies to the next conversation.
         // The pool's core (pool.json): one for the app, made again when tor's port for the core changes.
@@ -117,7 +117,7 @@ final class DesktopModel {
             try server.start(mode == .tor ? .localhost : .localNetwork)
             serverError = nil
         } catch {
-            serverError = "Écoute impossible : \(error.localizedDescription)"
+            serverError = "Cannot listen: \(error.localizedDescription)"
         }
         self.server = server
     }

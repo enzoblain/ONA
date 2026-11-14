@@ -34,14 +34,14 @@ from pairing import Pairing
 MODE = "mock"
 
 # Same values as ona-core's demo (DEMO_PLAN, MockWeb::demo, demo_policy).
-DEMO_TITLE = "Trouver un avocat en droit du travail"
+DEMO_TITLE = "Find an employment lawyer"
 DEMO_PLAN = ["search", "read", "read", "compare", "confirm_recipient", "contact",
              "prepare_payment", "confirm_payment", "pay"]
 DEMO_OFFERS = [
     {"firm_id": "cabinet-a", "specialties": ["labour"], "price_cents": 90_000, "delay_days": 7,
-     "source_spans": ["Consultation 900 euros, sous 7 jours"]},
+     "source_spans": ["Consultation 900 euros, within 7 days"]},
     {"firm_id": "cabinet-b", "specialties": ["labour"], "price_cents": 60_000, "delay_days": 10,
-     "source_spans": ["Forfait 600 euros, sous 10 jours"]},
+     "source_spans": ["Flat fee 600 euros, within 10 days"]},
 ]
 DIRECTORY = {"cabinet-a": "cabinet-a.testnet", "cabinet-b": "cabinet-b.testnet"}
 DEMO_AMOUNT = 1_000_000_000_000_000_000_000_000  # 1 NEAR in yoctoNEAR, as in ona-core's `ona demo`
@@ -92,7 +92,7 @@ class Mission:
         self.model_calls = 1  # the plan
         self._payment: dict | None = None
         self.pending = self._new_pending("plan", plan=list(DEMO_PLAN))
-        self.log("Mission ouverte, plan proposé")
+        self.log("Mission opened, plan proposed")
 
     # -- helpers ---------------------------------------------------------------------------------
     def log(self, text: str, tool: str | None = None) -> None:
@@ -133,35 +133,35 @@ class Mission:
             kind = CONFIRM_STEPS[step]
             if kind == "recipient":
                 self.pending = self._new_pending("recipient", offers=DEMO_OFFERS)
-                self.log("En attente : choix du cabinet")
+                self.log("Waiting: choice of firm")
             else:
                 self.pending = self._new_pending("payment", payment=self.payment())
-                self.log("En attente : confirmation du paiement")
+                self.log("Waiting: payment confirmation")
             self.phase = "waiting"
             return
         if step == "search":
             self._count("search")
-            self.log("Recherche « avocat droit du travail paris » : 2 résultats", "search")
+            self.log("Search \"employment lawyer paris\": 2 results", "search")
         elif step == "read":
             n = DEMO_PLAN[: self.cursor + 1].count("read")
             self.model_calls += 1
             self._count("fetch")
-            self.log(f"Lecture de la page {n} sur 2 (offre extraite)", "read")
+            self.log(f"Reading page {n} of 2 (offer extracted)", "read")
         elif step == "compare":
-            self.log("Comparaison : 2 offres classées", "compare")
+            self.log("Comparison: 2 offers ranked", "compare")
         elif step == "contact":
             self._count("contact")
-            self.log(f"Message générique envoyé à {self.chosen}", "contact")
+            self.log(f"Generic message sent to {self.chosen}", "contact")
         elif step == "prepare_payment":
-            self.log("Paiement préparé à partir de l'annuaire", "prepare_payment")
+            self.log("Payment prepared from the directory", "prepare_payment")
         elif step == "pay":
             p = self.payment()  # ona-core lists payments apart, not in "outputs"
             self.payments.append({"to": p["to"], "amount": p["amount"]})
-            self.log(f"Paiement envoyé : mock-tx-{p['digest'][:16]}", "pay")
+            self.log(f"Payment sent: mock-tx-{p['digest'][:16]}", "pay")
         self.cursor += 1
         if self.cursor == len(DEMO_PLAN):
             self.phase = "closed"
-            self.log("Mission terminée, relevé d'exposition prêt")
+            self.log("Mission finished, exposure report ready")
 
     def confirm(self, body: dict) -> str | None:
         """Applies a confirmation. Returns an error message or None."""
@@ -174,20 +174,20 @@ class Mission:
         if decision == "reject":
             self.pending = None
             self.phase = "cancelled"
-            self.log(f"Refusé sur le téléphone ({pending['kind']}) : mission arrêtée")
+            self.log(f"Declined on the phone ({pending['kind']}): mission stopped")
             return None
         if pending["kind"] == "recipient":
             firm = body.get("firm")
             if firm not in DIRECTORY:
                 return "unknown firm"
             self.chosen = firm
-            self.log(f"Cabinet choisi sur le téléphone : {firm}")
+            self.log(f"Firm chosen on the phone: {firm}")
         elif pending["kind"] == "payment":
             if body.get("digest") != pending["payment"]["digest"]:
                 return "payment digest does not match"
-            self.log("Paiement confirmé sur le téléphone")
+            self.log("Payment confirmed on the phone")
         else:
-            self.log("Plan accepté sur le téléphone")
+            self.log("Plan accepted on the phone")
         self.pending = None
         self.phase = "running"
         if pending["kind"] != "plan":
@@ -445,7 +445,7 @@ def main() -> None:
     else:
         address = args.address or f"http://{public_host(args.host)}:{args.port}"
         onion = None
-    pairing = Pairing("Ordinateur simulé", address, onion)
+    pairing = Pairing("Simulated computer", address, onion)
     computer = Computer(args.step_seconds, pairing)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(computer))
     print(f"ONA mock computer (mode: mock, protocol v1) on http://{args.host}:{args.port}", flush=True)

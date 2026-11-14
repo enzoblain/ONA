@@ -39,7 +39,7 @@ struct PoolSheet: View {
                 Text("Pool").font(.title2.weight(.semibold))
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
-                Button("Fermer") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             if let message {
                 Text(message)
@@ -53,7 +53,7 @@ struct PoolSheet: View {
                 content.frame(maxWidth: .infinity, alignment: .leading)
             }
             .disabled(busy)
-            Text("Les opérations du pool se confirment ici, jamais sur le téléphone.")
+            Text("Pool operations are confirmed here, never on the phone.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(24)
@@ -65,13 +65,13 @@ struct PoolSheet: View {
     private var content: some View {
         switch screen {
         case .loading:
-            Text("Lecture du pool…").foregroundStyle(.secondary)
+            Text("Reading the pool…").foregroundStyle(.secondary)
         case .unavailable(let error):
             VStack(alignment: .leading, spacing: 8) {
-                Label("Pool indisponible : \(error)", systemImage: "exclamationmark.triangle").foregroundStyle(.red)
-                Text("Le pool se configure avec pool.json dans ~/Library/Application Support/ONA (voir docs/desktop/app.md).")
+                Label("Pool unavailable: \(error)", systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+                Text("The pool is set up with pool.json in ~/Library/Application Support/ONA (see docs/desktop/app.md).")
                     .font(.callout).foregroundStyle(.secondary)
-                Button("Réessayer") { Task { await load() } }
+                Button("Try again") { Task { await load() } }
             }
         case .portfolio(let portfolio):
             portfolioView(portfolio)
@@ -81,15 +81,15 @@ struct PoolSheet: View {
             summaryView(id: id, summary, prepared: prepared)
         case .walletOpen(let url):
             VStack(alignment: .leading, spacing: 10) {
-                Text("Dépôt en cours dans votre navigateur").font(.headline)
-                Text("La page de votre portefeuille s'est ouverte. Si ce n'est pas le cas, ouvrez cette adresse :")
+                Text("Deposit in progress in your browser").font(.headline)
+                Text("Your wallet page has opened. If it has not, open this address:")
                     .foregroundStyle(.secondary)
                 Text(url.absoluteString).font(.caption.monospaced()).textSelection(.enabled)
-                Text("Une fois la page terminée, actualisez : les billets apparaissent quand l'agent du pool les a émis.")
+                Text("Once the page is done, refresh: the notes appear when the pool agent has issued them.")
                     .font(.callout).foregroundStyle(.secondary)
                 HStack {
                     Spacer()
-                    Button("Actualiser") { Task { await load() } }.buttonStyle(.borderedProminent)
+                    Button("Refresh") { Task { await load() } }.buttonStyle(.borderedProminent)
                 }
             }
         }
@@ -100,15 +100,15 @@ struct PoolSheet: View {
     private func portfolioView(_ portfolio: PoolPortfolio) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Valeur totale").font(.callout).foregroundStyle(.secondary)
+                Text("Total value").font(.callout).foregroundStyle(.secondary)
                 Text(PoolSummary.near(portfolio.total)).font(.title.weight(.bold)).monospacedDigit()
             }
             if portfolio.mode == "mock" {
-                Label("Simulation : pool fictif (mode mock).", systemImage: "theatermasks").foregroundStyle(.orange)
+                Label("Simulation: fake pool (mock mode).", systemImage: "theatermasks").foregroundStyle(.orange)
             }
             if let privacy {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("Confidentialité", systemImage: "eye.slash").font(.headline)
+                    Label("Privacy", systemImage: "eye.slash").font(.headline)
                     Text(privacy.line)
                     Text(PoolPrivacy.caveat).font(.caption).foregroundStyle(.secondary)
                 }
@@ -119,8 +119,8 @@ struct PoolSheet: View {
                 holdingRow("Cash", portfolio.cash) { EmptyView() }
                 ForEach(portfolio.vaults) { vault in
                     holdingRow("Vault \(vault.vault ?? 0)", vault) {
-                        Button("Changer") { open(.switch, portfolio, vault: vault.vault) }
-                        Button("Sortir") { open(.exit, portfolio, vault: vault.vault) }
+                        Button("Switch") { open(.switch, portfolio, vault: vault.vault) }
+                        Button("Leave") { open(.exit, portfolio, vault: vault.vault) }
                     }
                 }
             }
@@ -132,9 +132,9 @@ struct PoolSheet: View {
                             @ViewBuilder buttons: () -> some View) -> some View {
         HStack(spacing: 10) {
             Text(name)
-            if holding.frozen { Text("gelé").font(.caption).foregroundStyle(.orange) }
+            if holding.frozen { Text("frozen").font(.caption).foregroundStyle(.orange) }
             if holding.pending {
-                Image(systemName: "clock").foregroundStyle(.secondary).help("Opération en cours")
+                Image(systemName: "clock").foregroundStyle(.secondary).help("Operation in progress")
             }
             Spacer()
             Text(PoolSummary.near(holding.value)).monospacedDigit()
@@ -151,11 +151,11 @@ struct PoolSheet: View {
 
         var body: some View {
             HStack {
-                Button("Placer du cash") { open(.enter, portfolio, nil) }.buttonStyle(.borderedProminent)
-                Button("Payer vers un compte") { open(.exitCash, portfolio, nil) }
-                Button("Déposer") { open(.deposit, portfolio, nil) }
-                Button("Récupérer") { recover() }
-                    .help("Récupérer les opérations en attente (pool_recover)")
+                Button("Put cash in a vault") { open(.enter, portfolio, nil) }.buttonStyle(.borderedProminent)
+                Button("Pay out to an account") { open(.exitCash, portfolio, nil) }
+                Button("Deposit") { open(.deposit, portfolio, nil) }
+                Button("Recover") { recover() }
+                    .help("Recover pending operations (pool_recover)")
             }
         }
     }
@@ -182,25 +182,25 @@ struct PoolSheet: View {
                 Picker("Vault", selection: binding.vault) {
                     ForEach(vaults, id: \.self) { Text("Vault \($0)\(privacy?.label(vault: $0) ?? "")").tag(Int?.some($0)) }
                 }
-                TextField("Cash à placer (en NEAR, ou « tout »)", text: binding.amount)
+                TextField("Cash to put in (in NEAR, or “all”)", text: binding.amount)
             case .switch:
-                Picker("Vers le vault", selection: binding.to) {
+                Picker("To vault", selection: binding.to) {
                     ForEach(vaults.filter { $0 != form.vault }, id: \.self) { Text("Vault \($0)").tag(Int?.some($0)) }
                 }
-                TextField("Parts du vault \(form.vault ?? 0) à déplacer (en NEAR, ou « tout »)", text: binding.amount)
+                TextField("Shares of vault \(form.vault ?? 0) to move (in NEAR, or “all”)", text: binding.amount)
             case .exit:
-                TextField("Parts du vault \(form.vault ?? 0) à sortir en cash (en NEAR, ou « tout »)", text: binding.amount)
+                TextField("Shares of vault \(form.vault ?? 0) to take out as cash (in NEAR, or “all”)", text: binding.amount)
             case .exitCash:
-                TextField("Compte NEAR qui a déposé (nom.testnet)", text: binding.account)
-                TextField("Cash à payer (en NEAR)", text: binding.amount)
+                TextField("NEAR account that made the deposit (name.testnet)", text: binding.account)
+                TextField("Cash to pay out (in NEAR)", text: binding.amount)
             case .deposit:
-                TextField("Votre compte NEAR (nom.testnet)", text: binding.account)
-                TextField("Montant à déposer (en NEAR)", text: binding.amount)
+                TextField("Your NEAR account (name.testnet)", text: binding.account)
+                TextField("Amount to deposit (in NEAR)", text: binding.amount)
             }
             HStack {
                 Spacer()
-                Button("Annuler") { Task { await load() } }
-                Button("Préparer") { Task { await prepare(binding.wrappedValue) } }
+                Button("Cancel") { Task { await load() } }
+                Button("Prepare") { Task { await prepare(binding.wrappedValue) } }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
             }
@@ -224,23 +224,23 @@ struct PoolSheet: View {
             ForEach(summary.warnings, id: \.self) { warning in
                 Label(warning, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
             }
-            Text("Réseau \(summary.network), contrat \(summary.contract).\(expiry(summary))")
+            Text("Network \(summary.network), contract \(summary.contract).\(expiry(summary))")
                 .font(.callout).foregroundStyle(.secondary)
             if summary.op == "deposit" {
                 // Sent and signed by the person's own NEAR wallet, on a page opened in the browser.
-                Text("Votre portefeuille NEAR envoie ce dépôt, puis signe un message pour l'agent du pool. ONA ne voit jamais ses clés.")
+                Text("Your NEAR wallet sends this deposit, then signs a message for the pool agent. ONA never sees its keys.")
                     .font(.callout).foregroundStyle(.secondary)
                 HStack {
                     Spacer()
-                    Button("Annuler") { Task { await load() } }
-                    Button("Ouvrir mon portefeuille") { Task { await openWallet(prepared) } }
+                    Button("Cancel") { Task { await load() } }
+                    Button("Open my wallet") { Task { await openWallet(prepared) } }
                         .buttonStyle(.borderedProminent)
                 }
             } else {
                 HStack {
                     Spacer()
-                    Button("Annuler") { Task { await load() } }
-                    Button("Confirmer") { Task { await execute(id) } }
+                    Button("Cancel") { Task { await load() } }
+                    Button("Confirm") { Task { await execute(id) } }
                         .buttonStyle(.borderedProminent)
                 }
             }
@@ -249,7 +249,7 @@ struct PoolSheet: View {
 
     private func expiry(_ summary: PoolSummary) -> String {
         guard let date = summary.expiresAt else { return "" }
-        return " Valable jusqu'à \(date.formatted(date: .omitted, time: .standard))."
+        return " Valid until \(date.formatted(date: .omitted, time: .standard))."
     }
 
     // MARK: - Commands
@@ -267,7 +267,7 @@ struct PoolSheet: View {
             privacy = PoolPrivacy(await run(["cmd": "pool_privacy"]))
             screen = .portfolio(portfolio)
         } else {
-            screen = .unavailable(reply["error"] as? String ?? "réponse illisible")
+            screen = .unavailable(reply["error"] as? String ?? "unreadable reply")
         }
     }
 
@@ -281,7 +281,7 @@ struct PoolSheet: View {
         guard reply["ok"] as? Bool == true, let id = reply["prepared_id"] as? String,
               let summary = reply["summary"] as? [String: Any]
         else {
-            message = "Préparation refusée : \(reply["error"] as? String ?? "réponse illisible")"
+            message = "Preparation refused: \(reply["error"] as? String ?? "unreadable reply")"
             return
         }
         message = nil

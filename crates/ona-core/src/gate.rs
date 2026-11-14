@@ -308,8 +308,8 @@ mod tests {
 
     #[test]
     fn account_lists_skip_comments_and_blank_lines() {
-        let list = parse_account_list("# fraud list\n\nArnaque.testnet  # source, date\n  vol.near\n");
-        assert_eq!(list, ["arnaque.testnet", "vol.near"].iter().map(|s| s.to_string()).collect());
+        let list = parse_account_list("# fraud list\n\nScammer.testnet  # source, date\n  thief.near\n");
+        assert_eq!(list, ["scammer.testnet", "thief.near"].iter().map(|s| s.to_string()).collect());
         assert!(blocked_accounts().is_empty(), "no public list of NEAR accounts was found on 13/11/2026");
     }
 
@@ -318,9 +318,9 @@ mod tests {
         let mut policy = Policy::default();
         policy.directory.insert("cabinet".into(), "cabinet.testnet".into());
         assert_eq!(policy.check_payee("cabinet.testnet"), Ok(()), "the directory counts as allowed");
-        assert_eq!(policy.check_payee("autre.testnet"), Err(PayeeRefusal::NotAllowed));
-        policy.allowed_payees.insert("autre.testnet".into());
-        assert_eq!(policy.check_payee(" autre.testnet "), Ok(()));
+        assert_eq!(policy.check_payee("other.testnet"), Err(PayeeRefusal::NotAllowed));
+        policy.allowed_payees.insert("other.testnet".into());
+        assert_eq!(policy.check_payee(" other.testnet "), Ok(()));
         policy.blocked_accounts.insert("cabinet.testnet".into());
         assert_eq!(policy.check_payee("cabinet.testnet"), Err(PayeeRefusal::Blocked), "the fraud list wins");
         assert_eq!(policy.build_payment("cabinet", 1, "m").unwrap_err(), GateError::RecipientBlocked);

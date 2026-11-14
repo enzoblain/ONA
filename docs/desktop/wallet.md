@@ -6,8 +6,8 @@ asks for before it issues the cash. Both desktop apps (macOS and Tauri) do it th
 
 ## How it works
 
-1. In the Pool window, a deposit is prepared (`pool_prepare`, account and amount) and its summary shown. **Ouvrir mon
-   portefeuille** starts a small server on `127.0.0.1` (port chosen by the system) and opens
+1. In the Pool window, a deposit is prepared (`pool_prepare`, account and amount) and its summary shown. **Open my
+   wallet** starts a small server on `127.0.0.1` (port chosen by the system) and opens
    `http://127.0.0.1:<port>/wallet/<16 random bytes in hex>/` in the default browser. One deposit at a time; the address
    works only for that deposit and only until the preparation expires (5 minutes, `summary.expires_at`).
 2. The page (`desktop/wallet-page`) reads what to do from the app (`state`: account, amount, contract, network; never
@@ -17,7 +17,7 @@ asks for before it issues the cash. Both desktop apps (macOS and Tauri) do it th
    runs the first `pool_execute`: the cash notes are made and saved, and the message to sign comes back.
 4. The page asks the same wallet to sign that message (`signMessage`: message, recipient, nonce) and gives the
    signature to the app (`signed`), which runs the second `pool_execute`. Done, or queued by the agent: the cash then
-   comes with **Récupérer** (`pool_recover`).
+   comes with **Recover** (`pool_recover`).
 
 A wallet that sends the browser away and back (MyNearWallet) returns to the same page; the app keeps where the deposit
 is. A step sent twice (a page reloaded) runs nothing again.

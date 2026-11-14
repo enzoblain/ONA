@@ -194,8 +194,8 @@ public enum WalletPageError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .notADeposit: "Seul un dépôt passe par la page du portefeuille."
-        case .notListening: "La page du portefeuille n'a pas pu démarrer."
+        case .notADeposit: "Only a deposit goes through the wallet page."
+        case .notListening: "The wallet page could not start."
         }
     }
 }

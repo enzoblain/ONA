@@ -48,7 +48,7 @@ public enum RealModel {
         #if DEBUG
         setup["pool_direct"] = (local as? Bool) == true
         #else
-        if (local as? Bool) == true { setup = ["error": "pool.json : local_node est réservé aux versions de développement"] }
+        if (local as? Bool) == true { setup = ["error": "pool.json: local_node is for development builds only"] }
         #endif
         let data = (try? JSONSerialization.data(withJSONObject: setup)) ?? Data(#"{"error":"pool.json"}"#.utf8)
         return String(decoding: data, as: UTF8.self)
