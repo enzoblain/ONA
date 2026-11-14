@@ -282,6 +282,7 @@ function vaultName(v) {
 function poolCard(c, state) {
   if (c.op === "portfolio") return chatPortfolio(c);
   if (c.op === "enter") return entryCard(c, state);
+  if (["cash_enter", "switch", "leave"].includes(c.op)) return moveCard(c, state);
   const open = state === "pending";
   const deposit = c.op === "deposit";
   const title = deposit
@@ -317,6 +318,42 @@ function poolCard(c, state) {
           el("button", { class: "secondary", onclick: () => decidePool(c.id, false, c.op) }, "No"),
           el("button", { class: "primary", onclick: () => decidePool(c.id, true, c.op) }, deposit ? "Yes, open my wallet" : "Yes, pay out"))
       : el("div", { class: `state ${state === "failed" ? "rejected" : state}` }, POOL_STATE_LABELS[state] || state));
+}
+
+/** A cash entry, a switch or a leave asked in the chat: exactly the preparation Yes runs. */
+function moveCard(c, state) {
+  const open = state === "pending";
+  const amount = c.amount === "all" ? "All of it" : near(c.amount || "0");
+  const fees = Object.entries(c.fees || {}).map(([k, v]) => line(`Fee: ${k}`, /^\d+$/.test(String(v)) ? near(String(v)) : String(v)));
+  const rows = [line("Amount", amount)];
+  if (c.from) rows.push(line("From", vaultName(c.from)));
+  if (c.vault) rows.push(line(c.op === "switch" ? "To" : "Into", vaultName(c.vault)));
+  if (c.shares_value) rows.push(line("Shares received (value)", near(c.shares_value)));
+  if (c.new_shares_value) rows.push(line("New shares (value)", near(c.new_shares_value)));
+  if (c.cash_value) rows.push(line("Cash notes received", near(c.cash_value)));
+  if (c.share_price) rows.push(line("Share price", `${near(c.share_price)} per share`));
+  rows.push(line("Left in the pool's cash (lost)", near(c.left_in_cash || "0")));
+  const notes = [];
+  if (c.op === "leave") {
+    const live = (c.cash_live || []).map((t) => `${near(t.note_value || "0")}: ${t.live ?? "?"}`).join(", ");
+    notes.push(el("p", {}, `As cash, the new notes join the cash notes in circulation of their value (${live}).`));
+  } else {
+    notes.push(el("p", {}, blendsLine(c.blends_with, `in vault ${c.vault?.vault}`)));
+  }
+  notes.push(el("p", { class: "help" }, "Without ONA, a direct staking deposit is tied to your account: 1. This is an upper bound; someone who cross-checks dates and amounts can rule some notes out."));
+  if (c.over_cap) notes.push(el("p", { class: "warn" }, `Above vault ${c.from?.vault}'s exit cap of ${near(c.hourly_cap)} per hour: the leave may be spread over several hours.`));
+  return el("div", { class: "card pool-card" },
+    el("h3", {}, c.title),
+    ...rows, ...fees, ...notes,
+    el("h4", {}, open ? "If you click Yes" : "What happens"),
+    el("ol", {}, (c.steps || []).map((s) => el("li", {}, s))),
+    el("div", { class: "sub" }, `Network ${c.network}, contract ${c.contract}.${c.mode === "mock" ? " Simulation: fake pool." : ""}`),
+    open
+      ? el("div", { class: "actions" },
+          el("button", { class: "secondary", onclick: () => decidePool(c.id, false, c.op) }, "No"),
+          el("button", { class: "primary", onclick: () => decidePool(c.id, true, c.op) }, "Yes, do it"))
+      : el("div", { class: `state ${state === "failed" ? "rejected" : state}` },
+          state === "rejected" ? "Declined: nothing was sent (the notes stay reserved for up to 5 minutes)" : (POOL_STATE_LABELS[state] || state)));
 }
 
 /** The second card: the entry differs from what the first card said (money left in cash, another fee). */
@@ -781,9 +818,32 @@ function retryCard(what, error) {
     el("div", { class: "card-actions actions" }, el("button", { class: "primary", onclick: drawPortfolio }, "Retry")));
 }
 
+/** Sets the Pool screen's content; null entries are left out (replaceChildren would write them as "null"). */
+function setPoolBody(...nodes) {
+  $("pool-body").replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined && n !== false));
+}
+
+/** The essentials: one line per holding, its value, its privacy figure, an operation in progress. */
+function compactHoldings(portfolio, privacy, infoVaults) {
+  const row = (name, value, set, where, pending, ...buttons) => el("div", { class: "holding-card" },
+    el("div", { class: "holding-head" }, el("span", { class: "name" }, name, pending ? el("span", { class: "help" }, "  · operation in progress") : null),
+      el("span", { class: "value" }, near(value)), ...buttons),
+    set !== null ? el("div", { class: "help" }, blendsLine(set, where)) : null);
+  const cash = portfolio.cash;
+  return [
+    row("Cash", cash.value, placeSet(privacy, null), "as cash", cash.spending_value !== "0" || cash.awaiting_signature > 0),
+    ...(portfolio.vaults || []).map((v) => {
+      const info = (infoVaults || []).find((i) => i.vault === v.vault);
+      return row(`${info ? vaultName(info) : `Vault ${v.vault}`}${v.frozen ? " (frozen)" : ""}`, v.value, placeSet(privacy, v.vault),
+        `in vault ${v.vault}`, v.spending_value !== "0" || v.awaiting_signature > 0,
+        el("button", { class: "secondary", onclick: () => poolForm("switch", portfolio, v.vault) }, "Switch"),
+        el("button", { class: "secondary", onclick: () => poolForm("exit", portfolio, v.vault) }, "Leave"));
+    }),
+  ];
+}
+
 async function drawPortfolio() {
-  const body = $("pool-body");
-  body.replaceChildren(walletRow(), el("p", { class: "help" }, "Reading the pool…"));
+  setPoolBody(walletRow(), el("p", { class: "help" }, "Reading the pool…"));
   // Read together; each part is shown if it came, with its exact error otherwise.
   const [p, v, i] = await Promise.allSettled([
     pool({ cmd: "pool_portfolio" }), pool({ cmd: "pool_privacy" }), pool({ cmd: "pool_info" }),
@@ -793,24 +853,30 @@ async function drawPortfolio() {
   const info = i.status === "fulfilled" ? i.value : null;
   poolInfo = info;
   if (p.status !== "fulfilled") {
-    body.replaceChildren(walletRow(), retryCard("Pool unavailable", reason(p)), info ? offerSection(info) : null);
+    setPoolBody(walletRow(), retryCard("Pool unavailable", reason(p)),
+      info ? el("details", {}, el("summary", {}, "Details"), offerSection(info)) : null);
     return;
   }
   const portfolio = p.value;
-  body.replaceChildren(
+  // Top: the essentials. Everything else in "Details", closed.
+  setPoolBody(
     walletRow(),
     el("div", {}, el("p", { class: "help" }, "Total value"), el("div", { class: "total" }, near(portfolio.total))),
     portfolio.mode === "mock" ? el("p", { class: "warn" }, "Simulation: fake pool (mock mode).") : null,
-    privacy ? privacyCard(privacy) : el("p", { class: "help" }, `Privacy figures unavailable: ${reason(v)}`),
-    ...holdings(portfolio, privacy, info?.vaults, true),
+    el("div", { class: "section" }, ...compactHoldings(portfolio, privacy, info?.vaults)),
+    privacy ? null : el("p", { class: "help" }, `Privacy figures unavailable: ${reason(v)}`),
     el("div", { class: "ops" },
-      el("button", { class: "primary", onclick: () => poolForm("deposit", portfolio) }, "Deposit from my wallet"),
+      el("button", { class: "primary", onclick: () => poolForm("deposit", portfolio) }, "Deposit"),
       el("button", { class: "secondary", onclick: () => poolForm("enter", portfolio, undefined, privacy) }, "Put cash in a vault"),
-      el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Pay cash out"),
-      el("button", { class: "secondary", onclick: recover }, "Recover pending operations")),
-    info ? vaultsSection(info, privacy) : el("p", { class: "help" }, `Vault details unavailable: ${reason(i)}`),
-    info ? offerSection(info) : null,
-    el("p", { class: "help" }, `Read at ${new Date().toLocaleTimeString("en-US")}. Values at the contract's public prices; held notes only.`),
+      el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Withdraw")),
+    el("p", { class: "help" }, "You can also ask in the chat: “how much do I have?”, “put my cash in vault 0”, “withdraw 0.5 NEAR”."),
+    el("details", { class: "details" }, el("summary", {}, "Details"),
+      privacy ? privacyCard(privacy) : null,
+      ...holdings(portfolio, privacy, info?.vaults, false),
+      info ? vaultsSection(info, privacy) : el("p", { class: "help" }, `Vault details unavailable: ${reason(i)}`),
+      info ? offerSection(info) : null,
+      el("div", { class: "ops" }, el("button", { class: "secondary", onclick: recover }, "Recover pending operations")),
+      el("p", { class: "help" }, `Read at ${new Date().toLocaleTimeString("en-US")}. Values at the contract's public prices; held notes only.`)),
   );
 }
 
