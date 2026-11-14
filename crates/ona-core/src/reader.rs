@@ -211,9 +211,9 @@ mod tests {
 
     #[test]
     fn numbers_are_read_one_way_only() {
-        assert_eq!(numbers("Forfait 600 euros, sous 10 jours"), [(600, None), (10, None)]);
-        assert_eq!(numbers("600,00 € en 12 jours"), [(600, Some("00")), (12, None)]);
-        assert_eq!(numbers("1 200 € ou 1.200 € ou 1'200,50 €"), [(1200, None), (1200, None), (1200, Some("50"))]);
+        assert_eq!(numbers("Flat fee 600 euros, within 10 days"), [(600, None), (10, None)]);
+        assert_eq!(numbers("600,00 € in 12 days"), [(600, Some("00")), (12, None)]);
+        assert_eq!(numbers("1 200 € or 1.200 € or 1'200,50 €"), [(1200, None), (1200, None), (1200, Some("50"))]);
         assert_eq!(numbers("v2.5, 3,14159"), [(2, Some("5")), (3, Some("14159"))]);
     }
 
@@ -232,9 +232,9 @@ mod tests {
             delay_days,
             source_spans: vec![span.into()],
         };
-        assert!(!values_are_cited(&offer(500, 12, "Prix 12,5 euros, 12 jours")), "5 is not a number of this text");
-        assert!(!values_are_cited(&offer(1250, 5, "Prix 12,5 euros, 12 jours")), "nor a delay");
-        assert!(!values_are_cited(&offer(500, 600, "Prix 600.5 euros, 600 jours")));
-        assert!(values_are_cited(&offer(1250, 12, "Prix 12,5 euros, 12 jours")));
+        assert!(!values_are_cited(&offer(500, 12, "Price 12,5 euros, 12 days")), "5 is not a number of this text");
+        assert!(!values_are_cited(&offer(1250, 5, "Price 12,5 euros, 12 days")), "nor a delay");
+        assert!(!values_are_cited(&offer(500, 600, "Price 600.5 euros, 600 days")));
+        assert!(values_are_cited(&offer(1250, 12, "Price 12,5 euros, 12 days")));
     }
 }

@@ -20,7 +20,7 @@ fn run_demo() {
         println!("> {request}\n< {reply}");
         serde_json::from_str(&reply).unwrap_or(Value::Null)
     };
-    send(json!({"cmd":"open","mission":"Trouver un avocat en droit du travail pour M. Dupont","protected":["M. Dupont"]}));
+    send(json!({"cmd":"open","mission":"Find an employment lawyer for Mr Dupont","protected":["Mr Dupont"]}));
     send(json!({"cmd":"propose_plan"}));
     send(json!({"cmd":"accept_plan"}));
     send(json!({"cmd":"search","template":"lawyer","value":"paris"}));
@@ -28,7 +28,7 @@ fn run_demo() {
     send(json!({"cmd":"read","handle":"h2"}));
     send(json!({"cmd":"compare"}));
     send(json!({"cmd":"confirm_recipient","firm":"cabinet-b"}));
-    send(json!({"cmd":"contact","message":"Bonjour, demande de devis pour un litige prud'homal."}));
+    send(json!({"cmd":"contact","message":"Hello, I would like a quote for an employment dispute."}));
     // No amount: the chosen offer's price, converted with the demo rate.
     let prepared = send(json!({"cmd":"prepare_payment"}));
     send(json!({"cmd":"confirm_payment","digest":prepared["digest"]}));

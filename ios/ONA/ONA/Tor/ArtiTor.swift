@@ -180,7 +180,7 @@ final class ArtiTor: Sendable {
     }
 }
 
-/// A Tor failure: a sentence for the person, and the bridge's technical detail for the "Détails" section.
+/// A Tor failure: a sentence for the person, and the bridge's technical detail for the "Details" section.
 struct TorError: LocalizedError, Sendable {
     let detail: String
 
@@ -189,13 +189,13 @@ struct TorError: LocalizedError, Sendable {
 
     var errorDescription: String? {
         if detail.contains("bootstrap timed out") || detail.hasPrefix("bootstrap") {
-            "Tor n'a pas pu démarrer. Ce réseau bloque peut-être Tor : essayez un autre réseau."
+            "Tor could not start. This network may be blocking Tor: try another network."
         } else if detail.contains("hidden service") || detail.contains("onion") {
-            "Impossible de joindre l'ordinateur par Tor. Vérifiez qu'il est allumé et que ONA y est ouvert."
+            "Cannot reach the computer over Tor. Check that it is on and that ONA is open on it."
         } else if detail.contains("timed out") {
-            "L'ordinateur n'a pas répondu à temps par Tor."
+            "The computer did not answer over Tor in time."
         } else {
-            "Erreur de connexion Tor."
+            "Tor connection error."
         }
     }
 }

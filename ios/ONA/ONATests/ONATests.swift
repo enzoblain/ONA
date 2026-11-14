@@ -3,7 +3,7 @@ import Testing
 @testable import ONA
 
 private let oneNEAR = "1000000000000000000000000"
-/// Payment digest v2 vector from the desktop apps' tests (NOTE-POUR-ENZO §7).
+/// Payment digest v2 vector from the desktop apps' tests (shared protocol vectors).
 let paymentV2Digest = "ee00b991ccc819a4b64630c245ae7e281ef98d74f0eb971b1ff4dd9290957950"
 
 func demoPayment(to: String = "cabinet-b.testnet", amount: String = oneNEAR, screen: String? = nil,
@@ -81,12 +81,12 @@ struct MessageTests {
     @Test func decodesARecipientChoiceWithItsContent() throws {
         let json = Data("""
         {"id":"c-2","kind":"recipient","content":"5127","offers":[{"firm_id":"cabinet-b","specialties":["labour"],
-          "price_cents":60000,"delay_days":10,"source_spans":["Forfait 600 euros, sous 10 jours"]}]}
+          "price_cents":60000,"delay_days":10,"source_spans":["Flat fee 600 euros, within 10 days"]}]}
         """.utf8)
         let pending = try ProtocolCoding.decoder.decode(Pending.self, from: json)
         #expect(pending.content == "5127")
         #expect(pending.request == .recipient([
-            Offer(firmId: "cabinet-b", priceCents: 60000, delayDays: 10, sourceSpans: ["Forfait 600 euros, sous 10 jours"]),
+            Offer(firmId: "cabinet-b", priceCents: 60000, delayDays: 10, sourceSpans: ["Flat fee 600 euros, within 10 days"]),
         ]))
     }
 

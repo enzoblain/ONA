@@ -20,9 +20,9 @@ struct ConfirmationView: View {
                     QueriesConfirmation(queries: queries, model: model, pending: pending)
                 case .unknown(let kind):
                     ContentUnavailableView(
-                        "Confirmation inconnue",
+                        "Unknown confirmation",
                         systemImage: "questionmark.diamond",
-                        description: Text("Type « \(kind) » non pris en charge par cette version de l'app.")
+                        description: Text("Type “\(kind)” is not supported by this version of the app.")
                     )
                 }
             }
@@ -32,13 +32,13 @@ struct ConfirmationView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Plus tard") { dismiss() }
+                    Button("Later") { dismiss() }
                 }
             }
             .overlay {
                 if model.sending { ProgressView().controlSize(.large) }
             }
-            .alert("Action refusée", isPresented: .constant(model.actionError != nil)) {
+            .alert("Action refused", isPresented: .constant(model.actionError != nil)) {
                 Button("OK") { model.clearActionError() }
             } message: {
                 Text(model.actionError ?? "")
@@ -71,7 +71,7 @@ private struct DecisionButtons: View {
             Button(role: .destructive) {
                 Task { await model.reject(pending) }
             } label: {
-                Text("Refuser et arrêter la mission").frame(maxWidth: .infinity)
+                Text("Decline and stop the mission").frame(maxWidth: .infinity)
             }
             .controlSize(.large)
             .disabled(model.sending)
@@ -95,14 +95,14 @@ private struct PlanConfirmation: View {
                     Label("\(index + 1). \(step.label)", systemImage: step.symbol)
                 }
             } header: {
-                Text("Plan proposé")
+                Text("Proposed plan")
             } footer: {
-                Text("Le plan est figé avant toute lecture du web. Les étapes marquées « vous » attendront ce téléphone.")
+                Text("The plan is fixed before anything is read on the web. Steps marked “you” will wait for this phone.")
             }
         }
-        .navigationTitle("Valider le plan")
+        .navigationTitle("Approve the plan")
         .safeAreaInset(edge: .bottom) {
-            DecisionButtons(acceptTitle: "Valider le plan", canAccept: true, model: model, pending: pending) {
+            DecisionButtons(acceptTitle: "Approve the plan", canAccept: true, model: model, pending: pending) {
                 await model.acceptPlan(pending)
             }
         }
@@ -124,14 +124,14 @@ private struct QueriesConfirmation: View {
                     Label(query, systemImage: "magnifyingglass").textSelection(.enabled)
                 }
             } header: {
-                Text("Recherches proposées")
+                Text("Proposed searches")
             } footer: {
-                Text("Elles partiront par Tor vers un moteur de recherche, telles qu'elles sont écrites. Pour les modifier, faites-le sur l'ordinateur.")
+                Text("They will go over Tor to a search engine, exactly as written. To change them, do it on the computer.")
             }
         }
-        .navigationTitle("Valider les recherches")
+        .navigationTitle("Approve the searches")
         .safeAreaInset(edge: .bottom) {
-            DecisionButtons(acceptTitle: "Lancer ces recherches", canAccept: !queries.isEmpty, model: model, pending: pending) {
+            DecisionButtons(acceptTitle: "Run these searches", canAccept: !queries.isEmpty, model: model, pending: pending) {
                 await model.acceptQueries(pending)
             }
         }
@@ -159,15 +159,15 @@ private struct RecipientConfirmation: View {
                     .accessibilityIdentifier("offer-\(offer.firmId)")
                 }
             } header: {
-                Text("Offres trouvées")
+                Text("Offers found")
             } footer: {
-                Text("Seul le cabinet choisi sera contacté. Les extraits cités viennent des pages lues.")
+                Text("Only the chosen firm will be contacted. The quoted excerpts come from the pages read.")
             }
         }
-        .navigationTitle("Choisir le destinataire")
+        .navigationTitle("Choose the recipient")
         .safeAreaInset(edge: .bottom) {
             DecisionButtons(
-                acceptTitle: selected.map { "Choisir \($0)" } ?? "Choisissez une offre",
+                acceptTitle: selected.map { "Choose \($0)" } ?? "Choose an offer",
                 canAccept: selected != nil,
                 model: model,
                 pending: pending
@@ -189,9 +189,9 @@ private struct OfferRow: View {
                 .foregroundStyle(selected ? Color.accentColor : .secondary)
             VStack(alignment: .leading, spacing: 4) {
                 Text(offer.firmId).font(.headline.monospaced())
-                Text("\(Format.euros(cents: offer.priceCents)) · sous \(Format.days(offer.delayDays))")
+                Text("\(Format.euros(cents: offer.priceCents)) · within \(Format.days(offer.delayDays))")
                 ForEach(offer.sourceSpans, id: \.self) { span in
-                    Text("« \(span) »").font(.caption).foregroundStyle(.secondary)
+                    Text("“\(span)”").font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -214,23 +214,23 @@ private struct PaymentConfirmation: View {
             switch check {
             case .success(let verified):
                 Section {
-                    LabeledContent("Montant") {
+                    LabeledContent("Amount") {
                         Text("\(NEARAmount.format(verified.amount)) NEAR").font(.title3.bold())
                     }
-                    LabeledContent("Destinataire") {
+                    LabeledContent("Recipient") {
                         Text(verified.to).font(.body.monospaced())
                     }
-                    Label("Vérifié par ce téléphone", systemImage: "checkmark.seal.fill")
+                    Label("Checked by this phone", systemImage: "checkmark.seal.fill")
                         .foregroundStyle(.green)
                 } header: {
-                    Text("Paiement préparé par l'ordinateur")
+                    Text("Payment prepared by the computer")
                 } footer: {
-                    Text("Ce téléphone a contrôlé que le montant et le destinataire affichés sont bien ceux que l'ordinateur paiera.")
+                    Text("This phone checked that the amount and recipient shown are the ones the computer will pay.")
                 }
                 Section {
-                    DisclosureGroup("Détails techniques") {
+                    DisclosureGroup("Technical details") {
                         Text(request.screen).font(.caption.monospaced())
-                        LabeledContent("Empreinte", value: String(verified.digest.prefix(16)) + "…")
+                        LabeledContent("Digest", value: String(verified.digest.prefix(16)) + "…")
                             .font(.caption.monospaced())
                     }
                 }
@@ -239,16 +239,16 @@ private struct PaymentConfirmation: View {
                     Label(message(for: failure), systemImage: "xmark.octagon.fill")
                         .foregroundStyle(.red)
                 } header: {
-                    Text("Paiement incohérent")
+                    Text("Inconsistent payment")
                 } footer: {
-                    Text("Ce paiement ne peut pas être confirmé. Refusez-le et vérifiez l'ordinateur.")
+                    Text("This payment cannot be confirmed. Decline it and check the computer.")
                 }
             }
         }
-        .navigationTitle("Confirmer le paiement")
+        .navigationTitle("Confirm the payment")
         .safeAreaInset(edge: .bottom) {
             DecisionButtons(
-                acceptTitle: "Confirmer le paiement",
+                acceptTitle: "Confirm the payment",
                 canAccept: (try? check.get()) != nil,
                 model: model,
                 pending: pending
@@ -262,12 +262,12 @@ private struct PaymentConfirmation: View {
 
     private func message(for failure: PaymentCheck.Failure) -> String {
         switch failure {
-        case .unsupportedVersion: "Version de paiement inconnue : mettez ONA à jour des deux côtés"
-        case .missingField: "Le paiement est incomplet"
-        case .badAccount: "Le destinataire n'a pas la forme d'un compte NEAR"
-        case .badAmount: "Montant illisible"
-        case .digestMismatch: "L'empreinte ne correspond pas au paiement"
-        case .screenMismatch: "Le texte affiché ne correspond pas au paiement"
+        case .unsupportedVersion: "Unknown payment version: update ONA on both devices"
+        case .missingField: "The payment is incomplete"
+        case .badAccount: "The recipient is not a valid NEAR account"
+        case .badAmount: "Unreadable amount"
+        case .digestMismatch: "The digest does not match the payment"
+        case .screenMismatch: "The text shown does not match the payment"
         }
     }
 }

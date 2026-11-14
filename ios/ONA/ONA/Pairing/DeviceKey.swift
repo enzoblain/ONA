@@ -29,9 +29,9 @@ enum DeviceKeyError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .secureEnclaveUnavailable: "Cet appareil n'a pas de Secure Enclave utilisable."
-        case .accessControl: "Impossible de protéger la clé par Face ID ou le code."
-        case .unreadableKey: "La clé de cet appareil est illisible : refaites l'appairage."
+        case .secureEnclaveUnavailable: "This device has no usable Secure Enclave."
+        case .accessControl: "Could not protect the key with Face ID or the passcode."
+        case .unreadableKey: "This device's key cannot be read: pair again."
         }
     }
 }

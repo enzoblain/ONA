@@ -9,16 +9,16 @@ struct QueriesEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Ces recherches partiront sur le web, via Tor, telles qu'écrites ici. Modifiez-les ou videz-en une pour la retirer.")
+            Text("These searches will go to the web, through Tor, exactly as written here. Edit them, or empty one to remove it.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             if editable {
                 ForEach(edited.indices, id: \.self) { index in
-                    TextField("Recherche \(index + 1)", text: $edited[index])
+                    TextField("Search \(index + 1)", text: $edited[index])
                         .textFieldStyle(.roundedBorder)
                 }
             } else {
-                Text(queries.map { "« \($0) »" }.joined(separator: "\n")).textSelection(.enabled)
+                Text(queries.map { "“\($0)”" }.joined(separator: "\n")).textSelection(.enabled)
             }
         }
         .onAppear { if edited.isEmpty { edited = queries } }
@@ -35,11 +35,11 @@ struct AnswerCard: View {
             Text(answer.answer).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             if !answer.notes.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Ce que disent les pages").font(.subheadline.weight(.semibold))
+                    Text("What the pages say").font(.subheadline.weight(.semibold))
                     ForEach(Array(answer.notes.enumerated()), id: \.offset) { _, note in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(note.claim)
-                            Text("« \(note.quote) » — \(sourceName(note.source))")
+                            Text("“\(note.quote)” — \(sourceName(note.source))")
                                 .font(.callout).italic().foregroundStyle(.secondary)
                         }
                         .textSelection(.enabled)
@@ -58,7 +58,7 @@ struct AnswerCard: View {
                         }
                         .textSelection(.enabled)
                     }
-                    Text("Adresses à copier : elles ne s'ouvrent pas d'un clic.").font(.caption).foregroundStyle(.secondary)
+                    Text("Addresses to copy: they do not open on a click.").font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -91,7 +91,7 @@ struct ActionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label(isMessage ? "Message suggéré" : "Paiement suggéré", systemImage: isMessage ? "envelope" : "creditcard")
+            Label(isMessage ? "Suggested message" : "Suggested payment", systemImage: isMessage ? "envelope" : "creditcard")
                 .font(.headline)
             Text(action.purpose).foregroundStyle(.secondary)
             switch action.kind {
@@ -101,24 +101,24 @@ struct ActionCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.fill.quaternary, in: .rect(cornerRadius: 12))
             case .payment(let amount):
-                LabeledContent("Montant", value: (NEARAmount.text(amount) ?? amount) + " NEAR")
+                LabeledContent("Amount", value: (NEARAmount.text(amount) ?? amount) + " NEAR")
             }
             if done {
-                Label(isMessage ? "Remis à votre messagerie" : "Payé", systemImage: "checkmark.circle.fill")
+                Label(isMessage ? "Handed to your mail app" : "Paid", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
             } else if let prepared {
                 exact(prepared)
             } else {
                 HStack {
-                    TextField(isMessage ? "Adresse e-mail du destinataire" : "Compte NEAR du destinataire (nom.testnet)",
+                    TextField(isMessage ? "Recipient email address" : "Recipient NEAR account (name.testnet)",
                               text: $recipient)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(prepare)
-                    Button("Préparer", action: prepare)
+                    Button("Prepare", action: prepare)
                         .buttonStyle(.glass)
                         .disabled(recipient.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
-                Text("Le destinataire vient de vous, jamais de l'agent. Sur cet ordinateur seulement.")
+                Text("The recipient comes from you, never from the agent. On this computer only.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -131,22 +131,22 @@ struct ActionCard: View {
     private func exact(_ prepared: PreparedAction) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Divider()
-            Text("Action exacte").font(.subheadline.weight(.semibold))
-            LabeledContent("Destinataire", value: prepared.to)
+            Text("Exact action").font(.subheadline.weight(.semibold))
+            LabeledContent("Recipient", value: prepared.to)
             if prepared.kind == "payment" {
-                LabeledContent("Montant", value: (NEARAmount.text(prepared.content) ?? prepared.content) + " NEAR")
+                LabeledContent("Amount", value: (NEARAmount.text(prepared.content) ?? prepared.content) + " NEAR")
             } else {
                 Text(prepared.content).textSelection(.enabled).foregroundStyle(.secondary)
             }
             if prepared.seenInPages {
-                Label("Cette adresse figure dans une page lue : vérifiez qu'elle est bien la bonne.",
+                Label("This address appears in a page that was read: check that it is the right one.",
                       systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
             }
             HStack {
-                Button(prepared.kind == "payment" ? "Payer" : "Envoyer depuis ma messagerie") { carryOut(prepared) }
+                Button(prepared.kind == "payment" ? "Pay" : "Send from my mail app") { carryOut(prepared) }
                     .buttonStyle(.glassProminent)
-                Button("Modifier") { self.prepared = nil }
+                Button("Edit") { self.prepared = nil }
                     .buttonStyle(.glass)
             }
         }
@@ -163,7 +163,7 @@ struct ActionCard: View {
         switch engine.doAction(chat: chat.id, item: itemID, digest: prepared.digest) {
         case .success(.message(let mailto)):
             // The person's own mail program: the person sends the message from there.
-            if !NSWorkspace.shared.open(mailto) { error = "Aucune messagerie n'a pu ouvrir le message." }
+            if !NSWorkspace.shared.open(mailto) { error = "No mail app could open the message." }
         case .success(.payment):
             break
         case .failure(let failure):

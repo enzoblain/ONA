@@ -96,10 +96,10 @@
 				LastUpgradeCheck = 2700;
 			};
 			buildConfigurationList = DD0000000000000000000800 /* Build configuration list for PBXProject "ONADesktop" */;
-			developmentRegion = fr;
+			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
-				fr,
+				en,
 				Base,
 			);
 			mainGroup = DD0000000000000000000500;

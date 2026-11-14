@@ -525,96 +525,96 @@ mod tests {
     #[test]
     fn every_occurrence_is_replaced_whatever_the_case_and_comes_back() {
         let t = table(&["Dupont", "ACME"]);
-        let (sent, n) = t.apply("M. Dupont, licencié par acme. DUPONT conteste.");
+        let (sent, n) = t.apply("Mr Dupont, dismissed by acme. DUPONT disputes it.");
         assert_eq!(n, 3);
         assert!(!sent.to_lowercase().contains("dupont") && !sent.to_lowercase().contains("acme"), "{sent}");
-        assert_eq!(t.restore(&sent), "M. Dupont, licencié par ACME. Dupont conteste.");
+        assert_eq!(t.restore(&sent), "Mr Dupont, dismissed by ACME. Dupont disputes it.");
     }
 
     #[test]
     fn a_decomposed_accent_is_still_the_term() {
-        hidden("Élodie", "Pour E\u{301}lodie.");
+        hidden("Élodie", "For E\u{301}lodie.");
     }
 
     #[test]
     fn a_soft_hyphen_inside_the_term_does_not_hide_it() {
-        hidden("Dupont", "M. Du\u{AD}pont");
+        hidden("Dupont", "Mr Du\u{AD}pont");
     }
 
     #[test]
     fn a_zero_width_space_inside_the_term_does_not_hide_it() {
-        hidden("Dupont", "M. Du\u{200B}pont");
-        hidden("Dupont", "M. Du\u{200D}pont");
+        hidden("Dupont", "Mr Du\u{200B}pont");
+        hidden("Dupont", "Mr Du\u{200D}pont");
     }
 
     #[test]
     fn full_width_letters_are_the_term() {
-        hidden("Dupont", "M. \u{FF24}\u{FF55}\u{FF50}\u{FF4F}\u{FF4E}\u{FF54}");
+        hidden("Dupont", "Mr \u{FF24}\u{FF55}\u{FF50}\u{FF4F}\u{FF4E}\u{FF54}");
     }
 
     #[test]
     fn a_word_cut_at_the_end_of_a_line_is_joined() {
-        hidden("Dupont", "M. Du-\npont");
-        hidden("Dupont", "M. Du-\r\n   pont");
+        hidden("Dupont", "Mr Du-\npont");
+        hidden("Dupont", "Mr Du-\r\n   pont");
     }
 
     #[test]
     fn a_hyphenated_term_cut_at_its_hyphen_still_matches() {
-        hidden("Jean-Luc", "M. Jean-\nLuc");
-        hidden("Jean-Luc", "M. Jean-Luc");
+        hidden("Jean-Luc", "Mr Jean-\nLuc");
+        hidden("Jean-Luc", "Mr Jean-Luc");
     }
 
     #[test]
     fn every_dash_is_a_hyphen() {
         for dash in ['\u{2011}', '\u{2013}', '\u{2212}', '\u{2010}', '\u{2014}'] {
-            hidden("Jean-Luc", &format!("M. Jean{dash}Luc"));
+            hidden("Jean-Luc", &format!("Mr Jean{dash}Luc"));
         }
-        hidden("Dupont", "M. Du\u{2011}\npont");
+        hidden("Dupont", "Mr Du\u{2011}\npont");
     }
 
     #[test]
     fn an_html_character_reference_is_decoded() {
-        hidden("Dupont", "M. Du&#112;ont");
-        hidden("Dupont", "M. Du&#x70;ont");
+        hidden("Dupont", "Mr Du&#112;ont");
+        hidden("Dupont", "Mr Du&#x70;ont");
     }
 
     #[test]
     fn a_numeric_reference_without_semicolon_is_decoded() {
-        hidden("Dupont", "M. Du&#112ont");
+        hidden("Dupont", "Mr Du&#112ont");
     }
 
     #[test]
     fn named_references_of_letters_are_decoded() {
-        hidden("François", "M. Fran&ccedil;ois");
-        hidden("Élodie", "Mme &Eacute;lodie");
-        hidden("Łukasz", "M. &Lstrok;ukasz");
-        hidden("François", "M. Fran&ccedilois");
+        hidden("François", "Mr Fran&ccedil;ois");
+        hidden("Élodie", "Ms &Eacute;lodie");
+        hidden("Łukasz", "Mr &Lstrok;ukasz");
+        hidden("François", "Mr Fran&ccedilois");
     }
 
     #[test]
     fn a_url_escape_is_decoded() {
-        hidden("Dupont", "/avocat?nom=Du%70ont");
+        hidden("Dupont", "/lawyer?name=Du%70ont");
     }
 
     #[test]
     fn an_invalid_byte_does_not_stop_url_decoding() {
-        hidden("Dupont", "/avocat?nom=%44%75%70%6F%6E%74%FF");
-        hidden("Dupont", "/avocat?nom=%FF%44%75%70%6F%6E%74");
+        hidden("Dupont", "/lawyer?name=%44%75%70%6F%6E%74%FF");
+        hidden("Dupont", "/lawyer?name=%FF%44%75%70%6F%6E%74");
     }
 
     #[test]
     fn typographic_apostrophes_are_the_apostrophe() {
-        for text in ["M. O\u{2019}Brien", "M. O&#8217;Brien", "M. O&rsquo;Brien", "M. O\u{2018}Brien", "M. O\u{02BC}Brien", "M. O\u{FF07}Brien"] {
+        for text in ["Mr O\u{2019}Brien", "Mr O&#8217;Brien", "Mr O&rsquo;Brien", "Mr O\u{2018}Brien", "Mr O\u{02BC}Brien", "Mr O\u{FF07}Brien"] {
             hidden("O'Brien", text);
         }
     }
 
     #[test]
     fn line_separators_and_musical_format_characters_are_invisible() {
-        hidden("Dupont", "M. Du\u{2028}pont");
-        hidden("Dupont", "M. Du\u{2029}pont");
-        hidden("Dupont", "M. Du\u{1D173}pont");
-        hidden("Dupont", "M. Du\u{1D17A}pont");
+        hidden("Dupont", "Mr Du\u{2028}pont");
+        hidden("Dupont", "Mr Du\u{2029}pont");
+        hidden("Dupont", "Mr Du\u{1D173}pont");
+        hidden("Dupont", "Mr Du\u{1D17A}pont");
     }
 
     #[test]
@@ -648,7 +648,7 @@ mod tests {
     fn the_longest_latin1_name_is_decoded_even_before_a_later_semicolon() {
         hidden("François", "Fran&ccedilois;");
         hidden("Élodie", "&Eacutelodie;");
-        hidden("Élodie", "Pour &Eacutelodie");
+        hidden("Élodie", "For &Eacutelodie");
         hidden("Šimon", "&Scaron;imon");
         hidden("Œdipe", "&OElig;dipe");
         hidden("Đoković", "&Dstrok;okovi&cacute;");
@@ -703,12 +703,12 @@ mod tests {
     #[test]
     fn only_whole_words_unless_declared_as_a_substring() {
         let t = table(&["Ali"]);
-        assert_eq!(t.apply("Un alibi pour Ali.").1, 1);
-        assert!(t.apply("Un alibi pour Ali.").0.starts_with("Un alibi pour "));
-        assert!(!contains_protected("Un alibi", &strings(&["Ali"])));
+        assert_eq!(t.apply("An alibi for Ali.").1, 1);
+        assert!(t.apply("An alibi for Ali.").0.starts_with("An alibi for "));
+        assert!(!contains_protected("An alibi", &strings(&["Ali"])));
         let t = table(&["*ali*"]);
-        assert_eq!(t.apply("Un alibi pour Ali.").1, 2);
-        assert!(contains_protected("Un alibi", &strings(&["*ali*"])));
+        assert_eq!(t.apply("An alibi for Ali.").1, 2);
+        assert!(contains_protected("An alibi", &strings(&["*ali*"])));
     }
 
     #[test]

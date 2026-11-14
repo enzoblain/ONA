@@ -1,6 +1,6 @@
 import Foundation
 
-// The pool portfolio, read only (docs/ios/protocol-draft.md, « Pool »). The same JSON as ona-core's `pool_portfolio`
+// The pool portfolio, read only (docs/ios/protocol-draft.md, "Pool"). The same JSON as ona-core's `pool_portfolio`
 // (docs/desktop/pool-commands.md). Amounts are yoctoNEAR in decimal strings. Deposits, placements and exits are
 // confirmed on the computer, never on the phone.
 

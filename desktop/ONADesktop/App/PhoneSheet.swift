@@ -19,11 +19,11 @@ struct PhoneSheet: View {
         }
         .padding(28)
         .frame(width: 460)
-        .alert("Oublier ce téléphone ?", isPresented: $confirmingForget) {
-            Button("Annuler", role: .cancel) {}
-            Button("Oublier", role: .destructive) { model.pairing.forgetPhone() }
+        .alert("Forget this phone?", isPresented: $confirmingForget) {
+            Button("Cancel", role: .cancel) {}
+            Button("Forget", role: .destructive) { model.pairing.forgetPhone() }
         } message: {
-            Text("Il ne pourra plus rien demander ni confirmer à cet ordinateur. Un nouveau code d'appairage sera créé.")
+            Text("It will no longer be able to ask or confirm anything on this computer. A new pairing code will be created.")
         }
     }
 
@@ -31,8 +31,8 @@ struct PhoneSheet: View {
 
     @ViewBuilder
     private var pairing: some View {
-        Text("Appairer un téléphone").font(.title2.weight(.semibold))
-        Text("Dans l'app ONA du téléphone, scannez ce code. Il ne sert qu'une fois.")
+        Text("Pair a phone").font(.title2.weight(.semibold))
+        Text("Scan this code in the ONA app on the phone. It works only once.")
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
         if let payload = model.pairingPayload, let image = QRCode.image(payload) {
@@ -51,7 +51,7 @@ struct PhoneSheet: View {
             }
             #if DEBUG
             // Debug builds only (the simulator has no camera): the general pasteboard is readable by every app.
-            Button("Copier le texte du code") {
+            Button("Copy the code as text") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(payload, forType: .string)
             }
@@ -61,7 +61,7 @@ struct PhoneSheet: View {
             waitingForAddress
         }
         if DesktopModel.ConnectionMode.available.count > 1 {
-            Picker("Connexion", selection: $model.mode) {
+            Picker("Connection", selection: $model.mode) {
                 ForEach(DesktopModel.ConnectionMode.available) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented)
@@ -77,17 +77,17 @@ struct PhoneSheet: View {
         VStack(spacing: 10) {
             switch (model.mode, model.tor.state) {
             case (.tor, .missing):
-                Label("Tor n'est pas installé sur ce Mac.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
-                Text("Installez-le avec Homebrew : brew install tor").font(.callout.monospaced()).textSelection(.enabled)
-                Button("Réessayer") { model.startServing() }
+                Label("Tor is not installed on this Mac.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                Text("Install it with Homebrew: brew install tor").font(.callout.monospaced()).textSelection(.enabled)
+                Button("Try again") { model.startServing() }
             case (.tor, .failed(let message)):
-                Label("Tor : \(message)", systemImage: "exclamationmark.triangle").foregroundStyle(.red)
-                Button("Réessayer") { model.startServing() }
+                Label("Tor: \(message)", systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+                Button("Try again") { model.startServing() }
             case (.tor, _):
                 ProgressView()
-                Text("Publication de l'adresse .onion…").foregroundStyle(.secondary)
+                Text("Publishing the .onion address…").foregroundStyle(.secondary)
             case (.localNetwork, _):
-                Label("Pas d'adresse sur le réseau local.", systemImage: "wifi.slash").foregroundStyle(.orange)
+                Label("No address on the local network.", systemImage: "wifi.slash").foregroundStyle(.orange)
             }
         }
         .frame(width: 284, height: 284)
@@ -96,17 +96,17 @@ struct PhoneSheet: View {
     private func verification(_ awaiting: PairingAuthority.Awaiting) -> some View {
         VStack(spacing: 18) {
             Image(systemName: "checkmark.shield").font(.system(size: 48)).foregroundStyle(.tint)
-            Text("Vérifiez le code").font(.title2.weight(.semibold))
-            Text("Le téléphone doit afficher le même code :").foregroundStyle(.secondary)
+            Text("Check the code").font(.title2.weight(.semibold))
+            Text("The phone must show the same code:").foregroundStyle(.secondary)
             Text("\(awaiting.code.prefix(3)) \(awaiting.code.suffix(3))")
                 .font(.system(size: 46, weight: .semibold, design: .monospaced))
-            Text("Si les codes diffèrent, ou si le téléphone n'affiche aucun code, quelqu'un s'est peut-être interposé : refusez. Ce code expire au bout de 5 minutes.")
+            Text("If the codes differ, or if the phone shows no code, someone may have stepped in between: refuse. This code expires after 5 minutes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Button("Refuser", role: .destructive) { model.pairing.forgetPhone() }
+                Button("Refuse", role: .destructive) { model.pairing.forgetPhone() }
                     .buttonStyle(.glass)
-                Button("Les codes sont identiques") {
+                Button("The codes match") {
                     if model.pairing.confirmCode() { dismiss() }
                 }
                 .buttonStyle(.glassProminent)
@@ -118,12 +118,12 @@ struct PhoneSheet: View {
     private func paired(_ phone: PairingRecord.PairedPhone) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "iphone.gen3.circle.fill").font(.system(size: 48)).foregroundStyle(.green)
-            Text("Téléphone appairé").font(.title2.weight(.semibold))
+            Text("Phone paired").font(.title2.weight(.semibold))
             Form {
-                LabeledContent("Appairé le", value: phone.pairedAt.formatted(date: .abbreviated, time: .shortened))
-                LabeledContent("Connexion", value: model.mode.label)
+                LabeledContent("Paired on", value: phone.pairedAt.formatted(date: .abbreviated, time: .shortened))
+                LabeledContent("Connection", value: model.mode.label)
                 if let contact = model.lastPhoneContact {
-                    LabeledContent("Dernier contact", value: contact.formatted(.relative(presentation: .named)))
+                    LabeledContent("Last contact", value: contact.formatted(.relative(presentation: .named)))
                 }
             }
             .formStyle(.grouped)
@@ -132,7 +132,7 @@ struct PhoneSheet: View {
                 Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red).font(.caption)
             }
             HStack {
-                Button("Oublier ce téléphone", role: .destructive) { confirmingForget = true }
+                Button("Forget this phone", role: .destructive) { confirmingForget = true }
                     .buttonStyle(.glass)
                 Spacer()
                 Button("OK") { dismiss() }
@@ -145,7 +145,7 @@ struct PhoneSheet: View {
     private var footer: some View {
         HStack {
             Spacer()
-            Button("Fermer") { dismiss() }
+            Button("Close") { dismiss() }
                 .keyboardShortcut(.cancelAction)
         }
     }
@@ -171,26 +171,26 @@ struct SettingsView: View {
     var body: some View {
         Form {
             if DesktopModel.ConnectionMode.available.count > 1 {
-                Picker("Le téléphone joint ce Mac", selection: $model.mode) {
+                Picker("The phone reaches this Mac", selection: $model.mode) {
                     ForEach(DesktopModel.ConnectionMode.available) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.radioGroup)
             }
             Text(model.mode == .tor
-                 ? "Le serveur écoute seulement sur cet ordinateur (127.0.0.1) et est publié en service .onion par Tor."
-                 : "Version de développement : le serveur écoute sur le réseau local, en clair. Tout appareil de ce réseau voit les échanges.")
+                 ? "The server listens on this computer only (127.0.0.1) and is published as a .onion service by Tor."
+                 : "Development build: the server listens on the local network, unencrypted. Any device on this network sees the traffic.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             LabeledContent("Tor") { TorStatusLabel(state: model.tor.state) }
             if let address = model.reachableAt {
-                LabeledContent("Adresse") { Text(address).font(.caption.monospaced()).textSelection(.enabled) }
+                LabeledContent("Address") { Text(address).font(.caption.monospaced()).textSelection(.enabled) }
             }
             if let request = model.lastPhoneRequest {
-                LabeledContent("Dernière requête du téléphone") { Text(request).font(.caption.monospaced()) }
+                LabeledContent("Last request from the phone") { Text(request).font(.caption.monospaced()) }
             }
             if RealModel.relayOnion() != nil, let line = try? TorService.relayClientAuth() {
-                LabeledContent("Clé pour le relais") { Text(line).font(.caption.monospaced()).textSelection(.enabled) }
-                Text("Si le relais .onion est réservé à des clients nommés, donnez cette ligne à la personne qui le fait tourner.")
+                LabeledContent("Key for the relay") { Text(line).font(.caption.monospaced()).textSelection(.enabled) }
+                Text("If the .onion relay is limited to named clients, give this line to the person who runs it.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

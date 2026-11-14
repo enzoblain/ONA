@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// "Réglages" tab: the paired computer, what the phone keeps, and the app version. Tor settings live in the Tor tab.
+/// "Settings" tab: the paired computer, what the phone keeps, and the app version. Tor settings live in the Tor tab.
 struct SettingsView: View {
     let model: RemoteModel
     @State private var confirmingUnpair = false
@@ -10,38 +10,38 @@ struct SettingsView: View {
             Form {
                 computerSection
                 Section {
-                    Text("Ce téléphone garde l'appairage (nom et adresse de l'ordinateur, sa clé publique, la clé de ce téléphone, le jeton de lecture et le compteur des demandes) et, si Tor sert, les données du réseau Tor (voir l'onglet Tor). Rien n'est sauvegardé dans iCloud.")
+                    Text("This phone keeps the pairing (the computer's name and address, its public key, this phone's key, the read token and the request counter) and, if Tor is used, the Tor network data (see the Tor tab). Nothing is backed up to iCloud.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } header: {
-                    Text("Données sur ce téléphone")
+                    Text("Data on this phone")
                 }
                 Section {
                     Label {
-                        Text("Un ordinateur compromis peut faire ce qu'il veut : ce téléphone confirme les actions, il ne peut pas surveiller l'ordinateur.")
+                        Text("A compromised computer can do whatever it wants: this phone confirms actions, it cannot monitor the computer.")
                     } icon: {
                         Image(systemName: "desktopcomputer.trianglebadge.exclamationmark")
                     }
                     Label {
-                        Text("Un téléphone volé et déverrouillé peut lire les conversations. Chaque action (message, confirmation, paiement) demande encore Face ID ou le code de l'appareil.")
+                        Text("A stolen, unlocked phone can read the conversations. Each action (message, confirmation, payment) still requires Face ID or the device passcode.")
                     } icon: {
                         Image(systemName: "iphone.slash")
                     }
                 } header: {
-                    Text("Limites")
+                    Text("Limits")
                 }
                 .font(.callout)
                 Section {
                     LabeledContent("Version", value: Self.appVersion)
                 } header: {
-                    Text("À propos")
+                    Text("About")
                 }
             }
-            .navigationTitle("Réglages")
-            .confirmationDialog("Oublier cet ordinateur ?", isPresented: $confirmingUnpair, titleVisibility: .visible) {
-                Button("Oublier", role: .destructive) { model.unpair() }
+            .navigationTitle("Settings")
+            .confirmationDialog("Forget this computer?", isPresented: $confirmingUnpair, titleVisibility: .visible) {
+                Button("Forget", role: .destructive) { model.unpair() }
             } message: {
-                Text("La clé de ce téléphone sera effacée. Pour l'utiliser à nouveau, il faudra rescanner le code de l'ordinateur.")
+                Text("This phone's key will be erased. To use it again, you will need to rescan the computer's code.")
             }
         }
     }
@@ -50,25 +50,25 @@ struct SettingsView: View {
     private var computerSection: some View {
         if let pairing = model.pairing {
             Section {
-                LabeledContent("Nom", value: pairing.name)
-                LabeledContent("Connexion", value: pairing.onion != nil ? "Par Tor" : "Réseau local")
-                LabeledContent("Appairé le", value: pairing.pairedAt.formatted(date: .abbreviated, time: .shortened))
-                LabeledContent("Protection de la clé") {
+                LabeledContent("Name", value: pairing.name)
+                LabeledContent("Connection", value: pairing.onion != nil ? "Over Tor" : "Local network")
+                LabeledContent("Paired on", value: pairing.pairedAt.formatted(date: .abbreviated, time: .shortened))
+                LabeledContent("Key protection") {
                     switch pairing.keyKind {
                     case .secureEnclave: Text("Secure Enclave · Face ID")
-                    case .software: Text("Logicielle (simulateur)").foregroundStyle(.orange)
+                    case .software: Text("Software (simulator)").foregroundStyle(.orange)
                     }
                 }
-                Button("Oublier cet ordinateur", role: .destructive) { confirmingUnpair = true }
+                Button("Forget this computer", role: .destructive) { confirmingUnpair = true }
             } header: {
-                Text("Ordinateur appairé")
+                Text("Paired computer")
             }
         } else {
             Section {
-                Text("Aucun ordinateur appairé. Ouvrez l'onglet Accueil pour scanner le code affiché par l'ordinateur.")
+                Text("No paired computer. Open the Home tab to scan the code shown by the computer.")
                     .foregroundStyle(.secondary)
             } header: {
-                Text("Ordinateur")
+                Text("Computer")
             }
         }
     }

@@ -24,7 +24,7 @@ struct ContentView: View {
                 Button {
                     selection = .newChat
                 } label: {
-                    Label("Nouvelle conversation", systemImage: "square.and.pencil")
+                    Label("New conversation", systemImage: "square.and.pencil")
                 }
                 .keyboardShortcut("n")
             }
@@ -34,7 +34,7 @@ struct ContentView: View {
                 } label: {
                     Label("Pool", systemImage: "building.columns")
                 }
-                .help("Le pool : portefeuille et opérations, confirmées sur ce Mac")
+                .help("The pool: holdings and operations, confirmed on this Mac")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -42,7 +42,7 @@ struct ContentView: View {
                 } label: {
                     Label(phoneLabel, systemImage: phoneSymbol)
                 }
-                .help("Appairer ou gérer le téléphone")
+                .help("Pair or manage the phone")
             }
         }
         .sheet(isPresented: $showingPhone) {
@@ -55,16 +55,16 @@ struct ContentView: View {
         .onChange(of: model.pairing.awaiting) { _, awaiting in
             if awaiting != nil { showingPhone = true }
         }
-        .alert("Supprimer la conversation ?", isPresented: Binding(
+        .alert("Delete the conversation?", isPresented: Binding(
             get: { chatToDelete != nil }, set: { if !$0 { chatToDelete = nil } }
         ), presenting: chatToDelete) { chat in
-            Button("Annuler", role: .cancel) {}
-            Button("Supprimer", role: .destructive) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
                 _ = model.engine.delete(chat.id)
                 if selection == .chat(chat.id) { selection = .newChat }
             }
         } message: { chat in
-            Text("« \(chat.title) » sera supprimée de cet ordinateur.")
+            Text("“\(chat.title)” will be deleted from this computer.")
         }
     }
 
@@ -75,11 +75,11 @@ struct ContentView: View {
                     ChatRow(chat: chat)
                         .tag(Selection.chat(chat.id))
                         .contextMenu {
-                            Button("Supprimer", systemImage: "trash", role: .destructive) { chatToDelete = chat }
+                            Button("Delete", systemImage: "trash", role: .destructive) { chatToDelete = chat }
                         }
                 }
                 if model.engine.chats.isEmpty {
-                    Text("Aucune conversation").foregroundStyle(.secondary)
+                    Text("No conversations").foregroundStyle(.secondary)
                 }
             }
         }
@@ -103,8 +103,8 @@ struct ContentView: View {
     }
 
     private var phoneLabel: String {
-        if model.pairing.awaiting != nil { return "Code à vérifier" }
-        return model.pairing.isPaired ? "Téléphone appairé" : "Appairer un téléphone"
+        if model.pairing.awaiting != nil { return "Code to check" }
+        return model.pairing.isPaired ? "Phone paired" : "Pair a phone"
     }
 
     private var phoneSymbol: String {
@@ -122,10 +122,10 @@ private struct ChatRow: View {
                 switch chat.status {
                 case .waiting:
                     Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-                    Text("Confirmation demandée").foregroundStyle(.orange)
+                    Text("Confirmation needed").foregroundStyle(.orange)
                 case .working:
                     ProgressView().controlSize(.mini)
-                    Text("L'agent travaille…").foregroundStyle(.secondary)
+                    Text("The agent is working…").foregroundStyle(.secondary)
                 case .idle:
                     Text(chat.preview).foregroundStyle(.secondary)
                 }
@@ -143,13 +143,13 @@ private struct StatusFooter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(model.pairing.isPaired ? "Téléphone appairé" : "Aucun téléphone",
+            Label(model.pairing.isPaired ? "Phone paired" : "No phone",
                   systemImage: model.pairing.isPaired ? "iphone.gen3" : "iphone.gen3.slash")
                 .foregroundStyle(model.pairing.isPaired ? .primary : .secondary)
             if model.mode == .tor {
                 TorStatusLabel(state: model.tor.state)
             } else {
-                Label("Réseau local (tests)", systemImage: "wifi").foregroundStyle(.orange)
+                Label("Local network (testing)", systemImage: "wifi").foregroundStyle(.orange)
             }
             if let error = model.serverError {
                 Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
@@ -169,11 +169,11 @@ struct TorStatusLabel: View {
 
     var body: some View {
         switch state {
-        case .off: Label("Tor arrêté", systemImage: "pause.circle").foregroundStyle(.secondary)
-        case .missing: Label("Tor n'est pas installé", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
-        case .starting: Label("Tor démarre…", systemImage: "arrow.triangle.2.circlepath").foregroundStyle(.secondary)
-        case .published: Label("Joignable par Tor", systemImage: "lock.shield.fill").foregroundStyle(.green)
-        case .failed(let message): Label("Tor : \(message)", systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+        case .off: Label("Tor stopped", systemImage: "pause.circle").foregroundStyle(.secondary)
+        case .missing: Label("Tor is not installed", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+        case .starting: Label("Tor is starting…", systemImage: "arrow.triangle.2.circlepath").foregroundStyle(.secondary)
+        case .published: Label("Reachable through Tor", systemImage: "lock.shield.fill").foregroundStyle(.green)
+        case .failed(let message): Label("Tor: \(message)", systemImage: "exclamationmark.triangle").foregroundStyle(.red)
         }
     }
 }

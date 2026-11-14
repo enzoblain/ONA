@@ -37,7 +37,7 @@ class Client:
 
 class HTTPFlow(unittest.TestCase):
     def setUp(self):
-        self.pairing = proto.Pairing("Ordinateur simulé", "http://127.0.0.1:0")
+        self.pairing = proto.Pairing("Simulated computer", "http://127.0.0.1:0")
         self.computer = mc.Computer(step_seconds=3600, pairing=self.pairing)  # steps run by hand
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), mc.make_handler(self.computer))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -108,7 +108,7 @@ class HTTPFlow(unittest.TestCase):
         self.assertEqual(self.client.post("/v1/chats/list", {"token": "x"}), (403, {"ok": False, "error": "not paired",
                                                                                     "mode": "mock"}))
         self.pair_over_http()
-        chat_id = self.new_chat("Trouve-moi un avocat")
+        chat_id = self.new_chat("Find me a lawyer")
         self.assertTrue(chat_id.startswith("chat-") and len(chat_id) == 37)
 
         plan = self.pending(chat_id)
@@ -143,14 +143,14 @@ class HTTPFlow(unittest.TestCase):
 
     def test_a_confirmation_over_something_else_is_refused(self):
         self.pair_over_http()
-        chat_id = self.new_chat("Trouve-moi un avocat")
+        chat_id = self.new_chat("Find me a lawyer")
         plan = self.pending(chat_id)
         status, reply = self.confirm(plan, content=proto.plan_digest(plan["id"], ["search"]))
         self.assertEqual((status, reply["error"]), (409, "signature does not verify"))
 
     def test_reject_stops_the_mission(self):
         self.pair_over_http()
-        chat_id = self.new_chat("Trouve-moi un avocat")
+        chat_id = self.new_chat("Find me a lawyer")
         self.assertEqual(self.confirm(self.pending(chat_id), decision="reject")[0], 200)
         chat = self.view(chat_id)
         self.assertEqual(chat["items"][-1]["kind"], "exposure")
@@ -175,10 +175,10 @@ class HTTPFlow(unittest.TestCase):
 
     def test_message_during_a_mission_gets_a_holding_reply(self):
         self.pair_over_http()
-        chat_id = self.new_chat("Trouve-moi un avocat")
-        body = self.phone.write(lambda pid, c: proto.chat_message(pid, c, chat_id, "Et vite"), text="Et vite")
+        chat_id = self.new_chat("Find me a lawyer")
+        body = self.phone.write(lambda pid, c: proto.chat_message(pid, c, chat_id, "And quickly"), text="And quickly")
         self.assertEqual(self.client.post(f"/v1/chats/{chat_id}/messages", body)[0], 200)
-        self.assertTrue(self.view(chat_id)["items"][-1]["text"].startswith("Je suis encore sur la mission"))
+        self.assertTrue(self.view(chat_id)["items"][-1]["text"].startswith("I am still on the current mission"))
 
     def test_get_and_v0_are_not_served(self):
         status, reply = self.client.post("/v0/chats", {})

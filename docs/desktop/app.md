@@ -1,87 +1,85 @@
-# App bureau macOS (SwiftUI) — document interne
+# macOS desktop app (SwiftUI)
 
-Créée le 2026-11-10 sur la branche `desktop-app`. **Changement d'architecture à valider par l'équipe** : le README
-prévoyait une app bureau Tauri + JavaScript. Protocole téléphone passé en version 1 le 2026-11-11 (correctifs de
-sécurité, voir `docs/ios/protocol-draft.md`).
+Created on 2026-11-10 on the `desktop-app` branch. Phone protocol moved to version 1 on 2026-11-11 (security fixes, see
+`docs/ios/protocol-draft.md`).
 
-## Ce qui existe
+## What exists
 
-| Chemin | Rôle |
+| Path | Role |
 |---|---|
-| `desktop/OnaCoreBridge/` | Crate Rust : interface C autour d'`ona-core` (`ona_core_new`, `ona_core_dispatch(json)`, `ona_core_free`). Hors du workspace racine ; `Cargo.lock` repris de la racine pour avoir les mêmes versions. `build.sh` produit `OnaCore.xcframework` (macOS, Apple Silicon). |
-| `desktop/ONADesktop/Core/` | Logique de l'app, testée par `swift test` : octets du protocole, appairage et vérification des signatures (CryptoKit), serveur HTTP pour le téléphone (Network.framework), moteur de conversations qui pilote `ona-core`, service Tor. |
-| `desktop/ONADesktop/App/` | Interface SwiftUI (macOS 26, Liquid Glass) : conversations, fenêtre d'appairage, réglages. |
+| `desktop/OnaCoreBridge/` | Rust crate: C interface around `ona-core` (`ona_core_new`, `ona_core_dispatch(json)`, `ona_core_free`). Outside the root workspace; `Cargo.lock` copied from the root to get the same versions. `build.sh` produces `OnaCore.xcframework` (macOS, Apple silicon). |
+| `desktop/ONADesktop/Core/` | The app's logic, tested by `swift test`: protocol bytes, pairing and signature checks (CryptoKit), HTTP server for the phone (Network.framework), conversation engine that drives `ona-core`, Tor service. |
+| `desktop/ONADesktop/App/` | SwiftUI interface (macOS 26, Liquid Glass): conversations, pairing window, settings. |
 
-## Fonctionnement
+## How it works
 
-- **Agent** : chaque conversation a son propre `ona-core` (`Core::dispatch`). Le moteur l'avance d'une étape toutes les
-  1,5 s (`open`, `propose_plan`, `search`, `read`, `compare`, `contact`, `prepare_payment`, `pay`, `close`,
-  `exposure`) et s'arrête aux trois confirmations. Modèle, web et paiements sont les faux d'`ona-core` (`mode: mock`),
-  d'où le bandeau « Simulation ». La recherche utilise le modèle de recherche `lawyer` / `paris` de la politique de
-  démonstration d'`ona-core`, quelle que soit la demande. Depuis le 2026-11-13, une nouvelle conversation est une
-  recherche libre (voir « Free research » plus bas) ; la mission avocat n'est plus lancée que par ses tests.
-- **Confirmations** : depuis le Mac (boutons dans la conversation) ou depuis le téléphone (signées). Le paiement est
-  confirmé par `confirm_payment(digest)` : c'est le garde-fou d'`ona-core` qui compare l'empreinte.
-- **Appairage** : le Mac garde sa clé P-256 et le téléphone appairé (clé publique, jeton, dernier compteur, identifiants
-  de confirmation déjà exécutés) dans un élément du trousseau de session. Le code demande
-  `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` à chaque écriture ; l'effet réel sur le trousseau de session d'un
-  Mac (fichier, app non signée) n'est **pas vérifié**. Un élément illisible n'est jamais écrasé : l'erreur est affichée
-  et l'appairage désactivé. Fenêtre « Appairer un téléphone » : QR à usage unique valable 10 minutes, engagement puis
-  révélation de la clé du téléphone, code à 6 chiffres à comparer dans les 5 minutes (« Refuser » aussi si le
-  téléphone n'affiche aucun code). Rien n'est enregistré avant la comparaison. Un échec d'enregistrement est affiché.
-- **Téléphone** : protocole v1 (`docs/ios/protocol-draft.md`) : tout en `POST`, lectures avec le jeton d'appairage,
-  écritures signées par le téléphone avec un compteur croissant, réponses signées par le Mac. En-tête `Host` vérifié,
-  requêtes de navigateur refusées.
-- **Connexion** : « Par Tor » : serveur sur 127.0.0.1, port choisi par le système à chaque démarrage, publié en
-  service `.onion` par le démon `tor` local (Homebrew) une fois le serveur à l'écoute ; `__OwningControllerProcess`
-  arrête `tor` avec l'app. « Réseau local » (HTTP en clair sur toutes les interfaces, port 8790) : **versions Debug
-  seulement**, absent des versions Release.
-- **Serveur** : au plus 16 connexions simultanées, 10 s pour recevoir et traiter une requête.
-- **Rien sur disque pour les conversations** : en mémoire seulement (le coffre d'`ona-core` n'est pas branché).
+- **Agent**: each conversation has its own `ona-core` (`Core::dispatch`). The engine moves it one step forward every
+  1.5 s (`open`, `propose_plan`, `search`, `read`, `compare`, `contact`, `prepare_payment`, `pay`, `close`,
+  `exposure`) and stops at the three confirmations. Model, web and payments are `ona-core`'s fakes (`mode: mock`),
+  hence the "Simulation" banner. The search uses the `lawyer` / `paris` search template of `ona-core`'s demo policy,
+  whatever the request. Since 2026-11-13, a new conversation is a free research (see "Free research" below); the
+  lawyer mission is only started by its tests.
+- **Confirmations**: from the Mac (buttons in the conversation) or from the phone (signed). The payment is confirmed
+  by `confirm_payment(digest)`: it is `ona-core`'s guardrail that compares the digest.
+- **Pairing**: the Mac keeps its P-256 key and the paired phone (public key, token, last counter, identifiers of
+  confirmations already carried out) in one item of the login keychain. The code asks for
+  `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` on each write; the actual effect on a Mac's login keychain (file,
+  unsigned app) is **not checked**. An unreadable item is never overwritten: the error is shown and pairing is
+  disabled. "Pair a phone" window: single-use QR code valid for 10 minutes, commitment then reveal of the phone's key,
+  6-digit code to compare within 5 minutes ("Reject" also if the phone shows no code). Nothing is saved before the
+  comparison. A failure to save is shown.
+- **Phone**: protocol v1 (`docs/ios/protocol-draft.md`): everything is `POST`, reads with the pairing token, writes
+  signed by the phone with an increasing counter, replies signed by the Mac. `Host` header checked, browser requests
+  refused.
+- **Connection**: "Through Tor": server on 127.0.0.1, port chosen by the system at each start, published as a
+  `.onion` service by the local `tor` daemon (Homebrew) once the server is listening; `__OwningControllerProcess`
+  stops `tor` with the app. "Local network" (plain HTTP on all interfaces, port 8790): **Debug builds only**, absent
+  from Release builds.
+- **Server**: at most 16 simultaneous connections, 10 s to receive and handle a request.
+- **Nothing on disk for conversations**: in memory only (`ona-core`'s vault is not wired in).
 
-## Lancer
+## Run
 
 ```bash
-desktop/OnaCoreBridge/build.sh                 # une fois (~1 min)
-open desktop/ONADesktop/ONADesktop.xcodeproj   # cible ONADesktop
-cd desktop/ONADesktop && swift test            # tests, avec le vrai ona-core
+desktop/OnaCoreBridge/build.sh                 # once (~1 min)
+open desktop/ONADesktop/ONADesktop.xcodeproj   # ONADesktop target
+cd desktop/ONADesktop && swift test            # tests, with the real ona-core
 ```
 
-L'app n'est pas sandboxée (elle lance le `tor` de Homebrew, ce que le bac à sable interdit) et est signée « Sign to Run
-Locally ». « Hardened runtime » activé en Release (pas vérifié : pas de Xcode ici). Le bouton « Copier le texte du
-code » (presse-papiers général) n'existe qu'en Debug.
+The app is not sandboxed (it starts Homebrew's `tor`, which the sandbox forbids) and is signed "Sign to Run Locally".
+"Hardened runtime" is enabled in Release (not checked: no Xcode here). The "Copy the code text" button (general
+pasteboard) exists only in Debug.
 
-## Vérifié le 2026-11-11 (protocole v1)
+## Checked on 2026-11-11 (protocol v1)
 
-- Tests de `Core` (32, framework Testing) compilés avec `swiftc` et exécutés contre le vrai `ona-core` : vecteurs
-  partagés avec l'app Tauri (dont une signature produite par `p256`), engagement et révélation, rejeu refusé après
-  redémarrage, jeton, `Host`, navigateur, contenu signé, empreinte de paiement v2. `swift test` lui-même n'a pas pu
-  tourner (pas de Xcode dans l'environnement de test). La cible App (SwiftUI) n'a pas été compilée.
-- Bout en bout en protocole v1 le 2026-11-11, réseau local : app iPhone (simulateur) ↔ app Mac (Debug, branche
-  `desktop-onion-ready`) ↔ `ona-core`, de l'appairage au relevé (paiement de 0,6 NEAR vérifié en v2).
+- `Core` tests (32, Testing framework) compiled with `swiftc` and run against the real `ona-core`: vectors shared with
+  the Tauri app (including a signature made by `p256`), commitment and reveal, replay refused after a restart, token,
+  `Host`, browser, signed content, v2 payment digest. `swift test` itself could not run (no Xcode in the test
+  environment). The App target (SwiftUI) was not compiled.
+- End to end with protocol v1 on 2026-11-11, local network: iPhone app (simulator) ↔ Mac app (Debug, branch
+  `desktop-onion-ready`) ↔ `ona-core`, from pairing to the report (payment of 0.6 NEAR checked in v2).
 
-## Vérifié le 2026-11-10 (protocole v0, avant les correctifs)
+## Checked on 2026-11-10 (protocol v0, before the fixes)
 
-- `swift test` : 15 tests passés, dont une mission complète sur le vrai `ona-core` (plan, choix du cabinet, refus d'une
-  mauvaise empreinte par le garde-fou, paiement, relevé) et le routeur (appairage, refus avant vérification du code,
-  signatures). Rust : 2 tests du pont.
-- **Bout en bout, réseau local** : app iPhone (simulateur) ↔ app Mac ↔ `ona-core`. Appairage, création d'une
-  conversation signée, plan, choix de cabinet-b, paiement vérifié sur le téléphone puis confirmé, relevé
-  d'`ona-core` (cabinet-b, 1 NEAR) reçu par le téléphone. Appairage conservé après redémarrage de l'app Mac.
-- Barre latérale du Mac mise à jour en direct (capture de la fenêtre).
+- `swift test`: 15 tests passed, including a full mission on the real `ona-core` (plan, choice of firm, a wrong digest
+  refused by the guardrail, payment, report) and the router (pairing, refusal before the code is checked, signatures).
+  Rust: 2 tests of the bridge.
+- **End to end, local network**: iPhone app (simulator) ↔ Mac app ↔ `ona-core`. Pairing, creation of a signed
+  conversation, plan, choice of cabinet-b, payment checked on the phone then confirmed, `ona-core`'s report
+  (cabinet-b, 1 NEAR) received by the phone. Pairing kept after the Mac app restarted.
+- The Mac's sidebar updated live (window capture).
 
-## Pas vérifié
+## Not checked
 
-- Le mode Tor de l'app Mac (même torrc que `ios/MockComputer/run_onion.sh`, qui a marché).
-- L'affichage d'une conversation dans la fenêtre Mac et les confirmations depuis le Mac : pas de clic automatisé
-  possible ici, seules la liste et la fenêtre « Téléphone appairé » ont été vues.
-- Une fois, l'écoute du port n'a pas démarré après un redémarrage (cause inconnue) ; l'app affiche maintenant l'erreur
-  et réessaie toute seule.
-- Portefeuille NEAR, dépôts, vrai modèle : pas dans cette app.
-- Les appels à `ona-core` se font sur le fil principal : avec un vrai modèle (secondes par appel), la fenêtre et le
-  serveur du téléphone seraient bloqués pendant chaque appel. À déplacer sur une file dédiée avant le vrai modèle.
-- Le plafond de connexions et le délai global du serveur Swift n'ont pas de test automatique (ceux de l'app Tauri en
-  ont).
+- The Mac app's Tor mode (same torrc as `ios/MockComputer/run_onion.sh`, which worked).
+- Showing a conversation in the Mac window and confirmations from the Mac: no automated click possible here; only the
+  list and the "Paired phone" window were seen.
+- Once, listening on the port did not start after a restart (cause unknown); the app now shows the error and retries
+  on its own.
+- NEAR wallet, deposits, real model: not in this app.
+- Calls to `ona-core` are made on the main thread: with a real model (seconds per call), the window and the phone
+  server would be blocked during each call. To be moved to a dedicated queue before the real model.
+- The connection cap and the overall timeout of the Swift server have no automated test (those of the Tauri app do).
 
 ## Real model
 
@@ -108,15 +106,15 @@ window. A request tokens file elsewhere is not covered.
 ## Pool
 
 The **Pool** toolbar button opens a sheet with the pool (docs/desktop/pool-commands.md): the total, the cash, one line
-per vault (its value, "gelé" when frozen, a clock while notes are spending or waiting for their signature), and the
-operations: **Placer du cash** (enter), **Changer** and **Sortir** on a vault (switch, exit), **Payer vers un compte**
-(exit_cash), **Déposer** (deposit) and **Récupérer** (`pool_recover`). Each operation is prepared by ona-core
+per vault (its value, "frozen" for a frozen vault, a clock while notes are spending or waiting for their signature), and the
+operations: **Place cash** (enter), **Switch** and **Exit** on a vault (switch, exit), **Pay to an account**
+(exit_cash), **Deposit** (deposit) and **Recover** (`pool_recover`). Each operation is prepared by ona-core
 (`pool_prepare`), its summary shown (amount, vaults or account, what is received, what is left in the pool's cash and
 lost, exit limit, fees, warnings, network, contract, expiry; not the share price), and executed only when the person
-clicks **Confirmer** in this sheet: never from the phone, which only reads the portfolio. An `outcome unknown` error is
-shown as sent to the pool agent, result later through **Récupérer**. A deposit is prepared and its summary and wallet
+clicks **Confirm** in this sheet: never from the phone, which only reads the portfolio. An `outcome unknown` error is
+shown as sent to the pool agent, result later through **Recover**. A deposit is prepared and its summary and wallet
 call shown, without a confirm button: it is sent and signed by the person's own NEAR wallet, and connecting a wallet to
-the app is not built. Amounts typed in NEAR ("1.5", "1,5", or "tout" where the operation allows it) are turned into
+the app is not built. Amounts typed in NEAR ("1.5", "1,5", or "all" where the operation allows it) are turned into
 yoctoNEAR exactly, without floating point.
 
 Settings: `~/Library/Application Support/ONA/pool.json`, with the same keys as the Tauri app (docs/desktop/tauri.md,
@@ -151,7 +149,7 @@ service it found.
 Same as the Tauri app (docs/desktop/tauri.md, "A relay published for named clients only"): `tokens_file` is optional,
 and for an `http://…onion` relay the app's tor presents a client key made once in
 `~/Library/Application Support/ONA/tor/relay-client/`; the line to give the relay's operator is shown in the phone
-sheet ("Clé pour le relais"). Tested with unit tests; the same file layout reached a restricted service with C tor.
+sheet ("Key for the relay"). Tested with unit tests; the same file layout reached a restricted service with C tor.
 
 **A local test node** (development builds only): same `"local_node": true` as the Tauri app; the Swift side passes it to the
 bridge as `pool_direct` in Debug builds and refuses it in Release. Tested with unit tests only.
@@ -171,9 +169,9 @@ confirmation of the queries, then `research_step` until `done` (one activity ite
   refused list leaves the confirmation pending. Refusing stops the research before any search.
 - **Answer.** The text, the notes with their quote and the site they come from, the sources with title, host and URL as
   selectable text (no link opens).
-- **Actions, on the Mac only.** The person types the recipient (e-mail address or NEAR account), "Préparer" shows the
+- **Actions, on the Mac only.** The person types the recipient (e-mail address or NEAR account), "Prepare" shows the
   exact action (`research_action_prepare`) with a warning when the recipient is written in a page read, then
-  "Envoyer depuis ma messagerie" or "Payer" confirms it by its digest and carries it out once
+  "Send from my mail app" or "Pay" confirms it by its digest and carries it out once
   (`research_action_confirm`, `research_action_do`). A message's `mailto:` URL is opened with `NSWorkspace`: the person
   sends it from their mail program. The item is then marked done (`state: "done"` for the phone) and the exposure item is
   updated in place. The phone has no route for actions.

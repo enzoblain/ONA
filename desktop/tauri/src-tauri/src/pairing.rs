@@ -667,7 +667,7 @@ pub mod tests {
         let (paired, shown) = phone.pair_showing(&mut authority);
         assert_eq!(authority.awaiting.as_ref().unwrap().code, shown);
         assert!(authority.pairing_code.is_none());
-        let message = |p: &str, c: u64| protocol::chat_message(p, c, None, Some("bonjour"));
+        let message = |p: &str, c: u64| protocol::chat_message(p, c, None, Some("hello"));
         let counter = phone.next();
         let signature = phone.sign(&message(&paired.id, counter));
         assert_eq!(authority.check(Some(&paired.token), Some(&paired.id), Some(counter), Some(&signature), None, message),

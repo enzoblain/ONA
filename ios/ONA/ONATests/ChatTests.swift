@@ -83,8 +83,8 @@ final class FakeComputer: ComputerLink, @unchecked Sendable {
         }
         if path == Paths.list {
             let chats: [[String: Any]] = deleted ? [] : [
-                ["id": "chat-1", "title": "Trouver un avocat", "updated_at": 1762790000,
-                 "preview": "Il reste à confirmer le paiement.", "status": "waiting"],
+                ["id": "chat-1", "title": "Find a lawyer", "updated_at": 1762790000,
+                 "preview": "The payment still needs confirming.", "status": "waiting"],
             ]
             return (200, ["mode": "mock", "chats": chats])
         }
@@ -132,9 +132,9 @@ final class FakeComputer: ComputerLink, @unchecked Sendable {
 
     private var chatView: [String: Any] {
         guard case .payment(let payment) = pending.request else { return [:] }
-        return ["id": "chat-1", "title": "Trouver un avocat", "status": "waiting", "working": NSNull(), "items": [
-            ["id": "i-1", "kind": "user", "at": 1, "text": "Trouve-moi un avocat"],
-            ["id": "i-2", "kind": "activity", "at": 2, "tool": "search", "text": "Recherche : 2 résultats"],
+        return ["id": "chat-1", "title": "Find a lawyer", "status": "waiting", "working": NSNull(), "items": [
+            ["id": "i-1", "kind": "user", "at": 1, "text": "Find me a lawyer"],
+            ["id": "i-2", "kind": "activity", "at": 2, "tool": "search", "text": "Search: 2 results"],
             ["id": "i-3", "kind": "confirmation", "at": 3, "state": "accepted",
              "pending": ["id": "c-1", "kind": "plan", "plan": ["search"], "content": "x"]],
             ["id": "i-4", "kind": "confirmation", "at": 4, "state": "pending", "pending": [
@@ -221,7 +221,7 @@ struct PairingModelTests {
         let store = MemoryPairingStore()
         let model = model(store: store)
         await model.pair(with: payloadText(computerKey: computer.publicKey, code: "autre"))
-        #expect(model.actionError == ComputerMessages.french("unknown or used pairing code"))
+        #expect(model.actionError == ComputerMessages.english("unknown or used pairing code"))
         #expect(model.verification == nil)
         #expect(try store.load() == nil)
     }
@@ -260,11 +260,11 @@ struct ChatModelTests {
 
     @Test func eachWriteTakesANewSavedCounter() async throws {
         let model = await paired()
-        #expect(await model.startChat("  Trouve-moi un avocat  ") == "chat-1")
+        #expect(await model.startChat("  Find me a lawyer  ") == "chat-1")
         #expect(model.openChat?.id == "chat-1")
-        #expect(computer.lastWrite()?.body["text"] as? String == "Trouve-moi un avocat")
+        #expect(computer.lastWrite()?.body["text"] as? String == "Find me a lawyer")
         #expect(computer.lastWrite()?.body["counter"] as? Int == 1)
-        #expect(await model.send("Plutôt à Lyon ?", in: "chat-1"))
+        #expect(await model.send("In Lyon instead?", in: "chat-1"))
         #expect(computer.lastWrite()?.body["counter"] as? Int == 2)
         #expect(try store.load()?.counter == 2)
         #expect(model.actionError == nil)
@@ -274,7 +274,7 @@ struct ChatModelTests {
         let model = await paired()
         computer.lock.withLock { computer.refuseAll = (409, "empty or too long message") }
         #expect(await model.send("a", in: "chat-1") == false)
-        #expect(model.actionError == ComputerMessages.french("empty or too long message"))
+        #expect(model.actionError == ComputerMessages.english("empty or too long message"))
         computer.lock.withLock { computer.refuseAll = nil }
         #expect(await model.send("b", in: "chat-1"))
         #expect(computer.lastWrite()?.body["counter"] as? Int == 2)
@@ -306,9 +306,9 @@ struct ChatModelTests {
     @Test func contentIsTheDigestOfWhatIsShown() throws {
         let plan = Pending(id: "c-1", request: .plan([.search, .read]), content: "whatever the computer says")
         #expect(RemoteModel.content(of: plan) == "10b2ecd6ff60485e505b911709ed14b162137f0237abaa8aed21eee7c26edb84")
-        let offer = Offer(firmId: "cabinet-b", priceCents: 60000, delayDays: 10, sourceSpans: ["Forfait 600 euros, sous 10 jours"])
+        let offer = Offer(firmId: "cabinet-b", priceCents: 60000, delayDays: 10, sourceSpans: ["Flat fee 600 euros, within 10 days"])
         #expect(RemoteModel.content(of: Pending(id: "c-2", request: .recipient([offer])))
-                == "5127c86b14fc1406536bc274ea9c5b9e85e4a9b7e2adaf0c7b156ccf2dfb97b6")
+                == "1335a1d0959d1c26f748ad05c45f86544f82830315a1c56fd72feb93be264c07")
         let bad = Pending(id: "c-3", request: .payment(demoPayment(to: "attacker.testnet")))
         #expect(RemoteModel.content(of: bad) == nil)
         #expect(RemoteModel.content(of: bad, rejecting: true) == paymentV2Digest)
@@ -354,7 +354,7 @@ struct ChatModelTests {
         let model = RemoteModel(store: MemoryPairingStore(), makeLink: { _ in UnavailableLink(reason: "") },
                                 makeKey: { SoftwareDeviceKey() })
         await model.acceptPlan(Pending(id: "c-1", request: .plan([.search])))
-        #expect(model.actionError == "Ce téléphone n'est appairé à aucun ordinateur.")
+        #expect(model.actionError == "This phone is not paired with any computer.")
     }
 
     @Test func aLostPairingOffersToRescan() async throws {
@@ -392,7 +392,7 @@ struct ChatModelTests {
         let model = await paired()
         await model.refreshPool()
         #expect(model.pool == nil)
-        #expect(model.poolError == ComputerMessages.french("no pool wallet configured"))
+        #expect(model.poolError == ComputerMessages.english("no pool wallet configured"))
         #expect(!model.pairingLost)
     }
 
@@ -429,18 +429,18 @@ enum PoolFixtures {
 @MainActor
 @Suite("Free research")
 struct ResearchTests {
-    /// Same vector as the desktop apps (computed independently from docs/research.md).
+    /// Same vector as the desktop apps (docs/desktop/tauri.md, "Free research"); the € checks that non-ASCII text hashes the same everywhere.
     @Test func queriesDigest() {
         #expect(SignedFields.queriesDigest(id: "c-0123456789abcdef0123456789abcdef",
-                                           queries: ["plombier Lyon", "tarif déplacement plombier"])
-                == "8174711c622fea16bd82439613d544f31d2c2d8c3fb4bc1e22414a092a7cb01c")
+                                           queries: ["plumber Lyon", "plumber call-out fee in €"])
+                == "9d6f191e63db66db31141a4b0f27a2253f476ed9cc0329bbe829a174ed369abf")
     }
 
     @Test func readsTheResearchItems() throws {
         let json = #"""
         {"mode":"mock","chat":{"id":"chat-1","title":"t","status":"waiting","working":null,"items":[
-          {"id":"i1","at":1,"kind":"confirmation","state":"pending","pending":{"id":"c-1","kind":"queries","queries":["plombier Lyon"],"content":"x"}},
-          {"id":"i2","at":2,"kind":"answer","answer":"Entre 40 et 80 euros.","notes":[{"source":"s1","claim":"40 à 80 €","quote":"entre 40 et 80 euros"}],"sources":[{"handle":"s1","title":"Guide","url":"https://guide.example.org/"}]},
+          {"id":"i1","at":1,"kind":"confirmation","state":"pending","pending":{"id":"c-1","kind":"queries","queries":["plumber Lyon"],"content":"x"}},
+          {"id":"i2","at":2,"kind":"answer","answer":"Between 40 and 80 euros.","notes":[{"source":"s1","claim":"40 to 80 €","quote":"between 40 and 80 euros"}],"sources":[{"handle":"s1","title":"Guide","url":"https://guide.example.org/"}]},
           {"id":"i3","at":3,"kind":"action","action":{"index":0,"kind":"payment","purpose":"Acompte","amount":"100000000000000000000000"},"state":"done"}
         ]}}
         """#
@@ -449,10 +449,10 @@ struct ResearchTests {
         let view = try decoder.decode(ChatReply.self, from: Data(json.utf8))
         let items = view.chat.items
         guard case .confirmation(let pending, .pending) = items[0].content else { Issue.record("queries"); return }
-        #expect(pending.request == .queries(["plombier Lyon"]))
-        #expect(RemoteModel.content(of: pending) == SignedFields.queriesDigest(id: "c-1", queries: ["plombier Lyon"]))
+        #expect(pending.request == .queries(["plumber Lyon"]))
+        #expect(RemoteModel.content(of: pending) == SignedFields.queriesDigest(id: "c-1", queries: ["plumber Lyon"]))
         guard case .answer(let answer) = items[1].content else { Issue.record("answer"); return }
-        #expect(answer.notes.first?.quote == "entre 40 et 80 euros" && answer.sources.first?.handle == "s1")
+        #expect(answer.notes.first?.quote == "between 40 and 80 euros" && answer.sources.first?.handle == "s1")
         guard case .action(let action, let done) = items[2].content else { Issue.record("action"); return }
         #expect(action.kind == "payment" && action.amount == "100000000000000000000000" && done)
     }

@@ -243,10 +243,10 @@ fn exchange_then_chat() {
     let mut r = relay(&s);
     let tokens = request_tokens(&mut r, &s);
     assert_eq!(tokens.len(), Q);
-    let (status, reply) = r.chat(&json!({"token": tokens[0], "prompt": "bonjour"}));
+    let (status, reply) = r.chat(&json!({"token": tokens[0], "prompt": "hello"}));
     assert_eq!(status, 200, "{reply}");
     assert_eq!(reply["mode"], "mock", "the local fake model says so");
-    assert_eq!(reply["reply"], "echo: bonjour");
+    assert_eq!(reply["reply"], "echo: hello");
 }
 
 #[test]
