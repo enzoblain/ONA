@@ -50,10 +50,10 @@ All tests passed and the three contracts, the pool's test build and the test sta
 | `ona-pool` contract | built | **deployed on testnet** on 13/11 as `pool.ona-hugo.testnet` (test build, 2-minute admin delay), two test staking vaults | unit tests on a mocked VM; 34 checks on a local NEAR node |
 | `ona-agent` pool agent | built | **ran on testnet** on 14/11, with demo settings (batches of one request, no delay), on the team's machine, not in an enclave | unit tests; the local-node run |
 | Wallet deposit (Wallet Selector, NEP-413) | built in the desktop app | **used with a real wallet** (Meteor, testnet) on 14/11: deposit, cash notes, entry into vaults 0 and 1 | the testnet run |
-| Crowd of test users (`ona-crowd-run`) | built | **ran on testnet** on 14/11: 8 accounts of 8 deposited and entered vault 1 | `cargo test -p ona-sandbox --bin ona-crowd-run` |
+| Crowd of test users (`ona-crowd-run`) | built | **ran on testnet** on 14/11: 8 test accounts each deposited and entered vault 1 | `cargo test -p ona-sandbox --bin ona-crowd-run` |
 | `ona-mint` blind-token contract | built, gas measured | local NEAR node only, **not on testnet** | `cargo test -p ona-mint` |
 | `ona-registry` and `ona-anchor` (journal anchoring) | contract and library built | **no program submits anchors**; not deployed | `cargo test -p ona-registry -p ona-anchor` |
-| `ona-relay` (paid with blind tokens) | logic built | **the program has not run**; real calls used a small test relay outside this repository | `cargo test -p ona-server` |
+| `ona-relay` (paid with blind tokens) | logic built | **the `ona-relay` program of this repository has not run yet**; the real calls of 12–13/11 went through a different, minimal test relay (a small script outside this repository that forwards encrypted requests to NEAR AI Cloud with the team's key, published as an onion service) | `cargo test -p ona-server` |
 | Desktop app (Tauri) | built | runs the pool from the conversation on testnet (macOS, 14/11); started on GitHub's Windows and Linux machines, not used there | `cd desktop/tauri/src-tauri && cargo test --locked` |
 | iPhone app | built | paired with the desktop app over Tor on a real iPhone 16 on 14/11; sending a message from it not verified | simulator and unit tests |
 
