@@ -135,10 +135,21 @@ fn amount(words: &[String]) -> Option<u128> {
 /// one is unreadable.
 fn amount_or_all(words: &[String]) -> Option<Amount> {
     match amounts(words) {
-        (found, false) if found.is_empty() => Some(Amount::All),
+        // "All" only when no amount at all is written: a bare number ("take 1 out of vault 0") or a vague one ("half",
+        // "some", "50%") is refused rather than read as everything.
+        (found, false) if found.is_empty() && !has_unclear_amount(words) => Some(Amount::All),
         (found, false) if found.len() == 1 => Some(Amount::Near(found[0])),
         _ => None,
     }
+}
+
+/// A number written without "NEAR", other than a vault's number, or a vague quantity.
+fn has_unclear_amount(words: &[String]) -> bool {
+    words.iter().enumerate().any(|(i, w)| {
+        let vault_number = i > 0 && words[i - 1] == "vault";
+        let numeric = w.starts_with(|c: char| c.is_ascii_digit() || c == '.' || c == ',') && !w.starts_with("vault");
+        (numeric && !vault_number && !w.starts_with('#')) || w.contains('%') || matches!(w.as_str(), "half" | "some" | "part" | "portion" | "quarter")
+    })
 }
 
 /// Every vault named, with the position of its word: "vault 0", "vault0", "vault #1", "staking", "lending".
@@ -399,6 +410,10 @@ mod tests {
             "move vault 0",                            // no destination
             "put my cash in my pocket",                // no vault
             "take 0 NEAR out of vault 0",              // nothing
+            "take 1 out of vault 0",                   // no unit: never read as "all"
+            "move 0.5 from vault 0 to vault 1",        // no unit
+            "withdraw half from vault 0",              // vague
+            "put 50% of my cash in vault 0",           // vague
             "show me the news",
         ] {
             assert_eq!(parse(text), None, "{text}");
