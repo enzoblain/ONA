@@ -374,6 +374,8 @@ footer a:hover { color: var(--text); }
 .dl-switch a { font: 500 14px/20px var(--sans); color: var(--muted); text-decoration: none; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--line); transition: color 300ms var(--ease), background-color 300ms var(--ease), border-color 300ms var(--ease); }
 .dl-switch a:hover { color: var(--text); border-color: var(--line-strong); }
 .dl-switch a.on { color: var(--accent-ink); background: var(--text); border-color: var(--text); }
+.dl-sub { color: var(--muted); font-size: 14px; line-height: 20px; margin-top: 24px; }
+.dl .dl-actions:first-of-type { margin: 16px 0 8px; }
 .dl-one { max-width: 720px; padding: 40px; }
 .dl-one h3 { font-size: 48px; line-height: 52px; }
 .dl-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }

@@ -23,8 +23,8 @@ Rules this site follows:
   `src/components/Metrics.tsx`; the demo replays a recorded run (`src/data/demo.json`), it does not invent replies.
 - **No third-party request.** Fonts and scripts are bundled, and `vercel.json` sends a content security policy that
   allows this origin only. No cookie, no analytics.
-- **No download link to a file that does not exist.** `src/pages/Downloads.tsx` shows a download button for a platform
-  only once its entry has a `download` URL.
+- **No download link to a file that does not exist.** `src/pages/Downloads.tsx` links the installers of the GitHub
+  release named in `RELEASE` (v0.1.1); update it and the file names when a new version is published.
 
 Not done yet: a recorded video for the demo page, a social preview image (1200x630), and a check on real phones
 (the pages were checked in headless Chrome at 1440x900 and 390x844 only; the swipe on a touch screen and the frame rate on a real phone were not exercised).

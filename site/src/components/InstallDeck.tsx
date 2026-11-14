@@ -3,12 +3,12 @@ import { Link } from "react-router-dom";
 import { animate, motion, useMotionValue } from "motion/react";
 
 // The four ways in, as large glass cards that are browsed sideways: drag, swipe, arrow keys, the arrows or the dots.
-// No installer exists yet: each card leads to the build instructions of its own platform, and says so.
+// Each card leads to the page of its own platform, with the installers of the latest release.
 const installs = [
-  { id: "mac", name: "Mac", kind: "Desktop app", state: "Build from source", note: "The SwiftUI app, on Apple Silicon." },
-  { id: "windows", name: "Windows", kind: "Desktop app", state: "Source only, untested there", note: "The Tauri app. It has never been built on Windows yet." },
-  { id: "linux", name: "Linux", kind: "Desktop app", state: "Source only, untested there", note: "The Tauri app. It has never been built on Linux yet." },
-  { id: "iphone", name: "iPhone", kind: "Mobile app", state: "Build from source", note: "A remote control for your computer, over Tor." },
+  { id: "mac", name: "Mac", kind: "Desktop app", state: "Signed and notarized", note: "The SwiftUI app, for Apple silicon." },
+  { id: "windows", name: "Windows", kind: "Desktop app", state: "Installer, not run on a real PC yet", note: "The Tauri app, as an .exe or an .msi." },
+  { id: "linux", name: "Linux", kind: "Desktop app", state: "Packages, not run on a real machine yet", note: "The Tauri app, as an AppImage, a .deb or an .rpm." },
+  { id: "iphone", name: "iPhone", kind: "Mobile app", state: "TestFlight, not public yet", note: "A remote control for your computer, over Tor." },
 ];
 
 const SPRING = { type: "spring", stiffness: 210, damping: 28 } as const;

@@ -13,9 +13,10 @@ import demo from "../data/demo.json";
 
 const report = demo.steps[demo.steps.length - 1].reply as { model_calls: number; model_calls_mock: number };
 
+// From the README on main, 14/11/2026 ("Simulated or not done").
 const notReady = [
-  "The model, the web and the payments in the app are still fakes, and nothing is deployed on testnet.",
-  "The relay in front of the model can read the request until the client verifies the enclave's quotes.",
+  "In the apps, the model, the web and the payments are still simulated. One mission ran with the real model through Tor on 13/11/2026, outside the apps.",
+  "The pool was deployed on testnet on 13/11/2026 as a test build, and no app uses it yet. The mint is not on testnet.",
   "Nothing has been audited. Do not use real funds.",
 ];
 
