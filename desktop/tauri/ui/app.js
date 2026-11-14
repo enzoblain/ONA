@@ -861,6 +861,7 @@ async function drawPortfolio() {
   // Top: the essentials. Everything else in "Details", closed.
   setPoolBody(
     walletRow(),
+    lastRecovery ? el("p", { class: "help" }, lastRecovery) : el("p", { class: "help" }, "No recovery yet in this session."),
     el("div", {}, el("p", { class: "help" }, "Total value"), el("div", { class: "total" }, near(portfolio.total))),
     portfolio.mode === "mock" ? el("p", { class: "warn" }, "Simulation: fake pool (mock mode).") : null,
     el("div", { class: "section" }, ...compactHoldings(portfolio, privacy, info?.vaults)),
@@ -1010,6 +1011,9 @@ async function execute(preparedId) {
   await drawPortfolio();
 }
 
+/** The last recovery's outcome, shown at the top of the Pool screen until the next one. */
+let lastRecovery = null;
+
 async function recover(event) {
   // It asks the agent and reads the chain through Tor: up to a minute. Say so while it runs.
   const button = event?.currentTarget;
@@ -1017,8 +1021,11 @@ async function recover(event) {
   toast("Recovering: asking the pool agent and reading the chain through Tor…");
   try {
     const r = await pool({ cmd: "pool_recover" });
-    toast(`Recovery: ${r.spent} done, ${r.held_again} returned, ${r.still_spending} pending${r.agent_error ? ` (agent: ${r.agent_error})` : ""}.`);
+    const text = `${r.spent} done, ${r.held_again} returned, ${r.still_spending} pending${r.agent_error ? ` (agent: ${r.agent_error})` : ""}`;
+    lastRecovery = `Last recovery at ${new Date().toLocaleTimeString("en-US")}: ${text}.`;
+    toast(`Recovery: ${text}.`);
   } catch (error) {
+    lastRecovery = `Last recovery at ${new Date().toLocaleTimeString("en-US")} failed: ${error.message}`;
     toast(`Could not recover: ${error.message}`);
   }
   await drawPortfolio();
