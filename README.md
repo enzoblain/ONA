@@ -132,9 +132,6 @@ The repository's history starts on 10/11/2026, inside the build window (1 to 14 
 hackathon work. The first commit imports the prototype as the team had it on that day. Team: Hugo Thomas (core,
 contracts, relay, pool) and Enzo Blain (apps, phone protocol, Tor on iPhone, releases).
 
-Other project by the same team at NEAR HACKATHON: [Moonpacks](https://github.com/ygk94/moonpacks), memecoin
-trading-card packs as NFTs on NEAR (NFTs and Memecoins tracks). The two projects are independent.
-
 ## Libraries and AI-generated code
 
 Main libraries: `blst`, `near-sdk`, `near-sandbox`, `ed25519-dalek`, `sha2`, `chacha20poly1305`, `hkdf`, `serde_json`, `tokio`,
@@ -213,6 +210,12 @@ Test tooling, not shipped: C Tor 0.4.9.16 (Homebrew) runs the test onion service
 The iOS app (`ios/ONA`) uses only Apple frameworks (SwiftUI, Foundation, CryptoKit, Security, VisionKit). The mock
 computer (`ios/MockComputer`) uses only the Python standard library; its P-256 code (`p256.py`) is written for the mock
 only and is not meant for real keys.
+
+## Related project
+
+Some team members also built **Moonpacks** at NEAR HACKATHON (tracks `nfts`, `memecoins`): memecoin card boosters,
+a separate project with its own repository: https://github.com/ygk94/moonpacks. No code, contract or server is shared
+between the two projects.
 
 ## License
 
