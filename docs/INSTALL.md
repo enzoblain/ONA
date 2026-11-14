@@ -400,6 +400,10 @@ cargo run -p ona-agent -- init-store agent-keys.bin agent-store.log <pool accoun
 `init-keys <file> <cash tiers> [<tiers of vault 0> ...]` creates the blind-signing keys in a new private file and prints their
 public halves (base64, the `pk_g2` the contract takes): give the cash keys to `ona-deploy pool` (`ONA_POOL_CASH_TIERS`) and each
 vault's keys to `add_vault`. Every key serves one tier only. `init-store` creates the agent's store, bound to those keys and that pool.
+For a vault the guardian adds later, `add-vault-keys <file> <new file> <tiers>` writes a new key file with the same keys plus that
+vault's, and prints its public halves; the agent then needs a new store (`init-store` on the new file), so let its pending
+operations go out first. Choose share tiers worth a cash note minus its storage fee (0.002 NEAR), plus small ones: an entry spends
+whole cash notes, and what does not fit the tiers is lost (on 14/11/2026, 0.196 of 1 NEAR into tiers of 0.1 and 0.5 NEAR).
 The agent never creates a store by itself, and runs one process per store. To serve, on `127.0.0.1` only:
 
 | Variable | Value |

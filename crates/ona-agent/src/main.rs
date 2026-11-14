@@ -57,6 +57,24 @@ fn init_keys(path: &Path, cash: &str, vaults: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Copies a key file to a new one with one more vault: the same cash and vault keys, plus new keys for the added vault
+/// (for a vault the guardian adds later). The old file is left as it is; the new one is never written over an existing
+/// file. A store is tied to its keys, so the agent then needs a new store (`init-store`) for the new file.
+fn add_vault_keys(from: &Path, to: &Path, tiers: &str) -> Result<(), String> {
+    let tiers: usize = tiers.parse().map_err(|_| "the number of tiers must be a number")?;
+    let mut keys = AgentKeys::load(from)?;
+    let mut layout: Vec<usize> = keys.vaults.iter().map(Vec::len).collect();
+    layout.push(tiers);
+    let added = AgentKeys::generate(keys.cash.len(), &layout)?.vaults.pop().ok_or("no vault generated")?;
+    keys.vaults.push(added);
+    keys.save(to)?;
+    let v = keys.vaults.len() - 1;
+    for (t, pk) in keys.vault_public(v).unwrap_or_default().iter().enumerate() {
+        println!("vault {v} tier {t}: {}", B64.encode(pk));
+    }
+    Ok(())
+}
+
 fn init_store(keys: &Path, store: &Path, pool: &str) -> Result<(), String> {
     let keys = AgentKeys::load(keys)?;
     FileStore::create(store, &store_binding(&keys, pool)).map(|_| ())
@@ -155,12 +173,36 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["init-keys", path, cash, ..] => init_keys(Path::new(path), cash, &args[3..]),
+        ["add-vault-keys", from, to, tiers] => add_vault_keys(Path::new(from), Path::new(to), tiers),
         ["init-store", keys, store, pool] => init_store(Path::new(keys), Path::new(store), pool),
         ["run"] => run(),
-        _ => Err("usage: ona-agent init-keys <key-file> <cash-tiers> [<vault tiers>...] | init-store <key-file> <store-file> <pool> | run".into()),
+        _ => Err("usage: ona-agent init-keys <key-file> <cash-tiers> [<vault tiers>...] | add-vault-keys <key-file> <new-key-file> <tiers> | init-store <key-file> <store-file> <pool> | run".into()),
     };
     if let Err(e) = result {
         eprintln!("{e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_vault_is_added_with_the_same_older_keys() {
+        let dir = std::env::temp_dir().join(format!("ona-agent-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old, new) = (dir.join("old.bin"), dir.join("new.bin"));
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+        AgentKeys::generate(2, &[2]).unwrap().save(&old).unwrap();
+        add_vault_keys(&old, &new, "4").unwrap();
+        let (a, b) = (AgentKeys::load(&old).unwrap(), AgentKeys::load(&new).unwrap());
+        assert_eq!(a.cash_public(), b.cash_public(), "the cash keys are kept");
+        assert_eq!(a.vault_public(0), b.vault_public(0), "vault 0's keys are kept");
+        assert_eq!(b.vault_public(1).unwrap().len(), 4, "the added vault has its tiers");
+        assert!(add_vault_keys(&old, &new, "4").is_err(), "never written over an existing file");
+        assert!(add_vault_keys(&old, &dir.join("x.bin"), "0").is_err(), "a vault needs at least one tier");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1839,7 +1839,9 @@ fn yocto_text(value: &Value) -> String {
 
 /// The honesty label of a figure from the fake pool (ona-core's `mode: mock`).
 fn mock_label(reply: &Value) -> &'static str {
-    if reply["mode"] == "mock" { " (simulation: fake pool)" } else { "" }
+    // An error reply (a queued operation is one: "outcome unknown") carries the core's default mode, not the pool's:
+    // only a successful pool reply says which pool answered.
+    if ok(reply) && reply["mode"] == "mock" { " (simulation: fake pool)" } else { "" }
 }
 
 fn set_card_state(chat: &mut Chat, card: &str, state: &'static str) {
