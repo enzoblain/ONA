@@ -1,6 +1,6 @@
 # ONA website
 
-Three pages, as listed in the root README ("Next steps"): home, demo, downloads. A draft: not deployed.
+Three pages, as listed in the root README ("Next steps"): home, demo, downloads. Deployed on Vercel at https://ona-indol.vercel.app (14/11/2026).
 
 React with Vite. Commands, Vercel settings and how the demo recording is made are in
 [docs/INSTALL.md](../docs/INSTALL.md#the-website). Libraries and versions are in the root

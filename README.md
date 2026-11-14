@@ -188,7 +188,7 @@ Build tooling, not shipped: `.github/workflows/release.yml` builds the apps on G
 `actions/upload-artifact` v7.0.2 and `actions/download-artifact` v8.0.2, each pinned to its commit
 ([docs/RELEASE.md](docs/RELEASE.md)).
 
-Website (`site/`), pinned exactly (`package-lock.json` pins the transitive ones). The site is a draft: it is not deployed.
+Website (`site/`), pinned exactly (`package-lock.json` pins the transitive ones). The site is deployed at https://ona-indol.vercel.app.
 
 | Library | Version | Used for |
 |---|---|---|
