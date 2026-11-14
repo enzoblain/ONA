@@ -1,6 +1,6 @@
 {
  "source": "cargo run --locked -p ona-core --bin ona -- demo",
- "commit": "454e9a2",
+ "commit": "3bc7b33",
  "recorded": "2026-11-14",
  "steps": [
   {
