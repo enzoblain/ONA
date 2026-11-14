@@ -868,14 +868,14 @@ async function drawPortfolio() {
     el("div", { class: "ops" },
       el("button", { class: "primary", onclick: () => poolForm("deposit", portfolio) }, "Deposit"),
       el("button", { class: "secondary", onclick: () => poolForm("enter", portfolio, undefined, privacy) }, "Put cash in a vault"),
-      el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Withdraw")),
+      el("button", { class: "secondary", onclick: () => poolForm("exit_cash", portfolio) }, "Withdraw"),
+      el("button", { class: "secondary", onclick: recover }, "Recover pending operations")),
     el("p", { class: "help" }, "You can also ask in the chat: “how much do I have?”, “put my cash in vault 0”, “withdraw 0.5 NEAR”."),
     el("details", { class: "details" }, el("summary", {}, "Details"),
       privacy ? privacyCard(privacy) : null,
       ...holdings(portfolio, privacy, info?.vaults, false),
       info ? vaultsSection(info, privacy) : el("p", { class: "help" }, `Vault details unavailable: ${reason(i)}`),
       info ? offerSection(info) : null,
-      el("div", { class: "ops" }, el("button", { class: "secondary", onclick: recover }, "Recover pending operations")),
       el("p", { class: "help" }, `Read at ${new Date().toLocaleTimeString("en-US")}. Values at the contract's public prices; held notes only.`)),
   );
 }
@@ -1010,7 +1010,11 @@ async function execute(preparedId) {
   await drawPortfolio();
 }
 
-async function recover() {
+async function recover(event) {
+  // It asks the agent and reads the chain through Tor: up to a minute. Say so while it runs.
+  const button = event?.currentTarget;
+  if (button) { button.disabled = true; button.textContent = "Recovering… (up to a minute)"; }
+  toast("Recovering: asking the pool agent and reading the chain through Tor…");
   try {
     const r = await pool({ cmd: "pool_recover" });
     toast(`Recovery: ${r.spent} done, ${r.held_again} returned, ${r.still_spending} pending${r.agent_error ? ` (agent: ${r.agent_error})` : ""}.`);
