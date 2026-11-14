@@ -362,7 +362,7 @@ pub struct OwnedPolicy {
 pub fn near_ai_policy() -> OwnedPolicy {
     OwnedPolicy {
         systems: vec![observed_2026_11_10()],
-        compose_hashes: vec![observed_compose_2026_11_10()],
+        compose_hashes: std::iter::once(observed_compose_2026_11_10()).chain(crate::quote::observed_composes_2026_11_14()).collect(),
         accepted_tcb: accepted_tcb_statuses(),
         max_collateral_age_secs: MAX_COLLATERAL_AGE_SECS,
     }

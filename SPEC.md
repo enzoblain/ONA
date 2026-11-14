@@ -550,7 +550,10 @@ On the real report of 2026-11-10 (model `z-ai/glm-5.3-flash`, `tests/data/model-
 public key itself followed by the nonce. Its measurements are the only ones listed (`observed_2026_11_10`, `dstack-nvidia-0.5.11`): values
 seen in that one report, not published by NEAR AI. Whether other NEAR AI model machines show the same values is not verified: two
 different gateway quotes were seen on 13/11/2026, so NEAR AI runs several machines, and a model machine with other values is refused
-until they are added. Formats were checked on that report, which NEAR AI's official verifier accepted, not
+until they are added. On 14/11/2026 the client refused the model ("this deployment is not on our list"): three reports fetched
+that day showed three model machines, all with the listed system (same MRTD, RTMR0 to RTMR2 and OS image) but each with its own
+compose, none the one of 10/11. Their three compose hashes, the same in the three reports, were added
+(`observed_composes_2026_11_14`); their containers are pinned by digest. Formats were checked on that report, which NEAR AI's official verifier accepted, not
 against the verifier's source. RTMR3 events carry no digest in the log: each is
 `sha384(event_type as u32 little-endian || ":" || event || ":" || payload)`.
 

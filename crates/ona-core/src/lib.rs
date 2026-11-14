@@ -42,7 +42,7 @@ pub const MAX_PAYEES: usize = 32;
 /// Said in every exposure report with a real model call: what the model key check (`attestation`) covers, and what
 /// it does not.
 pub const ENCLAVE_TRUST_WARNING: &str =
-    "a model key is used only if an Intel-signed TDX quote binds it to this request and shows the NEAR AI system and deployment observed on 10/11/2026; not checked: the NVIDIA GPU evidence, which is not bound to that quote, and what the code of that deployment does with the prompt";
+    "a model key is used only if an Intel-signed TDX quote binds it to this request and shows the NEAR AI system and a deployment observed on 10/11 or 14/11/2026; not checked: the NVIDIA GPU evidence, which is not bound to that quote, and what the code of that deployment does with the prompt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

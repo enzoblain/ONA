@@ -128,6 +128,17 @@ pub fn observed_compose_2026_11_10() -> [u8; 32] {
     unhex("a0e3c6f4f21a60ea3f5c96bc7ef319b03a184ca2049605399275fbcea74e8c5f")
 }
 
+/// The deployments seen on 14/11/2026 for `z-ai/glm-5.3-flash`: three model machines, each with its own compose, the
+/// same in three reports fetched that day. All three run the system of `observed_2026_11_10` (same MRTD, RTMR0 to
+/// RTMR2 and OS image hash) and container images pinned by digest. Observed, not published by NEAR AI.
+pub fn observed_composes_2026_11_14() -> [[u8; 32]; 3] {
+    [
+        unhex("c900dc7304663b73b623cd5d941fbdab6f02858017b371ae28de445a16d2e2d0"),
+        unhex("e8416a02d6f7ce47baaa52e3925b934fd30834b04fc9086b363db9b1d12c729d"),
+        unhex("a7de0bba194b6466c5c7b8dcfb907b6b60404ab2ba6de8b5d0cf63c2145d6868"),
+    ]
+}
+
 fn hex32(value: &Value, field: &str) -> Result<[u8; 32], String> {
     value[field]
         .as_str()
