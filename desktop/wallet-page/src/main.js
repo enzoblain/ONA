@@ -131,7 +131,16 @@ async function main() {
     const outcome = await (await wallet()).signAndSendTransaction({
       signerId: state.account,
       receiverId: call.receiver,
-      actions: [{ type: "FunctionCall", params: { methodName: call.method, args: call.args, gas: DEPOSIT_GAS, deposit: call.attached } }],
+      // Wallet Selector 10 takes near-api-js actions (`{ functionCall: … }`, args as JSON bytes, gas and deposit as
+      // integers); the older `{ type: "FunctionCall", params }` form is refused with "Unsupported NAJ action".
+      actions: [{
+        functionCall: {
+          methodName: call.method,
+          args: Buffer.from(JSON.stringify(call.args)),
+          gas: BigInt(DEPOSIT_GAS),
+          deposit: BigInt(call.attached),
+        },
+      }],
     });
     // A wallet that navigates away comes back with the hash in the address instead (see `returned`).
     if (outcome) await deposited(outcome.transaction?.hash || outcome.transaction_outcome?.id || "");
