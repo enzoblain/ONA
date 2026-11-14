@@ -1235,8 +1235,12 @@ struct ResearchTests {
             Issue.record("done twice"); return
         }
 
-        // A payment: a NEAR account typed by the person, the amount from the answer.
-        let pay = try engine.prepareAction(chat: chat.id, item: payment.id, to: "plomberie.testnet").get()
+        // A payment: a NEAR account typed by the person, the amount from the answer. Only an allowed account can be
+        // paid (ona-core's money guardrails): this app sends no allowed list, so only the demo directory's accounts.
+        guard case .failure = engine.prepareAction(chat: chat.id, item: payment.id, to: "plomberie.testnet") else {
+            Issue.record("an account the person did not allow was accepted"); return
+        }
+        let pay = try engine.prepareAction(chat: chat.id, item: payment.id, to: "cabinet-b.testnet").get()
         #expect(pay.kind == "payment" && pay.content == "100000000000000000000000")
         let paid = try engine.doAction(chat: chat.id, item: payment.id, digest: pay.digest).get()
         guard case .payment(let tx) = paid else { Issue.record("payment"); return }
