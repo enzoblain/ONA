@@ -122,11 +122,35 @@ impl NearPool {
             Network::Tor(proxy) => crate::tor::near_client(&self.url, key, proxy),
         }
     }
+
+    /// Runs a read, again on a new client (through Tor, a new circuit) when it failed in transport: a Tor exit that
+    /// refuses the endpoint ("general SOCKS server failure") or drops the connection. Reads change nothing, so trying
+    /// again is safe. An answer from the endpoint (an error it returned) is not retried.
+    fn read<T>(&self, mut f: impl FnMut(ona_near::Client) -> Result<T, String>) -> Result<T, String> {
+        let mut last = String::new();
+        for _ in 0..READ_ATTEMPTS {
+            match f(self.client()?) {
+                Ok(v) => return Ok(v),
+                Err(e) if is_transport_error(&e) => last = e,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last)
+    }
+}
+
+/// Reads of the pool tried at most this many times, each on its own circuit through Tor.
+const READ_ATTEMPTS: usize = 4;
+
+/// A failure to reach the endpoint at all (SOCKS, connection, timeout), as opposed to an answer from it.
+fn is_transport_error(e: &str) -> bool {
+    let e = e.to_lowercase();
+    ["socks", "io:", "connection", "timed out", "timeout", "reset", "broken pipe", "eof"].iter().any(|k| e.contains(k))
 }
 
 impl PoolChain for NearPool {
     fn view(&self, method: &str, args: Value) -> Result<Value, String> {
-        self.client()?.view_final(&self.pool, method, args).map_err(|e| e.to_string())
+        self.read(|c| c.view_final(&self.pool, method, args.clone()).map_err(|e| e.to_string()))
     }
 
     fn mode(&self) -> &'static str {
@@ -138,7 +162,7 @@ impl PoolChain for NearPool {
             None => json!({"finality": "final"}),
             Some(h) => json!({"block_id": h}),
         };
-        let block = self.client()?.post("block", params).map_err(|e| e.to_string())?;
+        let block = self.read(|c| c.post("block", params.clone()).map_err(|e| e.to_string()))?;
         let header = &block["header"];
         let height = header["height"].as_u64().ok_or("unexpected block reply")?;
         let hash = header["hash"].as_str().filter(|h| !h.is_empty()).ok_or("unexpected block reply")?;
@@ -146,16 +170,11 @@ impl PoolChain for NearPool {
     }
 
     fn view_at(&self, block_hash: &str, method: &str, args: Value) -> Result<Value, String> {
-        let result = self
-            .client()?
-            .post(
-                "query",
-                json!({
-                    "request_type": "call_function", "block_id": block_hash, "account_id": self.pool,
-                    "method_name": method, "args_base64": b64(args.to_string().as_bytes()),
-                }),
-            )
-            .map_err(|e| e.to_string())?;
+        let params = json!({
+            "request_type": "call_function", "block_id": block_hash, "account_id": self.pool,
+            "method_name": method, "args_base64": b64(args.to_string().as_bytes()),
+        });
+        let result = self.read(|c| c.post("query", params.clone()).map_err(|e| e.to_string()))?;
         if result["block_hash"].as_str() != Some(block_hash) {
             return Err(format!("RPC answered {method} for another block"));
         }
@@ -1539,4 +1558,19 @@ fn prepared_id(network: &str, contract: &str, op: &str, vault: Option<u32>, amou
     h.update([0u8]);
     h.update(nonce);
     hex(&h.finalize())
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+
+    #[test]
+    fn only_failures_to_reach_the_endpoint_are_tried_again() {
+        // Seen through Tor on 14/11/2026.
+        assert!(is_transport_error("RPC request failed: io: general SOCKS server failure"));
+        assert!(is_transport_error("RPC request failed: Connection reset by peer"));
+        assert!(is_transport_error("timed out reading response"));
+        assert!(!is_transport_error("RPC request failed: http status: 429"), "an answer from the endpoint");
+        assert!(!is_transport_error("view get_vault failed: no such vault"));
+    }
 }
