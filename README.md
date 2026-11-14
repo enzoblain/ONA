@@ -1,11 +1,11 @@
 <img src="assets/logo.png" alt="ONA logo" width="120">
 
-# ONA: a prototype AI assistant designed so that no single party receives both who asks and what is asked
+# ONA: a prototype AI agent designed so that no single party receives both who asks and what is asked
 
 Built at NEAR HACKATHON (1 to 14 November 2026) · Track: Privacy & Private AI · Network: NEAR testnet · MIT ·
 **Prototype, not audited. Testnet only. Do not use real funds.**
 
-ONA runs on your own computer. With a relay configured (the demo and the apps use fakes until then, labelled `mode: mock`),
+ONA is an AI agent that runs on your own computer. With a relay configured (the demo and the apps use fakes until then, labelled `mode: mock`),
 the model receives your request with the names you protect replaced by pseudonyms, encrypted end to end for NEAR AI Cloud's
 enclave, and only after the client has checked Intel's signature over that enclave. The relay in front of the model holds the
 API key, so you need no account. With Tor enabled, the relay, the web and NEAR nodes see Tor traffic. Savings go through a NEAR
