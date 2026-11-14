@@ -183,6 +183,22 @@ Build tooling, not shipped: `.github/workflows/release.yml` builds the apps on G
 `actions/upload-artifact` v7.0.2 and `actions/download-artifact` v8.0.2, each pinned to its commit
 ([docs/RELEASE.md](docs/RELEASE.md)).
 
+Website (`site/`), pinned exactly (`package-lock.json` pins the transitive ones). The site is a draft: it is not deployed.
+
+| Library | Version | Used for |
+|---|---|---|
+| `react`, `react-dom` | 19.3.1 | the three pages |
+| `react-router-dom` | 7.18.5 | routes `/`, `/demo`, `/downloads` |
+| `motion` | 14.12.0 | entrances and scroll reveals |
+| `three` | 0.187.0 | the 3D opening of the home page: a liquid ghost (metaballs, with the `MarchingCubes` and `RoomEnvironment` helpers shipped in the package), the forest, the pit, the cave |
+| `gsap` | 3.15.1 | the timelines of that opening (look around, jump, impact, re-forming) |
+| `lenis` | 1.3.27 | smooth scrolling |
+| Decrypted Text (React Bits, David Haz) | copied at commit `14330e6`, 2026-10-15 | the title of the landing page; one file, `site/src/components/reactbits/DecryptedText.tsx`, unchanged, under MIT + Commons Clause |
+| Scanner (React Bits, David Haz) | copied at commit `cbfda76`, 2026-10-13 | a very faint backdrop behind the data and the install pages; `site/src/components/reactbits/Scanner.tsx` and `Scanner.css`, unchanged, same licence |
+| `@number-flow/react` | 0.6.2 | animated figures |
+| `@fontsource-variable/geist`, `@fontsource-variable/geist-mono` | 5.3.0 | fonts, served from the site itself |
+| `vite`, `@vitejs/plugin-react`, `typescript`, `@types/react`, `@types/react-dom`, `@types/three` | 8.3.8, 6.3.0, 7.0.2, 19.3.0, 19.3.0, 0.187.0 | build only, not shipped |
+
 Test tooling, not shipped: C Tor 0.4.9.16 (Homebrew) runs the test onion service on the developer's Mac.
 The iOS app (`ios/ONA`) uses only Apple frameworks (SwiftUI, Foundation, CryptoKit, Security, VisionKit). The mock
 computer (`ios/MockComputer`) uses only the Python standard library; its P-256 code (`p256.py`) is written for the mock
